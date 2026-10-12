@@ -13,7 +13,7 @@ mappings.py & per-operator/country name_mapping translations).
 import re
 from dataclasses import dataclass
 from pprint import pformat
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from loguru import logger
 from rapidfuzz import fuzz
@@ -146,18 +146,36 @@ class WeightedTokens:
         return ", ".join(f"'{t}':{w:g}" for t, w in zip(self.tokens, self.weights))
 
 
+class TokenScore(NamedTuple):
+    """How well one candidate's tokens match a target's in ``get_weighted_token_score``.
+
+    Attributes:
+        score (float): Weighted-average best-token-match score (0-100) with vetoes.
+        debug_score (float): What ``score`` would have been without the vetoes.
+        missed_weight (float): Target weight the candidate does not cover, generic tokens
+            excluded. Ranks a candidate saying too little.
+        remaining_weight (float): Candidate weight the target does not cover. Ranks a
+            candidate saying too much.
+    """
+
+    score: float
+    debug_score: float
+    missed_weight: float
+    remaining_weight: float
+
+
 def get_weighted_token_score(
     target: WeightedTokens, candidate: WeightedTokens, fuzz_ratio_floor: float = 60.0
-) -> tuple[float, float]:
+) -> TokenScore:
     """Get the weighted-average best-token-match score between two WeightedTokens (0-100).
 
     Each token in the target is matched against its best-fitting candidate token via
-    rapidfuzz.ratio (weighted by importance and normalized by total weight).
-    True distinctive name matches are rewarded far more than incidental matches on generic
-    (low-weight) tokens (e.g. two different EGEs both having "g1" are not weighted highly).
+    rapidfuzz.ratio (weighted by importance and normalized by total weight). True distinctive
+    name matches are rewarded far more than incidental matches on generic (low-weight) tokens.
+        e.g. two different EGEs both having "g1" are not weighted highly.
 
     For reference, some examples for rapidfuzz.ratio results for different combinations.
-    Ratio retruns a float strictly in [0, 100]:
+    Ratio returns a float strictly in [0, 100]:
         - no same letter:       fuzz.ratio("flores", "maua") = 0
         - one same letter:      fuzz.ratio("flores", "jaraqui") = ~15
         - few same letters:     fuzz.ratio("turceni", "isalnita") = ~25
@@ -166,6 +184,25 @@ def get_weighted_token_score(
         - one vowel diff:       fuzz.ratio("flores", "floras") = ~80
         - one extra letter:     fuzz.ratio("auvere", "auverre") = ~90
         - identical:            fuzz.ratio("turceni", "turceni") = 100
+
+    Scoring only considers the TARGET, so a candidate with extra tokens is not penalized.
+    This means two candidates can score identically even if one is a closer fit
+        e.g. "TER RENCA" scores 100 with "Renca power station" & "Nueva Renca power station".
+    To counteract this, the third return float measures candidate leftovers for tie-breaking.
+    Candidate tokens are iteratively compared to target tokens and, where a match exists, the
+    target tok is removed from consideration. This prevents similar toks being double-matched.
+        e.g. Entsoe's "Moneypoint" matched PPDB's "Moneypoint Timepoint" instead of GEM's
+        "Moneypoint power station" (since "Timepoint" scores 74.0 against "Moneypoint").
+    All leftover candidate token weights are summed into ``remaining_weight`` (so generic
+    count too, just less). This prevents mismatches of EGEs with similar names.
+        e.g. "PFV SAN PEDRO" and "PMGD PFV SAN PEDRO" both matched to
+        "PMGD Parque Fotovoltaico San Pedro", instead of "San Pedro Solar Plant" and
+        "PMGD Parque Fotovoltaico San Pedro", respectively. The two EGEs are 1288 km apart.
+    A candidate saying too LITTLE is invisible to that, as a subset of the target leaves
+    nothing over, so ``missed_weight`` sums the target weight it fails to cover. Generic
+    toks are excluded: only a discriminator / designator carries identity.
+        e.g. "PMGD PFV LA ESPERANZA II" matched "PFV Esperanza" instead of
+        "La Esperanza II solar project", 913 km away.
 
     Args:
         target (WeightedTokens): WeightedTokens to score.
@@ -176,11 +213,12 @@ def get_weighted_token_score(
             Defaults to 60.0.
 
     Returns:
-        tuple[float, float]: True best weighted token match score,
-            and the debugging score (what the score would have been without the vetoes)
+        TokenScore: The score, the debugging score, and the two tie-break weights.
+            All values are rounded, as a weighted average carries float noise (100.0 vs
+            100.00000000000001) that would otherwise decide a tie before any tie-break logic.
     """
     if not target.tokens or not candidate.tokens or sum(target.weights) <= 0:
-        return 0.0, 0.0
+        return TokenScore(0.0, 0.0, 0.0, 0.0)
 
     if not 0.0 <= fuzz_ratio_floor <= 100.0:
         logger.error(
@@ -192,19 +230,29 @@ def get_weighted_token_score(
     # if a target doesn't have any discriminative (full weight) tokens, it can't be matched!
     target_has_discriminator = any(t == "discriminator" for t in target.types)
     if not target_has_discriminator:
-        return 0.0, 0.0
+        return TokenScore(0.0, 0.0, 0.0, 0.0)
+
+    # Matrix of ratios (every target tok against every candidate tok). Example:
+    # target=('thermal', 'cemen', 'bio') <-> candidate=('cemen', 'bio', 'curico', 'station')
+    # --> [[33.33, 0.0, 15.38, 28.57], [100.0, 0.0, 18.18, 16.67], [0.0, 100.0, 44.44, 40.0]]
+    # -> target_ratios = rows (e.g. [33.3, 0.0,...]), cand_ratios = COLS (e.g. [33.3, 100.0])
+    ratio_matrix = [[fuzz.ratio(t, c) for c in candidate.tokens] for t in target.tokens]
 
     candidate_has_designator = any(t == "designator" for t in candidate.types)
     target_discriminator_matched = False
     weighted_sum = 0.0  # score numerator
     counted_weight = 0.0  # score denominator
+    missed_weight = 0.0  # identity-bearing target weight the candidate doesn't cover
 
-    for tok, weight, ttype in zip(target.tokens, target.weights, target.types):
-        max_ratio = max((fuzz.ratio(tok, c) for c in candidate.tokens), default=0.0)
+    for target_ratios, weight, ttype in zip(ratio_matrix, target.weights, target.types):
+        max_ratio = max(target_ratios, default=0.0)
 
-        # if ratio is below the limit, the two tokens are too dissimilar to be a match!
+        # if ratio is below the limit, two toks are too dissimilar to match (count as missed)
         if max_ratio < fuzz_ratio_floor:
             max_ratio = 0.0
+            if ttype != "generic":  # a generic tok has no identity to miss
+                missed_weight += weight
+
         elif ttype == "discriminator":
             target_discriminator_matched = True
 
@@ -219,13 +267,28 @@ def get_weighted_token_score(
         ):
             counted_weight += weight
 
-    score = weighted_sum / counted_weight if counted_weight > 0.0 else 0.0
+    score = round(weighted_sum / counted_weight, 3) if counted_weight > 0.0 else 0.0
+    missed_weight = round(missed_weight, 3)
+
+    # sum the candidate token weights that don't match with any leftover target tokens
+    free_target_idxs = list(range(len(target.tokens)))
+    remaining_weight = 0.0
+
+    for cand_ratios, weight in zip(zip(*ratio_matrix), candidate.weights):
+        # find best match with free target tokens or None if none are left (c outnumbers t)
+        best_idx = max(free_target_idxs, key=lambda i: cand_ratios[i], default=None)
+        if best_idx is not None and cand_ratios[best_idx] >= fuzz_ratio_floor:
+            free_target_idxs.remove(best_idx)
+        else:
+            remaining_weight += weight
+
+    remaining_weight = round(remaining_weight, 3)
 
     # ensure that at least one discriminative (full weight) token was matched
     if not target_discriminator_matched:
-        return 0.0, score
+        return TokenScore(0.0, score, missed_weight, remaining_weight)
 
-    return score, score
+    return TokenScore(score, score, missed_weight, remaining_weight)
 
 
 # ---------------------------------------------------------------------------

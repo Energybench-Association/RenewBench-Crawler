@@ -259,6 +259,109 @@ class TestLocatorReliability:
         assert [s.locator for s in LOCATOR_SCHEMAS] == ["gem", "ppdb", "osm"]
 
 
+class TestRankCandidate:
+    """Tests for the winner ranking that `match` sorts its winning matches by."""
+
+    @staticmethod
+    def _entry(
+        locator: str, score: float, remaining: float, missed: float = 0.0
+    ) -> tuple:
+        """Build one winning match for the ranking, with only the ranked fields set.
+
+        Args:
+            locator (str): Locator the candidate came from.
+            score (float): The match score.
+            remaining (float): Weight of the candidate's tokens the target does not cover.
+            missed (float): Identity-bearing target weight the candidate does not cover.
+
+        Returns:
+            tuple: A `WinningMatch` of (candidate, score, matched_via, missed, remaining).
+        """
+        candidate = MatchCandidate(
+            name="Plant",
+            primary_name="Plant",
+            norm_name="plant",
+            wt_string="",
+            locator=locator,
+            id=f"{locator}-1",
+            fueltype="hydro",
+            capacity=None,
+            status=None,
+            url=None,
+            lat=1.0,
+            lon=2.0,
+            country="Brazil",
+        )
+        return candidate, score, "name_fuzzy", missed, remaining
+
+    def test_score_outranks_everything(self) -> None:
+        """Happy path: a better score wins however much the candidate leaves over.
+
+        The remainder only ever breaks a tie -- it must not let a worse-scoring candidate
+        overtake a better-scoring one.
+        """
+        better = self._entry("osm", 90.0, 2.0)
+        worse = self._entry("gem", 80.0, 0.0)
+
+        ranked = sorted([worse, better], key=NameMatcher._rank_candidate, reverse=True)
+        assert ranked[0] is better
+
+    def test_remainder_breaks_a_tie_before_reliability(self) -> None:
+        """Happy path: at an equal score, the closer fit wins even from a weaker locator.
+
+        Name evidence decides first; reliability is only for what the names cannot settle.
+        This is what sends CEN's "TER RENCA" to "Renca power station" (0.2 left over)
+        rather than to "Nueva Renca power station" (1.2), 79 m apart but 329 MW different.
+        """
+        close_fit = self._entry("ppdb", 105.0, 0.2)
+        loose_fit = self._entry("gem", 105.0, 1.2)
+
+        ranked = sorted(
+            [loose_fit, close_fit], key=NameMatcher._rank_candidate, reverse=True
+        )
+        assert ranked[0] is close_fit
+
+    def test_reliability_breaks_what_the_names_cannot(self) -> None:
+        """Happy path: identical score AND remainder falls back to the locator order."""
+        gem = self._entry("gem", 105.0, 0.2)
+        osm = self._entry("osm", 105.0, 0.2)
+
+        ranked = sorted([osm, gem], key=NameMatcher._rank_candidate, reverse=True)
+        assert ranked[0] is gem
+
+    def test_missed_weight_outranks_the_remainder(self) -> None:
+        """Happy path: a candidate that says too little loses to one that says too much.
+
+        A candidate whose name is a subset of the target leaves nothing over, so the
+        remainder alone prefers it -- CEN's "PMGD PFV LA ESPERANZA II" went to
+        "PFV Esperanza" (missing "la" and "ii") over "La Esperanza II solar project",
+        913 km away. Missing identity-bearing tokens has to weigh more than leftovers.
+        """
+        says_too_little = self._entry("ppdb", 105.0, remaining=0.0, missed=0.3)
+        says_too_much = self._entry("gem", 105.0, remaining=0.1, missed=0.0)
+
+        ranked = sorted(
+            [says_too_little, says_too_much],
+            key=NameMatcher._rank_candidate,
+            reverse=True,
+        )
+        assert ranked[0] is says_too_much
+
+    def test_missed_weight_breaks_a_tie_the_remainder_cannot(self) -> None:
+        """Happy path: equal leftovers fall to which candidate covers more of the target.
+
+        Both of CEN's "LA VICTORIA" candidates left nothing over, so reliability picked the
+        one missing the target's "la" -- 1,600 km from the right plant.
+        """
+        covers_target = self._entry("osm", 105.0, remaining=0.0, missed=0.0)
+        misses_token = self._entry("ppdb", 105.0, remaining=0.0, missed=0.15)
+
+        ranked = sorted(
+            [misses_token, covers_target], key=NameMatcher._rank_candidate, reverse=True
+        )
+        assert ranked[0] is covers_target
+
+
 class TestMatchCandidateConstruction:
     """Tests for MatchCandidate's factory methods (`from_row`, `primary_from_row`).
 
