@@ -181,9 +181,13 @@ def compare_coordinates(
         sysop (str): Operator name, used to build readable per-EGE keys.
     """
     b_keys = _keys(before, sysop)
-    b = pd.DataFrame({"key": b_keys, "src": _methods(before)}).set_index("key")
+    b = pd.DataFrame(
+        {"key": b_keys, "src": _methods(before), "at": _matched_point(before)}
+    ).set_index("key")
     a_keys = _keys(after, sysop)
-    a = pd.DataFrame({"key": a_keys, "src": _methods(after)}).set_index("key")
+    a = pd.DataFrame(
+        {"key": a_keys, "src": _methods(after), "at": _matched_point(after)}
+    ).set_index("key")
 
     b_matched, a_matched = (b["src"] != UNMATCHED).sum(), (a["src"] != UNMATCHED).sum()
     print(f"  EGEs            {len(b):>6} -> {len(a):>6}")
@@ -206,7 +210,15 @@ def compare_coordinates(
         print(f"    {match_method:<16} {row['before']:>6} -> {row['after']:>6}{flag}")
 
     shared = b.index.intersection(a.index)
-    changed = shared[b.loc[shared, "src"].values != a.loc[shared, "src"].values]
+    switched_locator = shared[
+        b.loc[shared, "src"].values != a.loc[shared, "src"].values
+    ]
+    # a switch WITHIN one locator keeps the method string, so compare the coordinate too
+    switched_candidate = shared[
+        (b.loc[shared, "src"].values == a.loc[shared, "src"].values)
+        & (b.loc[shared, "at"].values != a.loc[shared, "at"].values)
+    ]
+    changed = switched_locator.union(switched_candidate)
     gained = shared[
         (b.loc[shared, "src"] == UNMATCHED).values
         & (a.loc[shared, "src"] != UNMATCHED).values
@@ -218,7 +230,8 @@ def compare_coordinates(
     print(
         f"\n  changed matches  {len(changed):>6}  "
         f"(newly matched {len(gained)}, lost {len(lost)}, "
-        f"switched source {len(changed) - len(gained) - len(lost)})"
+        f"switched locator {len(switched_locator) - len(gained) - len(lost)}, "
+        f"same locator {len(switched_candidate)})"
     )
 
     if detail and len(changed):
@@ -374,6 +387,25 @@ def _keys(df: pd.DataFrame, sysop: str) -> pd.Series:
             f"  WARNING: {duplicates} duplicate EGE key(s) - changed matches may be wrong."
         )
     return keys
+
+
+def _matched_point(df: pd.DataFrame) -> pd.Series:
+    """Return each row's matched coordinate, to catch switches a method string hides.
+
+    Two runs can pick different candidates from the SAME locator, which leaves
+    ``match_method`` identical: 16 of 28 changed ONS EGEs were invisible that way.
+
+    Args:
+        df (pd.DataFrame): Coordinates dataframe from one run.
+
+    Returns:
+        pd.Series: "lat,lon" per row, "," where the EGE is unmatched.
+    """
+    if not {"lat", "lon"}.issubset(df.columns):
+        return pd.Series("", index=df.index)
+
+    lat, lon = df["lat"].astype(str).fillna(""), df["lon"].astype(str).fillna("")
+    return lat + "," + lon
 
 
 def _methods(df: pd.DataFrame) -> pd.Series:
