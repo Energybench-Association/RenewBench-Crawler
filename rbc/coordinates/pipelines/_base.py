@@ -505,12 +505,26 @@ class BasePipeline:
             df.at[idx, "fueltype_match"] = level != "mismatch"
             df.at[idx, "fueltype_match_level"] = level
 
-        mismatches = (df["fueltype_match_level"] == "mismatch").sum()
-        if mismatches:
+        mismatches = df.index[df["fueltype_match_level"] == "mismatch"]
+        if len(mismatches):
             logger.warning(
-                f"[{self.output_stem}] Fuel-type mismatch on {mismatches} matched "
+                f"[{self.output_stem}] Fuel-type mismatch on {len(mismatches)} matched "
                 f"EGE(s) — verify these rows manually."
             )
+            # provide details on the siblings: a shared place is the ONLY evidence,
+            # so a differing fuel usually means a different EGE at the same site
+            methods = self._matched_column(df, "match_method")
+            siblings = [i for i in mismatches if str(methods[i]).endswith("sibling")]
+            if siblings:
+                logger.info(
+                    f"[{self.output_stem}] {len(siblings)} of those would have matched "
+                    f"as siblings:\n"
+                    + "\n".join(
+                        f"    {df.at[i, SYSOP_NAME_COL]} "
+                        f"({df.at[i, SYSOP_FUEL_COL]}) <- {df.at[i, 'sibling_of']}"
+                        for i in siblings
+                    )
+                )
         return df
 
     def _step_validate_region(self, df: pd.DataFrame) -> pd.DataFrame:
