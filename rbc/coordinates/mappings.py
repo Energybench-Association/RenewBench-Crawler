@@ -201,6 +201,8 @@ COUNTRY_OSM_RELATION_ID_MAP: dict[str, int] = {
 # - safely remove from "glued" names (e.g. 'ENGURIUNIT_5' → ['enguri', '5'])
 GENERIC_UNIT_TOKENS: frozenset[str] = frozenset(
     {
+        "complex",
+        "complexo",
         "unit",
         "units",
         "block",
