@@ -418,19 +418,18 @@ class BasePipeline:
         if SYSOP_FUEL_COL not in df.columns:
             df[SYSOP_FUEL_COL] = None
 
-        # 3. refine the fuel type with the subtype data if it exists & they agree
+        # 3. refine the fuel type with the subtype data, keeping both if they disagree
+        # e.g. CEN's fuel "Térmica" + subfuel "Termosolar" is solar, which "thermal" hides
         if SYSOP_FUEL_SUB_COL in df.columns:
-            subtypes = df[SYSOP_FUEL_SUB_COL]
-            # check where the two fueltypes agree, use the second (detailed) in those cases
-            refine = pd.Series(
-                [
-                    classify_fueltype_match(primary, sub)
-                    in ("exact", "compatible", "family")
-                    for primary, sub in zip(df[SYSOP_FUEL_COL], subtypes)
-                ],
-                index=df.index,
-            )
-            df[SYSOP_FUEL_COL] = subtypes.where(refine, df[SYSOP_FUEL_COL])
+            fueltypes = []
+            for primary, sub in zip(df[SYSOP_FUEL_COL], df[SYSOP_FUEL_SUB_COL]):
+                if is_missing(sub):
+                    fueltypes.append(primary)
+                elif classify_fueltype_match(primary, sub) == "mismatch":
+                    fueltypes.append(", ".join(dict.fromkeys((primary, sub))))
+                else:
+                    fueltypes.append(sub)
+            df[SYSOP_FUEL_COL] = pd.Series(fueltypes, index=df.index)
 
             # remove the sub fueltype (served its purpose, no need to keep it)
             df = df.drop(columns=[SYSOP_FUEL_SUB_COL])
@@ -667,11 +666,7 @@ class BasePipeline:
                 note=f"from other temporal resolutions: {sorted(found.values())}",
             )
 
-    def _name_match_core(
-        self,
-        df: pd.DataFrame,
-        matcher: NameMatcher,
-    ) -> pd.DataFrame:
+    def _name_match_core(self, df: pd.DataFrame, matcher: NameMatcher) -> pd.DataFrame:
         """FUZZY STEP HELPER --- Shared per-row fuzzy-match loop, used by every pipeline.
 
         The method _ensure_exact_match_columns(df) needs to have been called beforehand.

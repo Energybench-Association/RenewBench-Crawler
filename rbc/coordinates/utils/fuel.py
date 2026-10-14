@@ -9,10 +9,20 @@ from functools import lru_cache
 from rbc.coordinates.utils.values import normalize_name
 
 FUEL_UNKNOWN: frozenset[str] = frozenset({"unknown", "none", "missing"})
-# Umbrella terms as fallback for inconsistencies (e.g. locs do not have types like "peat")
+# Umbrella terms as fallback for inconsistencies (locs don't have e.g. "peat" or "petcoke")
 # - COMBUSTION = fuel types that all describe burning something
 FUEL_COMBUSTION_FAMILY: frozenset[str] = frozenset(
-    {"coal", "peat", "oil", "gas", "biomass", "bioenergy", "waste", "thermal"}
+    {
+        "coal",
+        "peat",
+        "oil",
+        "gas",
+        "biomass",
+        "bioenergy",
+        "waste",
+        "petcoke",
+        "thermal",
+    }
 )
 
 # todo: are these synonym definitions all appropriate or are some (waste/storage) too much?
