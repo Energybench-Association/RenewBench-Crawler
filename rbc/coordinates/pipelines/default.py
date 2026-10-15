@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
+from rbc.coordinates.load import Run
 from rbc.coordinates.mappings import SYSOP_NAME_COL
 from rbc.coordinates.pipelines._base import BasePipeline
 from rbc.coordinates.resources.gem import GEMLocator
@@ -24,7 +25,7 @@ class DefaultPipeline(BasePipeline):
 
     def __init__(
         self,
-        input_dir: Path,
+        run: Run,
         output_dir: Path | None = None,
         gem_loc: GEMLocator | None = None,
         osmpp_loc: OSMPPLocator | None = None,
@@ -34,7 +35,7 @@ class DefaultPipeline(BasePipeline):
         """Initializes the child class for the default pipeline.
 
         Args:
-            input_dir (Path): Path to the raw energy generation file (assuming CSV here).
+            run (Run): The operator's raw rows and what identifies them.
             output_dir (Path, optional): Path to the directory where any output files may be
                 saved. Defaults to None.
             gem_loc (GEMLocator, optional): Pre-built GEM locator to reuse. Defaults to
@@ -48,7 +49,7 @@ class DefaultPipeline(BasePipeline):
                 Defaults to None, in which case a new registry is built.
         """
         super().__init__(
-            input_dir=input_dir,
+            run=run,
             output_dir=output_dir,
             gem_loc=gem_loc,
             ppdb_loc=osmpp_loc,

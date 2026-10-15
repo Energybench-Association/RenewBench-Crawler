@@ -1,6 +1,7 @@
 # tests/coordinates/pipelines/test_init.py
 """Tests for the pipelines package's __init__ helpers."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -8,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from rbc.coordinates import pipelines
+from rbc.coordinates.load import Run
 from rbc.coordinates.pipelines import build_shared_resources, make_pipeline
 from rbc.coordinates.pipelines.default import DefaultPipeline
 from rbc.coordinates.pipelines.entsoe import EntsoePipeline
@@ -23,33 +25,29 @@ from rbc.coordinates.resources.ppm import PPMLocator
 # Fixtures
 # ----------------------------------
 @pytest.fixture
-def eia_dir(tmp_path: Path) -> Path:
-    """A real "eia" operator directory (default pipeline).
+def eia_run(make_run: Callable[..., Run]) -> Run:
+    """An "eia" run (default pipeline).
 
     Args:
-        tmp_path (Path): Pytest-provided temporary directory.
+        make_run (Callable[..., Run]): Factory for runs (s. conftest).
 
     Returns:
-        Path: The EIA CSV directory.
+        Run: An (empty) EIA run.
     """
-    csv_dir = Path(tmp_path, "eia", "1h")
-    csv_dir.mkdir(parents=True)
-    return csv_dir
+    return make_run("eia")
 
 
 @pytest.fixture
-def entsoe_zone_dir(tmp_path: Path) -> Path:
-    """A real "entsoe" operator directory (entsoe pipeline).
+def entsoe_run(make_run: Callable[..., Run]) -> Run:
+    """An "entsoe" run (entsoe pipeline), in a known bidding zone.
 
     Args:
-        tmp_path (Path): Pytest-provided temporary directory.
+        make_run (Callable[..., Run]): Factory for runs (s. conftest).
 
     Returns:
-        Path: The "entsoe/10YNL----------L" zone directory.
+        Run: An (empty) ENTSO-E run of the "10YNL----------L" zone.
     """
-    zone_dir = Path(tmp_path, "entsoe", "10YNL----------L")
-    zone_dir.mkdir(parents=True)
-    return zone_dir
+    return make_run("entsoe", name="1h_10YNL----------L", zone="10YNL----------L")
 
 
 # ----------------------------------
@@ -59,63 +57,57 @@ class TestMakePipeline:
     """Test the 'make_pipeline' function."""
 
     @pytest.mark.parametrize("eic_reg", [None, object()])
-    def test_resolves_default_pipeline(self, eia_dir: Path, eic_reg: Any) -> None:
+    def test_resolves_default_pipeline(self, eia_run: Run, eic_reg: Any) -> None:
         """Happy path: any operator other than entsoe resolves to DefaultPipeline.
 
         Providing an EIC registry should have no effect, as this can't be used by the
         default pipeline.
 
         Args:
-            eia_dir (Path): The synthetic "eia" CSV directory.
+            eia_run (Run): An "eia" run.
             eic_reg (Any): The EIC registry object (if any).
         """
-        pipeline = make_pipeline(input_dir=eia_dir, eic_reg=eic_reg)
+        pipeline = make_pipeline(run=eia_run, eic_reg=eic_reg)
         assert isinstance(pipeline, DefaultPipeline)
 
-    def test_esolves_entsoe_pipeline(self, entsoe_zone_dir: Path):
+    def test_resolves_entsoe_pipeline(self, entsoe_run: Run):
         """Happy path: the entsoe operator resolves to EntsoePipeline.
 
         Args:
-            entsoe_zone_dir (Path): The synthetic "entsoe/10YNL----------L" zone directory.
+            entsoe_run (Run): An "entsoe" run of the "10YNL----------L" zone.
         """
-        pipeline = make_pipeline(input_dir=entsoe_zone_dir)
+        pipeline = make_pipeline(run=entsoe_run)
         assert isinstance(pipeline, EntsoePipeline)
 
-    @pytest.mark.parametrize("input_dir_fix", ["eia_dir", "entsoe_zone_dir"])
-    def test_use_osm_loc(
-        self, input_dir_fix: str, request: pytest.FixtureRequest
-    ) -> None:
+    @pytest.mark.parametrize("run_fix", ["eia_run", "entsoe_run"])
+    def test_use_osm_loc(self, run_fix: str, request: pytest.FixtureRequest) -> None:
         """Happy path: both pipelines use the given (shared) Overpass locator.
 
         If a pipeline built its own locator instead, every directory would load its
         country again, and `--update` would be ignored.
 
         Args:
-            input_dir_fix (str): Name of the directory fixture (default or entsoe).
+            run_fix (str): Name of the run fixture (default or entsoe).
             request (pytest.FixtureRequest): Pytest-provided request to get the fixture.
         """
         osm_loc = OverpassLocator()
-        pipeline = make_pipeline(
-            input_dir=request.getfixturevalue(input_dir_fix), osm_loc=osm_loc
-        )
+        pipeline = make_pipeline(run=request.getfixturevalue(run_fix), osm_loc=osm_loc)
         assert pipeline.osm_loc is osm_loc
 
-    @pytest.mark.parametrize("input_dir_fix", ["eia_dir", "entsoe_zone_dir"])
-    def test_use_region_reg(
-        self, input_dir_fix: str, request: pytest.FixtureRequest
-    ) -> None:
+    @pytest.mark.parametrize("run_fix", ["eia_run", "entsoe_run"])
+    def test_use_region_reg(self, run_fix: str, request: pytest.FixtureRequest) -> None:
         """Happy path: both pipelines use the given (shared) region index.
 
         If a pipeline built its own index instead, every directory would read the
         admin-1 data again, and `resources_dir` / `--update` would be ignored.
 
         Args:
-            input_dir_fix (str): Name of the directory fixture (default or entsoe).
+            run_fix (str): Name of the run fixture (default or entsoe).
             request (pytest.FixtureRequest): Pytest-provided request to get the fixture.
         """
         region_reg = RegionRegistry()
         pipeline = make_pipeline(
-            input_dir=request.getfixturevalue(input_dir_fix), region_reg=region_reg
+            run=request.getfixturevalue(run_fix), region_reg=region_reg
         )
         assert pipeline.region_reg is region_reg
 
@@ -125,7 +117,7 @@ class TestBuildSharedResources:
 
     def test_default_pipeline(self) -> None:
         """Happy path: default pipeline builds a OSMPP ppdb, a GEM loc but no EIC registry."""
-        shared = build_shared_resources(source="eia", resources_dir=None)
+        shared = build_shared_resources(sysop="eia", resources_dir=None)
         assert isinstance(shared.ppdb_loc, OSMPPLocator)
         assert isinstance(shared.gem_loc, GEMLocator)
         assert isinstance(shared.osm_loc, OverpassLocator)
@@ -133,7 +125,7 @@ class TestBuildSharedResources:
 
     def test_entsoe_pipeline(self) -> None:
         """Happy path: entsoe pipeline builds a PPM ppdb, a GEM loc and an EIC registry."""
-        shared = build_shared_resources(source="entsoe", resources_dir=None)
+        shared = build_shared_resources(sysop="entsoe", resources_dir=None)
         assert isinstance(shared.ppdb_loc, PPMLocator)
         assert isinstance(shared.gem_loc, GEMLocator)
         assert isinstance(shared.osm_loc, OverpassLocator)
@@ -152,7 +144,7 @@ class TestBuildSharedResources:
             update (bool): Whether fresh copies were requested.
         """
         shared = build_shared_resources(
-            source="entsoe", resources_dir=tmp_path, update=update
+            sysop="entsoe", resources_dir=tmp_path, update=update
         )
 
         cast(MagicMock, pipelines.GEMLocator).assert_called_once_with(
@@ -177,7 +169,7 @@ class TestBuildSharedResources:
         Args:
             tmp_path (Path): Pytest-provided temporary directory (`resources_dir`).
         """
-        build_shared_resources(source="eia", resources_dir=tmp_path)
+        build_shared_resources(sysop="eia", resources_dir=tmp_path)
 
         cast(MagicMock, pipelines.OSMPPLocator).assert_called_once_with(
             cache_dir=Path(tmp_path, "osmpp"), update=False

@@ -10,6 +10,7 @@ and `build_shared_resources` to build the expensive, run-scoped resources
 from dataclasses import dataclass
 from pathlib import Path
 
+from rbc.coordinates.load import Run
 from rbc.coordinates.mappings import OPERATOR_METADATA
 from rbc.coordinates.pipelines._base import BasePipeline
 from rbc.coordinates.pipelines.default import DefaultPipeline
@@ -32,7 +33,7 @@ __all__ = [
 
 
 def make_pipeline(
-    input_dir: Path,
+    run: Run,
     output_dir: Path | None = None,
     gem_loc: GEMLocator | None = None,
     ppdb_loc: PPMLocator | OSMPPLocator | None = None,
@@ -40,15 +41,14 @@ def make_pipeline(
     region_reg: RegionRegistry | None = None,
     eic_reg: EICCodeRegistry | None = None,
 ) -> BasePipeline:
-    """Build the right pipeline instance (BasePipeline subclass) for `input_dir`.
+    """Build the right pipeline instance (BasePipeline subclass) for the run's operator.
 
-    Looks up the operator embedded in `input_dir`'s path and, via
-    OPERATOR_METADATA[operator]["pipeline"], resolves which concrete pipeline
+    Via OPERATOR_METADATA[run.sysop]["pipeline"], resolves which concrete pipeline
     class to build. `eic_reg` is only ever forwarded to EntsoePipeline --
     every other pipeline's constructor doesn't accept it at all.
 
     Args:
-        input_dir (Path): Path to the raw energy generation file (assuming CSV here).
+        run (Run): The operator's raw rows and what identifies them.
         output_dir (Path, optional): Path to the directory where any output files may be
             saved. Defaults to None.
         gem_loc (GEMLocator, optional): Pre-built GEM locator to reuse. Defaults to
@@ -63,23 +63,24 @@ def make_pipeline(
             to reuse. Only relevant for the entsoe pipeline; ignored otherwise.
 
     Returns:
-        BasePipeline: The concrete pipeline instance for `input_dir`.
+        BasePipeline: The concrete pipeline instance for the run's operator.
 
     Raises:
+        KeyError: If the run's operator is not a known one.
         TypeError: If `ppdb_loc` is an instance of the wrong locator class for the
             resolved pipeline (e.g. an `OSMPPLocator` passed in for an entsoe zone).
     """
-    operator = [p for p in Path(input_dir).parts if p in OPERATOR_METADATA][0]
-    pipeline_name = OPERATOR_METADATA[operator].get("pipeline", "default")
+    sysop = run.sysop
+    pipeline_name = OPERATOR_METADATA[sysop].get("pipeline", "default")
 
     if pipeline_name == "entsoe":
         if ppdb_loc is not None and not isinstance(ppdb_loc, PPMLocator):
             raise TypeError(
-                f"'{operator}' uses the entsoe pipeline, which requires a PPMLocator "
+                f"'{sysop}' uses the entsoe pipeline, which requires a PPMLocator "
                 f"for ppdb_loc, got {type(ppdb_loc).__name__}."
             )
         return EntsoePipeline(
-            input_dir=input_dir,
+            run=run,
             output_dir=output_dir,
             gem_loc=gem_loc,
             ppm_loc=ppdb_loc,
@@ -90,11 +91,11 @@ def make_pipeline(
 
     if ppdb_loc is not None and not isinstance(ppdb_loc, OSMPPLocator):
         raise TypeError(
-            f"'{operator}' uses the default pipeline, which requires an OSMPPLocator "
+            f"'{sysop}' uses the default pipeline, which requires an OSMPPLocator "
             f"for ppdb_loc, got {type(ppdb_loc).__name__}."
         )
     return DefaultPipeline(
-        input_dir=input_dir,
+        run=run,
         output_dir=output_dir,
         gem_loc=gem_loc,
         osmpp_loc=ppdb_loc,
@@ -123,13 +124,13 @@ class SharedResources:
 
 
 def build_shared_resources(
-    source: str,
+    sysop: str,
     resources_dir: Path | None,
     update: bool = False,
 ) -> SharedResources:
     """Build the expensive (network/CSV/parquet-backed) resources shared by one run.
 
-    Callers processing multiple directories for the same source in one run (e.g.
+    Callers processing multiple directories for the same sysop in one run (e.g.
     multiple ENTSO-E bidding zones) should build these once and pass them into
     `make_pipeline` for every directory, rather than paying the construction cost
     (network/CSV/parquet reads) per directory. Each resource keeps its local files in
@@ -137,8 +138,7 @@ def build_shared_resources(
     `natural_earth/`) so they are reused across runs.
 
     Args:
-        source (str): Name of the energy source, e.g. "entsoe". Used to resolve
-            which pipeline's resources are actually needed.
+        sysop (str): Name of the energy system operator, e.g. "entsoe", for getting pipeline.
         resources_dir (Path | None): Directory of the resources shared by all energy
             sources. Manually downloaded GEM tracker xlsx files are expected in its
             `gem/` subfolder (trackers missing there fall back to the files in PPM's
@@ -168,7 +168,7 @@ def build_shared_resources(
     eic_reg: EICCodeRegistry | None
 
     # locators defined by the pipeline
-    pipeline_name = OPERATOR_METADATA[source].get("pipeline", "default")
+    pipeline_name = OPERATOR_METADATA[sysop].get("pipeline", "default")
     if pipeline_name == "entsoe":
         ppdb_loc = PPMLocator(cache_dir=subdir("ppm"), update=update)
         eic_reg = EICCodeRegistry(cache_dir=subdir("eic"), update=update)

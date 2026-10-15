@@ -461,6 +461,8 @@ class TestMatchMethodColors:
                 f"{locator}_id_parent_exact",
                 f"{locator}_id_parent_fuzzy",
             }
+        # the operator's own coordinates: set by its processor, or inherited by a sibling
+        expected |= {"official_id_exact", "official_sibling"}
 
         assert set(MATCH_METHOD_COLORS) == expected
 

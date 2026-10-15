@@ -41,6 +41,9 @@ BROWSERS = ["safari", "google-chrome", "chrome"]  # browsers that display withou
 # ---------------------------------------------------------------------------
 # Define marker color by `match_method` value (created by running a pipeline).
 MATCH_METHOD_COLORS: dict[str, str] = {  # always: from most to least confident
+    # official matches (coordinates the operator supplies itself, e.g. CEN's registry)
+    "official_id_exact": "black",  # exact ID hit in the operator's own coordinates
+    "official_sibling": "gray",  # match borrowed from sibling
     # GEM matches
     "gem_id_exact": "darkblue",  # exact EIC hit in GEM
     "gem_id_parent_exact": "darkblue",  # parent EIC → exact GEM hit

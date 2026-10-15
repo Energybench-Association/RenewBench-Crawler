@@ -52,8 +52,9 @@ def parse_arguments() -> Namespace:
         type=Path,
         help=(
             "Directory where the outputs (coordinates and fuzzy matching CSV files, "
-            "map and logs) are written. If None is provided, a 'coordinates' folder in "
-            "the YAML config's dst_dir_raw will be created and used."
+            "map and logs) are written. If None is provided, a 'coordinates_cli' folder "
+            "in the YAML config's dst_dir_raw will be created and used (apart from the "
+            "processors' 'coordinates' folder in its dst_dir_proc)."
         ),
     )
     parser.add_argument(
@@ -77,7 +78,7 @@ def main() -> None:
     coordinates_cfg = cast(CoordinatesConfig, load_config(source="coordinates"))
 
     output_dir = (
-        args.output if args.output else Path(cfg.paths.dst_dir_raw, "coordinates")
+        args.output if args.output else Path(cfg.paths.dst_dir_raw, "coordinates_cli")
     )
     setup_logging(output_dir=output_dir)
 
@@ -86,7 +87,7 @@ def main() -> None:
     )
 
     perform_coordinate_finding(
-        source=args.source,
+        sysop=args.source,
         input_dirs=input_paths,
         output_dir=output_dir,
         resources_dir=coordinates_cfg.paths.resources_dir,

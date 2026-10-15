@@ -60,7 +60,7 @@ def parse_arguments() -> Namespace:
         type=Path,
         help=(
             "Earlier run directory. If None, defaults to newest CSVs in "
-            "'coordinates/archive' folder or any subfolders that contains."
+            "'coordinates_cli/archive' folder or any subfolders that contains."
         ),
     )
     parser.add_argument(
@@ -69,8 +69,8 @@ def parse_arguments() -> Namespace:
         type=Path,
         help=(
             "Later run directory. If None, defaults to newest CSVs "
-            "right in 'coordinates' folder (the live outputs from a run of "
-            "coordinate_locator.py without output_dir specified)."
+            "right in the dst_dir_raw's 'coordinates_cli' folder (the live outputs "
+            "from a run of coordinate_locator.py without output_dir specified)."
         ),
     )
     parser.add_argument(
@@ -92,7 +92,7 @@ def main() -> None:
 
     if not after_dir:
         cfg = load_config(source=args.sysop)
-        after_dir = Path(cfg.paths.dst_dir_raw, "coordinates")
+        after_dir = Path(cfg.paths.dst_dir_raw, "coordinates_cli")
 
     if not before_dir:
         archive_csvs = sorted(Path(after_dir, "archive").rglob("*.csv"))

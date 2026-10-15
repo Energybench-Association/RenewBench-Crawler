@@ -6,7 +6,7 @@ Schema definitions for different data sources.
 from pathlib import Path
 from typing import Literal, Type
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 # ----------------------------------
@@ -17,9 +17,25 @@ class Paths(BaseModel):
 
     Attributes:
         dst_dir_raw (Path): Destination directory for raw data output.
+        dst_dir_proc (Path): Destination directory for processed data outputs.
     """
 
     dst_dir_raw: Path
+    dst_dir_proc: Path | None = None
+
+    @model_validator(mode="after")
+    def _default_proc_dir(self) -> "Paths":
+        """Define a default dst_dir_proc path if none was provided."""
+        if self.dst_dir_proc is None:
+            dst_dir_proc = Path(str(self.dst_dir_raw).replace("/raw/", "/processed/"))
+
+            if dst_dir_proc == self.dst_dir_raw:
+                sysop = self.dst_dir_raw.parts[-1]
+                dst_dir_proc = Path(self.dst_dir_raw.parent, "processed", sysop)
+
+            self.dst_dir_proc = dst_dir_proc
+
+        return self
 
 
 class AccessAPI(BaseModel):
@@ -65,8 +81,8 @@ class PathValidation:
             ValueError: If the path is not writable.
         """
         for field, path in paths.model_dump().items():
-            if not isinstance(path, (str, Path)):
-                continue
+            if not isinstance(path, (str, Path)) or field == "dst_dir_proc":
+                continue  # created by the processing writing into it, not by every script
 
             try:
                 Path(path).mkdir(parents=True, exist_ok=True)

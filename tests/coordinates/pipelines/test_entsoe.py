@@ -1,6 +1,7 @@
 # tests/coordinates/pipelines/test_entsoe.py
 """Tests for EntsoePipeline's declarative pipeline steps."""
 
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -8,6 +9,7 @@ from typing import cast
 import pandas as pd
 import pytest
 
+from rbc.coordinates.load import Run
 from rbc.coordinates.mappings import OPERATOR_METADATA, SYSOP_CODE_COL
 from rbc.coordinates.match_schema import MatchCandidate
 from rbc.coordinates.pipelines.entsoe import (
@@ -23,23 +25,22 @@ from rbc.coordinates.resources.ppm import PPMLocator
 NAME_COL = OPERATOR_METADATA["entsoe"].get("name_col")
 CODE_COL = OPERATOR_METADATA["entsoe"].get("code_col")
 FUEL_COL = OPERATOR_METADATA["entsoe"].get("fuel_col")
+ZONE = "10YNL----------L"
 
 
 # ----------------------------------
 # Fixtures
 # ----------------------------------
 @pytest.fixture
-def entsoe_input_dir(tmp_path: Path) -> Path:
-    """Writes a small synthetic entsoe-shaped CSV to a real ENTSO-E zone directory.
+def entsoe_run(make_run: Callable[..., Run]) -> Run:
+    """A run of small synthetic entsoe-shaped raw df in the "10YNL----------L" zone.
 
     Args:
-        tmp_path (Path): Pytest-provided temporary directory.
+        make_run (Callable[..., Run]): Factory for runs (s. conftest).
 
     Returns:
-        Path: The "entsoe/10YNL----------L" zone directory containing the CSV.
+        Run: Two ENTSO-E rows with distinct codes, in the Dutch bidding zone.
     """
-    zone_dir = Path(tmp_path, "entsoe", "10YNL----------L")
-    zone_dir.mkdir(parents=True)
     df = pd.DataFrame(
         [
             {
@@ -54,12 +55,11 @@ def entsoe_input_dir(tmp_path: Path) -> Path:
             },
         ]
     )
-    df.to_csv(Path(zone_dir, "2024-01-01.csv"), index=False)
-    return zone_dir
+    return make_run("entsoe", df, name=f"1h_{ZONE}", zone=ZONE)
 
 
 @pytest.fixture
-def entsoe_pipeline(entsoe_input_dir: Path, tmp_path: Path) -> EntsoePipeline:
+def entsoe_pipeline(entsoe_run: Run, tmp_path: Path) -> EntsoePipeline:
     """Returns a real EntsoePipeline for "10YNL----------L", backed by fake locators.
 
     eic_reg/ppdb_loc/gem_loc/osm_loc are all faked to avoid the real network/CSV fetches
@@ -68,14 +68,14 @@ def entsoe_pipeline(entsoe_input_dir: Path, tmp_path: Path) -> EntsoePipeline:
     matching against the fake GEM data.
 
     Args:
-        entsoe_input_dir (Path): Synthetic "entsoe/10YNL----------L" zone directory.
+        entsoe_run (Run): Synthetic run in the "10YNL----------L" zone.
         tmp_path (Path): Pytest-provided temporary directory, used for output_dir.
 
     Returns:
         EntsoePipeline: Entsoe pipeline class instance for the "NL" zone.
     """
     pipeline = EntsoePipeline(
-        input_dir=entsoe_input_dir,
+        run=entsoe_run,
         output_dir=Path(tmp_path, "out"),
         gem_loc=cast(
             GEMLocator,
@@ -184,7 +184,7 @@ class TestEntsoePipelineSteps:
     """Tests for EntsoePipeline's step methods."""
 
     def test_eic_lookup_without_a_registry_still_publishes_columns(
-        self, entsoe_input_dir: Path
+        self, entsoe_run: Run
     ) -> None:
         """Failure path: with no EIC directory, enrichment is skipped, its columns not.
 
@@ -192,9 +192,9 @@ class TestEntsoePipelineSteps:
         nothing could be looked up.
 
         Args:
-            entsoe_input_dir (Path): The synthetic "entsoe/10YNL----------L" zone dir.
+            entsoe_run (Run): Synthetic run in the "10YNL----------L" zone.
         """
-        pipeline = EntsoePipeline(input_dir=entsoe_input_dir, eic_reg=None)
+        pipeline = EntsoePipeline(run=entsoe_run, eic_reg=None)
         df = pd.DataFrame([{SYSOP_CODE_COL: "11W-UNIT"}])
 
         out = pipeline._step_entsoe_eic_lookup(df)
@@ -254,15 +254,13 @@ class TestEntsoePipelineSteps:
 
         assert out.loc[0, f"{candidate.locator}.match_method"] == expected
 
-    def test_load_and_dedupe_uses_code_col(
-        self, entsoe_pipeline: EntsoePipeline
-    ) -> None:
+    def test_dedupe_uses_code_col(self, entsoe_pipeline: EntsoePipeline) -> None:
         """Happy path: dedupe uses code_col (entsoe always has one).
 
         Args:
             entsoe_pipeline (EntsoePipeline): Entsoe pipeline class instance for "NL".
         """
-        df = entsoe_pipeline._step_load_and_dedupe(pd.DataFrame())
+        df = entsoe_pipeline._step_dedupe(pd.DataFrame())
         assert len(df) == 2
         assert list(df.columns) == [NAME_COL, CODE_COL, FUEL_COL]
 

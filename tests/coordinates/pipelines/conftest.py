@@ -1,11 +1,13 @@
 # tests/coordinates/pipelines/conftest.py
 """Shared fixtures for coordinate-finding pipeline tests."""
 
+from collections.abc import Callable
 from unittest.mock import create_autospec
 
 import pandas as pd
 import pytest
 
+from rbc.coordinates.load import Run
 from rbc.coordinates.resources.eic import EICCodeRegistry
 from rbc.coordinates.resources.gem import GEMLocator
 from rbc.coordinates.resources.osmpp import OSMPPLocator
@@ -37,3 +39,24 @@ def mock_expensive_network_io(monkeypatch: pytest.MonkeyPatch) -> None:
         "rbc.coordinates.resources.overpass.OverpassLocator.get_country_df",
         lambda *args, **kwargs: pd.DataFrame(),
     )
+
+
+@pytest.fixture
+def make_run() -> Callable[..., Run]:
+    """Factory for runs as `load_runs` builds them, without touching the filesystem.
+
+    Returns:
+        Callable[..., Run]: Builds a Run of `sysop` holding `df` (empty by default),
+            named `name` and, for multi-country operators, in bidding zone `zone`.
+    """
+
+    def _make(
+        sysop: str,
+        df: pd.DataFrame | None = None,
+        name: str = "1h",
+        zone: str | None = None,
+    ) -> Run:
+        df = pd.DataFrame() if df is None else df
+        return Run(sysop=sysop, name=name, zone=zone, files=(), df=df)
+
+    return _make

@@ -23,6 +23,12 @@ NE_ADMIN1_ZIP_URL = NE_URL + NE_ADMIN1_FILE
 # Tolerance for boundary imprecision (e.g. offshore wind, hydro plants on border rivers)
 BUFFER_KM = 20.0
 
+# Map: region name a sysop uses → region name Natural Earth uses
+REGION_ALIASES: dict[str, str] = {
+    "Metropolitana de Santiago": "Región Metropolitana de Santiago",  # CL (CEN registry)
+    "Magallanes y de la Antártica Chilena": "Región de Magallanes y de la Antártica Chilena",
+}
+
 
 class RegionRegistry:
     """Admin-1 region lookup, telling whether a coordinate lies in a named region.
@@ -142,6 +148,11 @@ class RegionRegistry:
                 for alt in (strip_str(row.get(col)) or "").split("|"):
                     if name := normalize_name(alt):
                         index.setdefault(name, polys)
+
+        # 3. add the sysop's own names for regions (only where the region is this country's)
+        for alias, ne_name in REGION_ALIASES.items():
+            if (polys_ne := index.get(normalize_name(ne_name))) is not None:
+                index.setdefault(normalize_name(alias), polys_ne)
 
         return index
 

@@ -5,6 +5,10 @@ per-operator pipeline (see rbc.coordinates.pipelines):
 - ENTSO-E uses its own EIC-code-driven pipeline (EntsoePipeline),
 - every other operator uses the "default" pipeline (DefaultPipeline).
 This setup may be enhanced in the future depending on the operator-specific needs.
+
+`find_coordinates` is the entry point for callers that already hold an operator's rows
+(e.g. its processor); `perform_coordinate_finding` is the one for callers that hold
+paths, reading the CSVs and rendering a map over every directory it was given.
 """
 
 from pathlib import Path
@@ -12,26 +16,70 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
+from rbc.coordinates.load import Run, load_runs
 from rbc.coordinates.map import build_map
 from rbc.coordinates.mappings import OPERATOR_METADATA
-from rbc.coordinates.pipelines import build_shared_resources, make_pipeline
-from rbc.energy.utils import DownloadTask
+from rbc.coordinates.pipelines import (
+    SharedResources,
+    build_shared_resources,
+    make_pipeline,
+)
 
-DATE_PATTERN = DownloadTask._DATE_PATTERN  # pattern for relevant file names
-TRES_PATTERN = DownloadTask._TRES_PATTERN  # pattern for one of the parent folders
+
+def find_coordinates(
+    run: Run,
+    shared: SharedResources | None = None,
+    output_dir: Path | None = None,
+) -> pd.DataFrame:
+    """Find coordinates for one run of an operator's EGEs, returning one row per EGE.
+
+    The run's rows are expected in the operator's own column names (s. OPERATOR_METADATA);
+    deduping them to one row per EGE is the pipeline's first step. Callers processing
+    several runs should build `shared` once and pass it in every time, rather than paying
+    the construction cost (network/CSV/parquet reads) per call.
+
+    Args:
+        run (Run): The operator's raw rows and what identifies them (s. `load_runs`).
+        shared (SharedResources, Optional): Pre-built resources to reuse. Defaults to
+            None, in which case they are built for this call alone, without local files.
+        output_dir (Path | None): Path of the output directory. Defaults to None, in
+            which case no output files are written.
+
+    Returns:
+        pd.DataFrame: Enriched dataframe, one row per unique EGE.
+
+    Raises:
+        ValueError: If the source is unknown or its EGEs can't be matched by name.
+    """
+    _check_matchable(run.sysop)
+    shared = shared or build_shared_resources(sysop=run.sysop, resources_dir=None)
+
+    pipeline = make_pipeline(
+        run=run,
+        output_dir=output_dir,
+        gem_loc=shared.gem_loc,
+        ppdb_loc=shared.ppdb_loc,
+        osm_loc=shared.osm_loc,
+        region_reg=shared.region_reg,
+        eic_reg=shared.eic_reg,
+    )
+    return pipeline.run_pipeline()
 
 
 def perform_coordinate_finding(
-    source: str,
+    sysop: str,
     input_dirs: list[Path | str],
     output_dir: Path | None = None,
     resources_dir: Path | None = None,
     update: bool = False,
 ) -> None:
-    """Main entry point for coordinating location finding.
+    """Main entry point for coordinating location finding over raw CSV directories.
+
+    Reads each directory's CSVs, runs `find_coordinates` on them and renders one map
+    over all the results.
 
     Args:
-        source (str): Name of the energy source, e.g. "aemo".
+        sysop (str): Name of the energy system operator, e.g. "aemo".
         input_dirs (list[Path | str]): Paths of the directories containing input (".csv")
             files (somewhere).
         output_dir (Path | None): Path of the output directory. Defaults to None.
@@ -40,89 +88,59 @@ def perform_coordinate_finding(
             None, in which case no local resource files are read or written.
         update (bool, optional): Whether to re-fetch OSM power plant data from the OSM
             (Overpass Turbo) API. Defaults to False.
-    """
-    if source not in OPERATOR_METADATA:
-        raise ValueError(f"Unknown energy source: '{source}'")
 
-    csv_dirs: list[Path] = _collect_dirs(input_dirs)
-    csv_dirs = [d for d in csv_dirs if source in d.parts]
+    Raises:
+        ValueError: If the source is unknown or its EGEs can't be matched by name.
+    """
+    _check_matchable(sysop)
 
     # Build the expensive (network/CSV/parquet-backed) resources ONCE and share!
     shared = build_shared_resources(
-        source=source,
-        resources_dir=resources_dir,
-        update=update,
+        sysop=sysop, resources_dir=resources_dir, update=update
     )
-    logger.info(
-        f"Initialized shared resources. Analyzing {len(csv_dirs)} directories...\n--"
-        "-------------------------------------------------------------------------------"
-    )
+    logger.info("Shared resources initialized.")
 
     dataframes: list[pd.DataFrame] = []
-    labels: list[str] = []
+    map_labels: list[str] = []
 
-    for csv_dir in csv_dirs:
+    for run in load_runs(input_dirs, sysop=sysop):
+        logger.info(
+            f"Running coordinate finding for '{run.name}'\n------------------"
+            "---------------------------------------------------------------"
+        )
         try:
-            cl = make_pipeline(
-                input_dir=csv_dir,
-                output_dir=output_dir,
-                gem_loc=shared.gem_loc,
-                ppdb_loc=shared.ppdb_loc,
-                osm_loc=shared.osm_loc,
-                region_reg=shared.region_reg,
-                eic_reg=shared.eic_reg,
-            )
-            df = cl.run_pipeline()
+            df = find_coordinates(run, shared=shared, output_dir=output_dir)
 
             # Use explicit check to avoid pandas NA boolean ambiguity
             if df is not None and len(df) > 0:
                 dataframes.append(df)
-
-                # define label by csv_path parts ("<source>_<tres>" or "<source>_<tres>_<bz>")
-                label = "_".join(csv_dir.parts[csv_dir.parts.index(source) :])
-                labels.append(label)
+                map_labels.append(run.map_label)
 
         except Exception as e:
             logger.exception(
-                f"Error occurred while analysing {csv_dir}: {e}. Skipping..."
+                f"Error occurred while analysing {run.map_label}: {e}. Skipping..."
             )
 
     if dataframes:
-        build_map(dataframes, labels=labels, output_dir=output_dir)
+        build_map(dataframes, labels=map_labels, output_dir=output_dir)
     else:
         logger.warning("No results found for the given input paths.")
 
 
-def _collect_dirs(input_paths: list[Path | str]) -> list[Path]:
-    """Resolve one or more input paths into a flat, sorted list of directories.
-
-    The input list can contain:
-
-    - A single folder — a directory that directly contains the CSV files (no subdirectories).
-        Treated as one dir.
-    - A container folder — a directory whose children contain the CSV files (somewhere).
-        All subdirectories are searched and those collected that contain relevant CSVs.
-    - Any mix of the two shapes above — each element is resolved independently and the
-        results are concatenated.
+def _check_matchable(source: str) -> None:
+    """Check that this source's EGEs can be found by matching their names at all.
 
     Args:
-        input_paths (list): A list of paths of interest.
+        source (str): Name of the energy source, e.g. "aemo".
 
-    Returns:
-        list[Path]: Deduplicated, sorted list of resolved directories.
+    Raises:
+        ValueError: If the source is unknown or its EGEs can't be matched by name.
     """
-    candidates = [Path(p) for p in input_paths]
-    directories: set[Path] = set()
+    if source not in OPERATOR_METADATA:
+        raise ValueError(f"Unknown energy source: '{source}'")
 
-    for path in candidates:
-        if not path.is_dir():
-            logger.warning(f"'{path}' is not a directory — skipping!")
-            continue
-
-        for p in path.rglob("*.csv"):
-            if DATE_PATTERN.match(p.stem) and any(
-                TRES_PATTERN.match(prt) for prt in p.parts
-            ):
-                directories.add(p.parent.resolve())
-
-    return sorted(directories)
+    if not OPERATOR_METADATA[source]["name_matchable"]:
+        raise ValueError(
+            f"'{source}' names don't identify single EGEs, so they can't be name-matched. "
+            f"Its coordinates come from the operator itself (s. OPERATOR_METADATA)."
+        )

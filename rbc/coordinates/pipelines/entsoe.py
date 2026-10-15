@@ -7,6 +7,7 @@ import pandas as pd
 from loguru import logger
 
 import rbc.coordinates.resources.eic as eic
+from rbc.coordinates.load import Run
 from rbc.coordinates.mappings import SYSOP_CODE_COL, SYSOP_NAME_COL
 from rbc.coordinates.matcher import NameMatcher
 from rbc.coordinates.pipelines._base import BasePipeline
@@ -43,7 +44,7 @@ class EntsoePipeline(BasePipeline):
 
     def __init__(
         self,
-        input_dir: Path,
+        run: Run,
         output_dir: Path | None = None,
         gem_loc: GEMLocator | None = None,
         ppm_loc: PPMLocator | None = None,
@@ -54,7 +55,8 @@ class EntsoePipeline(BasePipeline):
         """Initializes the child class for the Entsoe pipeline.
 
         Args:
-            input_dir (Path): Path to the raw energy generation file (assuming CSV here).
+            run (Run): The operator's raw rows and what identifies them. Its zone must be
+                set, as it resolves the country of a multi-country operator.
             output_dir (Path, optional): Path to the directory where any output files may be
                 saved. Defaults to None.
             gem_loc (GEMLocator, optional): Pre-built GEM locator to reuse. Defaults to
@@ -71,7 +73,7 @@ class EntsoePipeline(BasePipeline):
                 matching steps find nothing (their columns are still published).
         """
         super().__init__(
-            input_dir=input_dir,
+            run=run,
             output_dir=output_dir,
             gem_loc=gem_loc,
             ppdb_loc=ppm_loc,
@@ -110,7 +112,7 @@ class EntsoePipeline(BasePipeline):
 
         if self.eic_reg is None:
             logger.warning(
-                f"[{self.output_stem}] No EIC directory: skipping EIC enrichment."
+                f"[{self.run.name}] No EIC directory: skipping EIC enrichment."
             )
             return df
 

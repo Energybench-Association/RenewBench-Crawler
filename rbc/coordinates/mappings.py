@@ -21,7 +21,7 @@ from rbc.energy.ons.mappings import FUELTYPE_MAPPING as ONS_FUEL_MAPPINGS
 class OperatorInfo(TypedDict):
     """Define parameters describing operator info, with typesetting and which are required."""
 
-    needs_coordinates: bool
+    name_matchable: bool  # whether name_col identifies single EGEs, so matching can run
     country: str
     name_col: str
     name_str_style: NotRequired[Literal["real", "code"]]  # fuzzy matching strategy
@@ -43,6 +43,10 @@ SYSOP_FUEL_COL = "sysop.fueltype"
 SYSOP_FUEL_SUB_COL = "sysop.subfueltype"
 SYSOP_REGION_COL = "sysop.region"
 
+# Locator prefix of the coordinates an operator supplies itself (e.g. CEN's registry). A
+# caller adds them before matching as "official.lat", "official.lon", "official.match_method"
+OFFICIAL_LOCATOR = "official"
+
 # Map: OperatorInfo attribute → header the data will be published under in output df
 OPERATOR_COLUMNS: dict[str, str] = {
     "name_col": SYSOP_NAME_COL,
@@ -57,19 +61,19 @@ OPERATOR_METADATA: dict[str, OperatorInfo] = {
     "adme": OperatorInfo(  # todo: check if other name_str_style def required
         country="Uruguay",
         name_col="",  # double-column format, no clear name
-        needs_coordinates=True,
+        name_matchable=True,
     ),
     "aemo": OperatorInfo(
         country="Australia",
         name_col="unit_code",
         fuel_col="unit_fueltech_id",
-        needs_coordinates=False,
+        name_matchable=False,  # its generation data already carries lat/lon per EGE
     ),
     "aeso": OperatorInfo(  # todo: check if other name_str_style def required
         country="Canada",
         name_col="Asset Name",
         fuel_col="Fuel Type",
-        needs_coordinates=True,
+        name_matchable=True,
     ),
     "cen": OperatorInfo(
         country="Chile",
@@ -80,20 +84,20 @@ OPERATOR_METADATA: dict[str, OperatorInfo] = {
         fuel_sub_col="subtipo_tecnologia",
         fuel_mapping=CEN_FUEL_MAPPINGS,
         code_col="id_central",
-        needs_coordinates=True,
+        name_matchable=True,
     ),
     "eat": OperatorInfo(  # todo: check if other name_str_style def required
         country="New Zealand",
         name_col="gen_code",
         fuel_col="fuel_code",
-        needs_coordinates=True,
+        name_matchable=True,
     ),
     "eia": OperatorInfo(
         country="United States",
         name_col="respondent-name",
         code_col="respondent",
         fuel_col="fueltype",
-        needs_coordinates=False,
+        name_matchable=False,  # a respondent is the operating company, not an EGE
     ),
     "entsoe": OperatorInfo(
         country="Europe",
@@ -104,18 +108,18 @@ OPERATOR_METADATA: dict[str, OperatorInfo] = {
         fuel_col="time_series.mkt_psrtype.psr_type",
         fuel_mapping=ENTSOE_FUEL_MAPPINGS,
         pipeline="entsoe",
-        needs_coordinates=True,
+        name_matchable=True,
     ),
     "epias": OperatorInfo(  # todo: check if other name_str_style def required
         country="Türkiye",
         name_col="powerPlantName",
-        needs_coordinates=True,
+        name_matchable=True,
     ),
     "ieso": OperatorInfo(
         country="Canada",
         name_col="Generator",
         fuel_col="Fuel Type",
-        needs_coordinates=False,
+        name_matchable=True,  # its Ontario Energy Map covers only part of the EGEs
     ),
     "ons": OperatorInfo(
         country="Brazil",
@@ -127,18 +131,18 @@ OPERATOR_METADATA: dict[str, OperatorInfo] = {
         fuel_sub_col="nom_tipocombustivel",
         fuel_mapping=ONS_FUEL_MAPPINGS,
         region_col="nom_estado",
-        needs_coordinates=True,
+        name_matchable=True,
     ),
     "rei": OperatorInfo(
         country="Japan",
         name_col="",
-        needs_coordinates=False,
+        name_matchable=False,  # reported per prefecture, never per EGE
     ),
     "taipower": OperatorInfo(  # todo: check if other name_str_style def required
         country="Taiwan",
         name_col="name",
         fuel_col="fueltype",
-        needs_coordinates=True,
+        name_matchable=True,
     ),
 }
 

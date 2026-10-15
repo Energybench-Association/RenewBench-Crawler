@@ -103,6 +103,33 @@ class TestClassifyMatch:
                 "Absurdistan", "Testshire", (50.5, 10.5)
             ) == ("unknown")
 
+    def test_operator_alias_resolves_to_its_region(
+        self, admin1_gdf: gpd.GeoDataFrame
+    ) -> None:
+        """Happy path: an operator's own name for a region resolves to that region.
+
+        CEN's registry says "Metropolitana de Santiago" where Natural Earth says "Región
+        Metropolitana de Santiago": without the alias, no EGE there got a region check.
+        An alias whose region isn't the country's resolves to nothing, never elsewhere.
+
+        Args:
+            admin1_gdf (gpd.GeoDataFrame): Stand-in admin-1 frame.
+        """
+        aliases = {"Test County": "Testshire", "Lost County": "Elsewhereshire"}
+        with (
+            patch(f"{NE_MODULE}.gpd.read_file", return_value=admin1_gdf),
+            patch.dict(f"{NE_MODULE}.REGION_ALIASES", aliases, clear=True),
+        ):
+            registry = RegionRegistry()
+            assert (
+                registry.classify_match("Testland", "Test County", (50.5, 10.5))
+                == "within_borders"
+            )
+            assert (
+                registry.classify_match("Testland", "Lost County", (50.5, 10.5))
+                == "unknown"
+            )
+
 
 # ----------------------------------
 # Tests - RegionRegistry (caching)

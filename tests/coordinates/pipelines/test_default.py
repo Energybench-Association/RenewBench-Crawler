@@ -1,6 +1,7 @@
 # tests/coordinates/pipelines/test_default.py
 """Tests for DefaultPipeline's declarative pipeline steps."""
 
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -8,6 +9,7 @@ from typing import cast
 import pandas as pd
 import pytest
 
+from rbc.coordinates.load import Run
 from rbc.coordinates.pipelines.default import DefaultPipeline
 from rbc.coordinates.resources.gem import GEMLocator
 from rbc.coordinates.resources.osmpp import OSMPPLocator
@@ -18,18 +20,13 @@ from rbc.coordinates.resources.overpass import OverpassLocator
 # Fixtures
 # ----------------------------------
 @pytest.fixture
-def eia_input_dir(tmp_path: Path) -> Path:
-    """Writes a small synthetic eia-shaped CSV to a real "eia" operator directory.
-
-    Args:
-        tmp_path (Path): Pytest-provided temporary directory.
+def eia_df() -> pd.DataFrame:
+    """A small synthetic set of eia-shaped dataframe of raw rows.
 
     Returns:
-        Path: The EIA subdirectory containing an exemplary CSV file.
+        pd.DataFrame: Two EIA rows with distinct codes and names.
     """
-    csv_dir = Path(tmp_path, "eia", "1h")
-    csv_dir.mkdir(parents=True)
-    df = pd.DataFrame(
+    return pd.DataFrame(
         [
             {
                 "respondent-name": "Riverside Plant Unit 1",
@@ -43,23 +40,24 @@ def eia_input_dir(tmp_path: Path) -> Path:
             },
         ]
     )
-    df.to_csv(Path(csv_dir, "2024-01-01.csv"), index=False)
-    return csv_dir
 
 
 @pytest.fixture
-def eia_pipeline(eia_input_dir: Path, tmp_path: Path) -> DefaultPipeline:
+def eia_pipeline(
+    eia_df: pd.DataFrame, tmp_path: Path, make_run: Callable[..., Run]
+) -> DefaultPipeline:
     """Returns a real DefaultPipeline for "eia", backed entirely by fake locators.
 
     Args:
-        eia_input_dir (Path): The EIA subdirectory containing an exemplary CSV file.
+        eia_df (pd.DataFrame): Synthetic eia-shaped raw rows.
         tmp_path (Path): Pytest-provided temporary directory, used for output_dir.
+        make_run (Callable[..., Run]): Factory for runs (s. conftest).
 
     Returns:
         DefaultPipeline: Default pipeline class instance for "eia" operator.
     """
     pipeline = DefaultPipeline(
-        input_dir=eia_input_dir,
+        run=make_run("eia", eia_df),
         output_dir=Path(tmp_path, "out"),
         gem_loc=cast(
             GEMLocator,
@@ -119,7 +117,7 @@ class TestDefaultPipelineRunPipeline:
         """Happy path: the full default pipeline runs end-to-end without error.
 
         No real eia test data is available locally to verify actual match
-        quality -- this proves the wiring holds together (load&dedupe -> fuzzy
+        quality -- this proves the wiring holds together (dedupe -> fuzzy
         match against GEM+OSM -> fuel validation -> sibling fallback ->
         finalize) using synthetic data, entirely offline.
 
@@ -138,19 +136,17 @@ class TestDefaultPipelineRunPipeline:
 class TestDefaultPipelineSteps:
     """Tests for DefaultPipeline's step methods."""
 
-    def test_load_and_dedupe_uses_code_col(self, eia_pipeline: DefaultPipeline) -> None:
+    def test_dedupe_uses_code_col(self, eia_pipeline: DefaultPipeline) -> None:
         """Happy path: dedupe uses code_col when the operator has one (e.g. eia).
 
         Args:
             eia_pipeline (DefaultPipeline): Default pipeline class instance for "eia".
         """
-        df = eia_pipeline._step_load_and_dedupe(pd.DataFrame())
+        df = eia_pipeline._step_dedupe(pd.DataFrame())
         assert len(df) == 2  # both rows have distinct respondent codes
         assert list(df.columns) == ["respondent-name", "respondent", "fueltype"]
 
-    def test_load_and_dedupe_fallback_to_name(
-        self, eia_pipeline: DefaultPipeline
-    ) -> None:
+    def test_dedupe_fallback_to_name(self, eia_pipeline: DefaultPipeline) -> None:
         """Failure path: with no code_col, dedupe falls back to name_col.
 
         Args:
@@ -158,7 +154,7 @@ class TestDefaultPipelineSteps:
                 code_col is overridden to None here.
         """
         eia_pipeline.code_col = None
-        df = eia_pipeline._step_load_and_dedupe(pd.DataFrame())
+        df = eia_pipeline._step_dedupe(pd.DataFrame())
         assert len(df) == 2  # both rows have distinct respondent-name values too
         assert set(df["respondent-name"]) == {
             "Riverside Plant Unit 1",
@@ -220,6 +216,9 @@ class TestDefaultPipelineHelpers:
                 "ppdb.fueltype": ["hydro", None],
                 "ppdb.geometry": ["POINT (-90 40)", None],  # a per-locator extra column
                 "ppdb.match_score": [98.5, None],
+                "official.lat": [None, None],
+                "official.lon": [None, None],
+                "official.match_method": [None, None],
                 "gem.lat": [None, None],
                 "gem.lon": [None, None],
                 "gem.match_method": [None, None],

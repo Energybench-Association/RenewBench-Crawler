@@ -21,7 +21,9 @@ import country_converter as coco
 import pandas as pd
 from loguru import logger
 
+from rbc.coordinates.load import Run
 from rbc.coordinates.mappings import (
+    OFFICIAL_LOCATOR,
     OPERATOR_COLUMNS,
     OPERATOR_METADATA,
     SYSOP_FUEL_COL,
@@ -40,14 +42,15 @@ from rbc.coordinates.utils.fuel import classify_fueltype_match
 from rbc.coordinates.utils.tokenizer import NameTokenizer
 from rbc.coordinates.utils.values import is_missing, normalize_name, strip_str
 from rbc.energy.entsoe.mappings import ACTIVE_ZONES_METADATA
-from rbc.energy.utils import DownloadTask, MissingDataError, load_df_from_file
+from rbc.energy.utils import MissingDataError
 
-TRES_PATTERN = DownloadTask._TRES_PATTERN  # temporal res dir names ("1h", "15min")
-DATE_PATTERN = DownloadTask._DATE_PATTERN  # data file stems ("2020-01-05")
-
-SORTED_LOCATORS = sorted(
-    LOCATOR_RELIABILITY, key=lambda loc: LOCATOR_RELIABILITY[loc], reverse=True
-)
+# the operator's own coordinates take precedence over every matched locator's
+SORTED_LOCATORS = [
+    OFFICIAL_LOCATOR,
+    *sorted(
+        LOCATOR_RELIABILITY, key=lambda loc: LOCATOR_RELIABILITY[loc], reverse=True
+    ),
+]
 
 
 class BasePipeline:
@@ -73,7 +76,7 @@ class BasePipeline:
 
     def __init__(
         self,
-        input_dir: Path,
+        run: Run,
         output_dir: Path | None,
         gem_loc: GEMLocator | None,
         ppdb_loc: PPMLocator | OSMPPLocator | None,
@@ -83,7 +86,9 @@ class BasePipeline:
         """Initialize BasePipeline class.
 
         Args:
-            input_dir (Path): Path to the raw energy generation file (assuming CSV here).
+            run (Run): The operator's raw rows and what identifies them (s. `load_runs`). The
+                rows are deduped to one per EGE by the first step, so a caller can hand
+                over its generation data as it is.
             output_dir (Path, optional): Path to the directory where any output files may be
                 saved. If None, output files are not saved.
             gem_loc (GEMLocator, optional): Pre-built GEM locator to reuse. If None,
@@ -99,6 +104,8 @@ class BasePipeline:
 
         Raises:
             TypeError: If this class is instantiated instead of using a subclass.
+            ValueError: If the operator is unknown, its metadata is unusable, or a
+                multi-country operator's run has no (or an unknown) zone.
         """
         if type(self) is BasePipeline:
             raise TypeError(
@@ -107,7 +114,7 @@ class BasePipeline:
 
         # validation runs after every matching step, so it also covers inherited matches
         self.ALL_STEPS: list[str] = [
-            "_step_load_and_dedupe",
+            "_step_dedupe",
             "_step_prepare_matching",
             *self.STEPS,
             "_step_validate_fueltype",
@@ -115,82 +122,68 @@ class BasePipeline:
             "_step_finalize",
         ]
 
-        self.input_dir = input_dir
+        self.run = run
+        self.sysop = run.sysop
+
         self.output_dir = output_dir
         if self.output_dir:
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # unique output-file stem (e.g. "15min_10YRO-TEL------P")
-        self.output_stem = (
-            f"{input_dir.parent.name}_{input_dir.name}"
-            if TRES_PATTERN.match(input_dir.parent.name)
-            else input_dir.name
-        )
+        if self.sysop not in OPERATOR_METADATA:
+            raise ValueError(f"No metadata defined for operator '{self.sysop}'!")
+        meta = OPERATOR_METADATA[self.sysop]
 
-        if not self.input_dir.is_dir():
-            raise ValueError(f"Input directory '{input_dir}' is not a directory!")
+        self.country = meta["country"]
+        self.name_col = meta["name_col"]
+        self.name_str_style = meta.get("name_str_style", "code")
+        raw_name_mapping = meta.get("name_mapping", {})
+        self.code_col = meta.get("code_col")
+        self.fuel_col = meta.get("fuel_col")
+        self.fuel_sub_col = meta.get("fuel_sub_col")
+        self.fuel_mapping = meta.get("fuel_mapping", {})
+        self.region_col = meta.get("region_col")
 
-        try:
-            self.sysop = [p for p in self.input_dir.parts if p in OPERATOR_METADATA][0]
-            meta = OPERATOR_METADATA[self.sysop]
-
-            self.country = meta["country"]
-            self.name_col = meta["name_col"]
-            self.name_str_style = meta.get("name_str_style", "code")
-            raw_name_mapping = meta.get("name_mapping", {})
-            self.code_col = meta.get("code_col")
-            self.fuel_col = meta.get("fuel_col")
-            self.fuel_sub_col = meta.get("fuel_sub_col")
-            self.fuel_mapping = meta.get("fuel_mapping", {})
-            self.region_col = meta.get("region_col")
-
-            if self.name_col == "":
-                raise ValueError(
-                    f"No 'name_col' name defined in OPERATOR_METADATA for "
-                    f"'{[self.sysop]}':\n{meta}"
-                )
-
-            if self.fuel_col is None and self.fuel_sub_col is not None:
-                raise ValueError(
-                    f"fuel_sub_col '{self.fuel_sub_col}' defined without a fuel_col in "
-                    f"OPERATOR_METADATA for '{[self.sysop]}'! No sub allowed without a fuel!"
-                )
-
-            self.country_code: str | None = None
-            if self.country == "Europe":
-                bz = self.input_dir.stem
-                self.country = str(ACTIVE_ZONES_METADATA[bz]["country"])
-                self.country_code = str(ACTIVE_ZONES_METADATA[bz]["alpha2"])
-                nested_mapping = cast(dict[str, dict[str, str]], raw_name_mapping)
-                self.name_mapping = nested_mapping.get(self.country_code, {})
-            else:
-                self.country_code = coco.convert(names=self.country, to="ISO2")
-                self.name_mapping = cast(dict[str, str], raw_name_mapping)
-
-            if self.country_code == "not found":
-                self.country_code = None
-                logger.warning(
-                    f"No country code found for {self.country}! OSM matching not possible."
-                )
-
-            # Map: operator's original column headers → column headers for output storing
-            meta_dict: dict[str, Any] = dict(meta)  # convert for variable key access
-            self.sysop_cols: dict[str, str] = {
-                meta_dict[attr]: header
-                for attr, header in OPERATOR_COLUMNS.items()
-                if meta_dict.get(attr)
-            }
-
-        except IndexError:
-            raise ValueError(f"No country match found for '{self.input_dir}'!")
-
-        except KeyError as e:
+        if self.name_col == "":
             raise ValueError(
-                f"No country match found in Europe for '{self.input_dir}': {e}"
+                f"No 'name_col' name defined in OPERATOR_METADATA for "
+                f"'{[self.sysop]}':\n{meta}"
             )
 
-        except ValueError as e:
-            raise e
+        if self.fuel_col is None and self.fuel_sub_col is not None:
+            raise ValueError(
+                f"fuel_sub_col '{self.fuel_sub_col}' defined without a fuel_col in "
+                f"OPERATOR_METADATA for '{[self.sysop]}'! No sub allowed without a fuel!"
+            )
+
+        self.country_code: str | None = None
+        if self.country == "Europe":
+            zone_meta = ACTIVE_ZONES_METADATA.get(run.zone or "")
+            if zone_meta is None:
+                raise ValueError(
+                    f"'{self.sysop}' spans several countries, so it needs a known zone to "
+                    f"resolve one by - got '{run.zone}' (s. ACTIVE_ZONES_METADATA)."
+                )
+            self.country = str(zone_meta["country"])
+            self.country_code = str(zone_meta["alpha2"])
+            nested_mapping = cast(dict[str, dict[str, str]], raw_name_mapping)
+            self.name_mapping = nested_mapping.get(self.country_code, {})
+        else:
+            self.country_code = coco.convert(names=self.country, to="ISO2")
+            self.name_mapping = cast(dict[str, str], raw_name_mapping)
+
+        if self.country_code == "not found":
+            self.country_code = None
+            logger.warning(
+                f"No country code found for {self.country}! OSM matching not possible."
+            )
+
+        # Map: operator's original column headers → column headers for output storing
+        meta_dict: dict[str, Any] = dict(meta)  # convert for variable key access
+        self.sysop_cols: dict[str, str] = {
+            meta_dict[attr]: header
+            for attr, header in OPERATOR_COLUMNS.items()
+            if meta_dict.get(attr)
+        }
 
         # Pre-build tokenizer for later use
         self.tok: NameTokenizer = NameTokenizer(
@@ -228,7 +221,7 @@ class BasePipeline:
             df = getattr(self, step_name)(df)
 
             # stop if the first step didn't return a populated df with which to continue work
-            if step_name == "_step_load_and_dedupe" and len(df) == 0:
+            if step_name == "_step_dedupe" and len(df) == 0:
                 break
 
         return df
@@ -246,7 +239,7 @@ class BasePipeline:
         Args:
             df (pd.DataFrame): The working dataframe of SysOp (target EGE) data.
         """
-        for loc in SORTED_LOCATORS:  # currently: "gem", "ppdb", "osm"
+        for loc in SORTED_LOCATORS:  # currently: "official", "gem", "ppdb", "osm"
             for col in [f"{loc}.lat", f"{loc}.lon", f"{loc}.match_method"]:
                 if col not in df.columns:
                     df[col] = None
@@ -291,18 +284,33 @@ class BasePipeline:
         """
         return cls._matched_column(df, column="lat").isna()
 
+    @staticmethod
+    def _matched_officially(df: pd.DataFrame) -> pd.Series:
+        """Check which target EGEs carry their own official coordinates.
+
+        These come from the same source as the EGE data, so validation never vetoes them.
+        Official coordinates inherited from a sibling are an inference, so they don't count.
+
+        Args:
+            df (pd.DataFrame): The working dataframe of SysOp (target EGE) data.
+
+        Returns:
+            pd.Series: List of bool values, True if a target EGE has its own official ones.
+        """
+        return df[f"{OFFICIAL_LOCATOR}.lat"].notna() & df["sibling_of"].isna()
+
     # ------------------------------------------------------------------
     # SHARED STEP METHODS (run by every pipeline)
     # ------------------------------------------------------------------
-    def _step_load_and_dedupe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """INITIALIZATION STEP --- Load raw SysOp CSVs, dedupe to one row per unique EGE.
+    def _step_dedupe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """INITIALIZATION STEP --- Dedupe the raw SysOp rows to one row per unique EGE.
 
         EGE identity is defined by the code_col value where it exists and name_col where not
         - per row, since some EGEs don't have one (e.g. CEN provides none for its batteries).
         Rows with neither name nor code are dropped (can't be matched!). Fuel values are
         mapped and the distinct subtypes an EGE reports across its rows are combined into one
         sorted value (e.g. "diesel oil, natural gas") - dedupe would otherwise keep whichever
-        came first, and an unsorted value would depend on which CSV happened to load first.
+        came first, and an unsorted value would depend on the input's row order.
         The fuel veto/classification compares token sets, so combining widens the overlap.
 
         Args:
@@ -311,22 +319,22 @@ class BasePipeline:
 
         Returns:
             df_unique (pd.DataFrame): The working dataframe (now with unique EGs)
+
+        Raises:
+            MissingDataError: If a column named in the operator's metadata is absent.
         """
-        all_dfs: list[pd.DataFrame] = []
-        for input_path in sorted(self.input_dir.glob("*.csv")):
-            all_dfs.append(load_df_from_file(input_path))
-
-        if not all_dfs:
-            logger.warning(f"No CSV files found in '{self.input_dir}'.")
+        df_all = self.run.df.copy()  # copied: deduping adds and sorts columns
+        if df_all.empty:
+            logger.warning(f"[{self.run.name}] No rows to find coordinates for.")
             return pd.DataFrame()
-
-        df_all = pd.concat(all_dfs, ignore_index=True)
 
         # define relevant columns and ensure they actually exist in the operator data
         relevant_cols = []
         for col in self.sysop_cols.keys():  # go through original sysop's column names
             if col not in df_all.columns:
-                raise MissingDataError(f"No '{col}' column in '{self.input_dir}' CSVs!")
+                raise MissingDataError(
+                    f"[{self.run.name}] No '{col}' column in the data!"
+                )
             relevant_cols.append(col)
 
         # get one row per EGE: code identifies it, name stands in where a code is missing.
@@ -338,7 +346,7 @@ class BasePipeline:
             df_all[dedupe_key] = codes.where(~no_codes, df_all[self.name_col])
             if named := int(df_all.loc[no_codes, dedupe_key].nunique()):
                 logger.warning(
-                    f"[{self.output_stem}] {named} EGEs have no code in '{self.code_col}'"
+                    f"[{self.run.name}] {named} EGEs have no code in '{self.code_col}'"
                     f" - identified by name value in '{self.name_col}' instead."
                 )
         else:
@@ -348,7 +356,7 @@ class BasePipeline:
         no_keys = df_all[dedupe_key].map(is_missing)
         if no_keys.any():
             logger.warning(
-                f"[{self.output_stem}] Dropping {int(no_keys.sum())} of {len(df_all)} "
+                f"[{self.run.name}] Dropping {int(no_keys.sum())} of {len(df_all)} "
                 f"row(s) with neither a code nor a name - no identity to count EGEs by!"
             )
             df_all = df_all[~no_keys]
@@ -376,24 +384,22 @@ class BasePipeline:
                 by=self.name_col, key=lambda _: unnamed, kind="stable"
             )
 
+        # official coordinates the caller added are constant per EGE, so they ride along
+        official = [c for c in df_all.columns if c.startswith(f"{OFFICIAL_LOCATOR}.")]
         df_unique = (
-            df_all[[*relevant_cols, dedupe_key]]
+            df_all[[*relevant_cols, *official, dedupe_key]]
             .drop_duplicates(subset=[dedupe_key])
             .drop(columns=dedupe_key)
             .reset_index(drop=True)
         )
 
-        # If unnamed EGEs in THIS temporal resolution, check if they are named in another
-        if self.code_col:
-            self._backfill_names_from_other_tres(df_unique)
-
         self.unique_targets = len(df_unique)
         unnamed = int(df_unique[self.name_col].isna().sum())
         self._log_step_result(
-            "Load & dedupe",
+            "Dedupe",
             matched=self.unique_targets - unnamed,
             note=(
-                f"across {len(all_dfs)} CSV(s)"
+                f"from {len(df_all)} row(s)"
                 + (f"; {unnamed} unnamed (unmatchable by name)" if unnamed else "")
             ),
         )
@@ -402,7 +408,7 @@ class BasePipeline:
     def _step_prepare_matching(self, df: pd.DataFrame) -> pd.DataFrame:
         """PREP STEP --- Rename columns with a "sysop." prefix and flesh out the fuel column.
 
-        The fuel values themselves were mapped in `_step_load_and_dedupe`, so only the
+        The fuel values themselves were mapped in `_step_dedupe`, so only the
         refinement with the subtype happens here.
 
         Args:
@@ -413,6 +419,11 @@ class BasePipeline:
         """
         # 1. rename relevant columns to generic "sysop.*" (e.g. 'nom_usina' → 'sysop.name')
         df = df.rename(columns=self.sysop_cols)
+
+        # a sysop's official locator may know the region its raw data doesn't name
+        official_region = f"{OFFICIAL_LOCATOR}.region"
+        if SYSOP_REGION_COL not in df.columns and official_region in df.columns:
+            df[SYSOP_REGION_COL] = df[official_region]
 
         # 2. create SysOp fuel column with None values if fuel column is missing/unconfigured
         if SYSOP_FUEL_COL not in df.columns:
@@ -436,6 +447,14 @@ class BasePipeline:
 
         # 4. ensure the required columns for matching algorithms are created
         self._create_match_method_columns(df)
+
+        # 5. the official record IS the EGE (ID + name checked), so its fuel is the EGE's own
+        official = df[f"{OFFICIAL_LOCATOR}.lat"].notna()
+        df[f"{OFFICIAL_LOCATOR}.fueltype"] = df[SYSOP_FUEL_COL].where(official)
+
+        # 6. count the caller's official coordinates, so later steps report only their own
+        if official.any():
+            self._log_step_result("Official coordinates", df=df)
         return df
 
     def _step_name_match(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -482,7 +501,7 @@ class BasePipeline:
         return self._name_match_core(df, matcher)
 
     def _step_validate_fueltype(self, df: pd.DataFrame) -> pd.DataFrame:
-        """VALIDATION STEP --- Fuel-type validation for all matched EGEs (from any source).
+        """VALIDATION STEP --- Fuel-type validation for all matched EGEs (except official).
 
         Args:
             df (pd.DataFrame): The working dataframe.
@@ -497,7 +516,7 @@ class BasePipeline:
 
         df["fueltype_match"] = None
         df["fueltype_match_level"] = None
-        for idx in df.index[fueltypes.notna()]:
+        for idx in df.index[fueltypes.notna() & ~self._matched_officially(df)]:
             level = classify_fueltype_match(
                 sysop_type=df.at[idx, SYSOP_FUEL_COL], loc_type=fueltypes[idx]
             )
@@ -507,7 +526,7 @@ class BasePipeline:
         mismatches = df.index[df["fueltype_match_level"] == "mismatch"]
         if len(mismatches):
             logger.warning(
-                f"[{self.output_stem}] Fuel-type mismatch on {len(mismatches)} matched "
+                f"[{self.run.name}] Fuel-type mismatch on {len(mismatches)} matched "
                 f"EGE(s) — verify these rows manually."
             )
             # provide details on the siblings: a shared place is the ONLY evidence,
@@ -516,7 +535,7 @@ class BasePipeline:
             siblings = [i for i in mismatches if str(methods[i]).endswith("sibling")]
             if siblings:
                 logger.info(
-                    f"[{self.output_stem}] {len(siblings)} of those would have matched "
+                    f"[{self.run.name}] {len(siblings)} of those would have matched "
                     f"as siblings:\n"
                     + "\n".join(
                         f"    {df.at[i, SYSOP_NAME_COL]} "
@@ -527,7 +546,7 @@ class BasePipeline:
         return df
 
     def _step_validate_region(self, df: pd.DataFrame) -> pd.DataFrame:
-        """VALIDATION STEP --- Coordinate validation for all matched EGEs (from any source).
+        """VALIDATION STEP --- Coordinate validation for all matched EGEs (except official).
 
         Args:
             df (pd.DataFrame): The working dataframe.
@@ -541,7 +560,7 @@ class BasePipeline:
         lats, lons = (self._matched_column(df, "lat"), self._matched_column(df, "lon"))
         df["region_match"] = None
         df["region_match_level"] = None
-        for idx in df.index[lats.notna()]:
+        for idx in df.index[lats.notna() & ~self._matched_officially(df)]:
             level = self.region_reg.classify_match(
                 self.country,
                 target_region=df.at[idx, SYSOP_REGION_COL],
@@ -553,7 +572,7 @@ class BasePipeline:
         mismatches = (df["region_match_level"] == "mismatch").sum()
         if mismatches:
             logger.warning(
-                f"[{self.output_stem}] Region mismatch on {mismatches} matched "
+                f"[{self.run.name}] Region mismatch on {mismatches} matched "
                 f"EGE(s) — verify these rows manually."
             )
         return df
@@ -598,10 +617,10 @@ class BasePipeline:
         )
 
         if self.output_dir:
-            out_path = Path(self.output_dir, f"coordinates_{self.output_stem}.csv")
+            out_path = Path(self.output_dir, f"coordinates_{self.run.name}.csv")
             df.to_csv(out_path, index=False)
             logger.info(
-                f"[{self.output_stem}] Coordinates dataframe saved to '{out_path}'.\n-----"
+                f"[{self.run.name}] Coordinates dataframe saved to '{out_path}'.\n-----"
                 "--------------------------------------------------------------------------"
             )
 
@@ -610,62 +629,6 @@ class BasePipeline:
     # ------------------------------------------------------------------
     # DIRECT HELPER METHODS (used by shared and/or pipeline-specific steps)
     # ------------------------------------------------------------------
-    def _backfill_names_from_other_tres(self, df: pd.DataFrame) -> None:
-        """Fill in any missing EGE names from other temporal resolutions of the same data.
-
-        Operators may omit an EGE's name entirely in one temporal resolution while naming
-        it in another. Without a name, no name-based matching can occur. Example:
-        - Entsoe RO 1h:     self.name_col = 'CET_MINT2_CA', self.code_col = 30WMINTMINT2---1
-        - Entsoe RO 15min:  self.name_col = '', self.code_col = 30WMINTMINT2---1
-
-        Modifies ``df`` in place, reading files only while names are still missing.
-        EGEs where no names are found (via exact code matching) are left as is.
-
-        Args:
-            df (pd.DataFrame): The deduplicated working dataframe, with one row per EGE.
-        """
-        unnamed = df[self.name_col].isna()
-        missing_codes = set(df.loc[unnamed, self.code_col].dropna())
-        if not missing_codes:
-            return
-
-        found: dict[str, str] = {}
-        for other_dir in self._other_tres_dirs():
-            for path in sorted(other_dir.glob("*.csv")):
-                if not DATE_PATTERN.match(path.stem):
-                    continue
-
-                df_other = load_df_from_file(path)
-                if not {self.name_col, self.code_col}.issubset(df_other.columns):
-                    continue
-
-                named = df_other[
-                    df_other[self.code_col].isin(missing_codes)
-                    & df_other[self.name_col].notna()
-                ][[self.code_col, self.name_col]].drop_duplicates()
-
-                for code, name in named.itertuples(index=False):
-                    if found.setdefault(code, name) != name:
-                        logger.warning(
-                            f"[{self.output_stem}] '{code}' named both '{found[code]}' and "
-                            f"'{name}' in other temporal resolutions. Keeping the first."
-                        )
-
-                if len(found) == len(missing_codes):
-                    break
-
-            if len(found) == len(missing_codes):
-                break
-
-        if found:
-            df.loc[unnamed, self.name_col] = df.loc[unnamed, self.code_col].map(found)
-            self._log_step_result(
-                "Load & dedupe - recovered names",
-                matched=len(found),
-                total=len(missing_codes),
-                note=f"from other temporal resolutions: {sorted(found.values())}",
-            )
-
     def _name_match_core(self, df: pd.DataFrame, matcher: NameMatcher) -> pd.DataFrame:
         """FUZZY STEP HELPER --- Shared per-row fuzzy-match loop, used by every pipeline.
 
@@ -723,11 +686,9 @@ class BasePipeline:
         df_fuzzy_results = pd.DataFrame(fuzzy_results_list)
 
         if self.output_dir and not df_fuzzy_results.empty:
-            out_path = Path(self.output_dir, f"name_matches_{self.output_stem}.csv")
+            out_path = Path(self.output_dir, f"name_matches_{self.run.name}.csv")
             df_fuzzy_results.to_csv(out_path, index=False)
-            logger.info(
-                f"[{self.output_stem}] Debugging dataframe saved to '{out_path}'."
-            )
+            logger.info(f"[{self.run.name}] Debugging dataframe saved to '{out_path}'.")
 
         return df
 
@@ -868,37 +829,9 @@ class BasePipeline:
             details.append(note)
 
         logger.info(
-            f"[{self.output_stem}] {step:<32}{matched:>4}/{total:<4} ({share})"
+            f"[{self.run.name}] {step:<32}{matched:>4}/{total:<4} ({share})"
             + (f"   {' | '.join(details)}" if details else "")
         )
-
-    def _other_tres_dirs(self) -> list[Path]:
-        """Find the equivalents of the input directory for other temporal resolutions.
-
-        Swap the tres-component of the input path for every other resolution present, e.g.:
-        - self.input_dir = "entsoe/15min/10YRO-TEL------P" -> ["entsoe/1h/10YRO-TEL------P"]
-        - self.input_dir = "aeso/1h" -> ["aeso/5min"]
-
-        Returns:
-            list[Path]: Existing directories of this data in other temporal resolutions or
-                empty list, if no other resolutions exists.
-        """
-        parts = self.input_dir.parts
-        tres_idx = next((i for i, p in enumerate(parts) if TRES_PATTERN.match(p)), None)
-        if tres_idx is None:
-            return []
-
-        other_dirs: list[Path] = []
-        for tres_dir in sorted(Path(*parts[:tres_idx]).iterdir()):
-            if not tres_dir.is_dir() or tres_dir.name == parts[tres_idx]:
-                continue
-            if not TRES_PATTERN.match(tres_dir.name):
-                continue
-            candidate = Path(tres_dir, *parts[tres_idx + 1 :])
-            if candidate.is_dir():
-                other_dirs.append(candidate)
-
-        return other_dirs
 
     @staticmethod
     def _write_candidate_into_df(

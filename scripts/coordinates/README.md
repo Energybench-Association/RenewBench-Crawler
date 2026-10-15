@@ -187,7 +187,8 @@ Optional arguments are:
 - `-i`: The input dir(s) of the raw files. Per default, the `dst_dir_raw` in the <SOURCE>'s
   YAML config will be used
 - `-o`: The output directory for storing extra extracted information (for further metadata
-  processing). Per default, a subfolder `coordinates` in the `dst_dir_raw` will be used.
+  processing). Per default, a subfolder `coordinates_cli` in the `dst_dir_raw` will be used
+  (apart from the processors' `coordinates` folder in the `dst_dir_proc`).
 - `--update`: Download fresh copies of every resource in the `resources_dir` (PPM's and
   osm-powerplants' CSVs, GEM's fallback trackers, the EIC registry, Natural Earth registry)
   and re-query the overpass API once per country.
@@ -201,8 +202,9 @@ A successful run returns several new files:
 
 > [!WARNING]
 >
-> This can only be run one source at a time. The current implementation is only developed
-> for ENTSOE and will only work for CSV files (not f.e. REI's JSONs)!
+> This can only be run one source at a time, and only for sources whose raw data are CSV
+> files with EGE names (`name_matchable` in OPERATOR_METADATA); others such as AEMO, EIA and
+> REI are refused.
 
 ### Comparing different coordinate finding runs
 
@@ -216,10 +218,10 @@ $ python -m scripts.coordinates.compare_runs -s <SOURCE>
 Optional arguments are:
 
 - `-b`: The directory of the first/"before" run. Per default, a folder
-  `<dst_dir_raw>/coordinates/archive` will be searched for the most recent CSV files.
+  `<dst_dir_raw>/coordinates_cli/archive` will be searched for the most recent CSV files.
 - `-a`: The directory of the second/"after" run. Per default, the CSVs in the folder
-  `<dst_dir_raw>/coordinates/` will used (direct output location for `coordinate_locator`).
-- `--details`: The number of changed EGEs to list. Defaults to 10.
+  `<dst_dir_raw>/coordinates_cli/` will used (direct output location for `coordinate_locator`).
+- `--detail`: The number of changed EGEs to list. Defaults to 10.
 
 
 # Ensuring up-to-date OSM parsing
