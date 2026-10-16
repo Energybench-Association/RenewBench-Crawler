@@ -2,7 +2,7 @@
 
 Source: GitHub package (https://github.com/PyPSA/powerplantmatching/)
 Data foundation: https://github.com/PyPSA/powerplantmatching/blob/master/powerplantmatching/package_data/config.yaml#L61
-(for details s. scripts/coordinates/README.md)
+(for details s. docs/coordinate_finding.md)
 """
 
 import ast

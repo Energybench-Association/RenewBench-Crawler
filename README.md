@@ -41,6 +41,7 @@ The RenewBench-Crawler repository is structured as follows:
 │   ├── config/                 # Processing of YAML configs
 │   │   ├── loader.py             # Load and validate configs
 │   │   └── schema.py             # Pydantic config models and registry
+│   ├── coordinates/            # Coordinate finding logic
 │   ├── energy/                 # Energy data crawlers
 │   │   ├── adme/                 # ADME (Uruguay)
 │   │   ├── aemo/                 # AEMO (Australia)
@@ -91,6 +92,9 @@ started, the following are available:
 - [**Usage guide**](docs/guide_usage.md):
   How to run the provided scripts of this repository (command-line interface,
   config files, output locations).
+- [**Coordinate finding**](docs/coordinate_finding.md):
+  How energy generating entities are located (locator sources, matching strategy,
+  examples) and how to run and compare coordinate finding.
 
 ## How to contribute
 Check out our [contribution guidelines](CONTRIBUTING.md) if you are interested in contributing to the RenewBench project :fire:.

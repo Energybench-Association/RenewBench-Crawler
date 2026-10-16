@@ -135,7 +135,7 @@ folder may well be missing after a run.
 
    The entity names from the raw energy source files are tokenized and weighted.
    Proper names are weighted more than other tokens (such as numerals or
-   [GENERIC_UNIT_TOKENS](../../rbc/coordinates/mappings.py#L120)). These tokens are then
+   [GENERIC_UNIT_TOKENS](../rbc/coordinates/mappings.py)). These tokens are then
    matched against the power plant location sources/tables in GEM, PPM, and OSM.
    The best match wins.
 
@@ -150,15 +150,15 @@ folder may well be missing after a run.
    Each candidate is checked against what the operator itself reports. During name
    matching, a candidate whose fuel type or region contradicts that data is rejected
    outright, while one that agrees earns a small score bonus (s.
-   [`matcher.py`](../../rbc/coordinates/matcher.py)). After all matching steps, every
+   [`matcher.py`](../rbc/coordinates/matcher.py)). After all matching steps, every
    matched EGE — including those matched by EIC code — is checked again, and the outcome
    kept in the `fueltype_match_level` / `region_match_level` columns.
 
    Fuel types are compared by family (e.g. "hard coal" vs "coal", s.
-   [`fuel.py`](../../rbc/coordinates/utils/fuel.py)), regions by point-in-polygon
+   [`fuel.py`](../rbc/coordinates/utils/fuel.py)), regions by point-in-polygon
    containment against Natural Earth's admin-1 polygons, buffered by 20 km to absorb
    border imprecision (offshore wind, hydro plants on border rivers, s.
-   [`natural_earth.py`](../../rbc/coordinates/resources/natural_earth.py)). Missing
+   [`natural_earth.py`](../rbc/coordinates/resources/natural_earth.py)). Missing
    information never rejects a match: an operator that reports no region, or a region
    name with no polygon of that name, simply leaves the check unknown.
 
@@ -166,8 +166,8 @@ folder may well be missing after a run.
    but its `<loc>.*` columns are kept, so the candidate stays visible for review next to
    the level that rejected it.
 
-For more details, see the modules in the [`rbc/coordinates` folder](../../rbc/coordinates),
-in particular the [`orchestrator.py`](../../rbc/coordinates/orchestrator.py).
+For more details, see the modules in the [`rbc/coordinates` folder](../rbc/coordinates),
+in particular the [`orchestrator.py`](../rbc/coordinates/orchestrator.py).
 
 ## Running coordinate finding
 
@@ -178,7 +178,7 @@ $ python -m scripts.coordinates.coordinate_locator -s <SOURCE>
 ```
 
 Resources shared by all energy sources (e.g. OSM files, the EIC directory) are kept in
-the `resources_dir` defined in the [`coordinates` YAML config](../../configs/coordinates/coordinates.yaml).
+the `resources_dir` defined in the [`coordinates` YAML config](../configs/coordinates/coordinates.yaml).
 Put the manually downloaded GEM tracker xlsx files into its `gem/` subfolder. Trackers
 missing there fall back to older files from the PPM creator's online cloud storage.
 
@@ -232,7 +232,7 @@ in defining this. However, in some instances (i.e. disputed territories), it may
 any results. In those cases the so-called OSM country relation IDs can be used instead.
 
 These IDs describe administrative relations with `admin_level=2` and are hard-coded into
-the [mappings.py](../../rbc/coordinates/mappings.py) under the global parameter
+the [mappings.py](../rbc/coordinates/mappings.py) under the global parameter
 `COUNTRY_OSM_RELATION_ID_MAP`. However, these IDs may change depending on what the OSM
 community decides. Therefore, a script is included to automatically update the
 `COUNTRY_OSM_RELATION_ID_MAP`. It can be run whenever required via:
