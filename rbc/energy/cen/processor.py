@@ -9,11 +9,28 @@ from rapidfuzz import fuzz
 
 from rbc.coordinates.load import load_runs
 from rbc.coordinates.map import build_map
-from rbc.coordinates.mappings import OFFICIAL_LOCATOR, OPERATOR_METADATA, SYSOP_CODE_COL
+from rbc.coordinates.mappings import (
+    OFFICIAL_LOCATOR,
+    OPERATOR_METADATA,
+    SYSOP_CODE_COL,
+    SYSOP_NAME_COL,
+)
 from rbc.coordinates.orchestrator import find_coordinates
 from rbc.coordinates.pipelines import build_shared_resources
 from rbc.coordinates.utils.tokenizer import strip_square_brackets
 from rbc.energy.cen.registry import CenCoordinateRegistry
+from rbc.energy.processing import (
+    LOCATION_COLUMNS,
+    STAC_COLUMNS,
+    ZARR_COLUMNS,
+    codes_as_text,
+    ege_ids,
+    entity_ids,
+    geometry_level,
+    log_unjoined_ids,
+    to_layout,
+    to_utc_iso,
+)
 from rbc.energy.utils import load_df_from_file, write_df_to_csv
 
 SOURCE = "cen"
@@ -28,6 +45,15 @@ REGISTRY_RENAMES = {
     "id_central": "id",
     "central": "name",
     "estado": "status",
+}
+# Map: CEN's raw columns → the shared layout's (s. docs/data_sources.md, renamed on loading)
+CEN_COLUMNS = {
+    "fecha_hora": "timestamp",
+    "gen_real_mw": "value",
+    "propietario": "operator",
+    "potencia_maxima": "generation_capacity",
+    "tipo_tecnologia": "fuel_type",
+    "subtipo_tecnologia": "fuel_subtype",
 }
 
 
@@ -70,6 +96,9 @@ class CenProcessor:
             sysop=SOURCE, resources_dir=self.resources_dir
         )
 
+    # ------------------------------------------------------------------
+    # ENTRYPOINT
+    # ------------------------------------------------------------------
     def process_data(self) -> None:
         """Process previously downloaded, raw CEN energy generation data.
 
@@ -77,11 +106,17 @@ class CenProcessor:
         1. Load all raw generation data from each CSV dir (e.g. each temporal res) into
            its own EG dataframe.
         2. Perform coordinate finding to get one EGE dataframe of unique EGEs & their coords.
-        3. Reformat EG dataframe to be Zarr-ready.
-        4. Extract information from EGE dataframe to create STAC metadata.
+        3. Reformat the EG dataframes into the shared layout for zarr data, one raw CSV at a
+           time. todo: finish processing and convert df into Zarr.
+        4. Combine EG and EGE dataframe data into the shared layout for STAC metadata
+           (s. rbc.energy.processing). todo: finish processing and convert df into STAC files.
         """
         all_df_ege: list[pd.DataFrame] = []
+        df_eg_unique = (
+            pd.DataFrame()
+        )  # each EGE's own values, collected from every raw CSV
         map_labels: list[str] = []
+        zarr_ids: set[str] = set()  # to check both outputs describe the same EGEs
 
         # Step 1: one run per CSV dir (e.g. per temporal res), with its raw EG rows
         for run in load_runs([self.input_dir], sysop=SOURCE):
@@ -102,16 +137,27 @@ class CenProcessor:
                     all_df_ege.append(df_ege)
                     map_labels.append(run.map_label)
 
-                # todo: Step 3: reformat EG data into Zarrs (atm: one CSV at a time, memory!)
+                # Step 3: reformat EG data into shared Zarr (atm: one CSV at a time, memory!)
                 input_dir = Path(self.input_dir).resolve()  # run.files are resolved
                 for path in run.files:
-                    df_eg = load_df_from_file(path)
-                    # - leave names as they are
-                    # - standardize time to same timestamp format
-                    # - standardize gen value to same unit (MWh?)
-                    write_df_to_csv(
-                        df_eg, Path(self.output_dir, path.relative_to(input_dir))
+                    df_eg = load_df_from_file(path).drop_duplicates()  # remove repeated
+                    df_eg = df_eg.rename(columns=CEN_COLUMNS)  # layout names now!
+                    df_eg["id"] = ege_ids(SOURCE, df_eg[CODE_COL], df_eg[NAME_COL])
+                    eg_unique = df_eg[
+                        ["id", "id_opreal", "operator", "generation_capacity"]
+                        + ["fuel_type", "fuel_subtype"]
+                    ]
+                    # distinct values only, the latest last (files are in date order)
+                    df_eg_unique = pd.concat([df_eg_unique, eg_unique]).drop_duplicates(
+                        keep="last"
                     )
+
+                    df_zarr = self._prepare_for_zarr(df_eg)
+                    zarr_ids.update(df_zarr["id"].dropna())
+                    write_df_to_csv(
+                        df_zarr, Path(self.output_dir, path.relative_to(input_dir))
+                    )
+                    # todo: convert to Zarr
 
             except Exception as e:
                 logger.exception(
@@ -125,16 +171,16 @@ class CenProcessor:
         # Step 4.1: map unique EGEs
         build_map(all_df_ege, labels=map_labels, output_dir=self.coordinates_dir)
 
-        # todo: Step 4.2: translate & standardize column headers of EGE to convert into STAC
+        # Step 4.2: reformat EG & EGE data into shared STAC format
         df_ege = pd.concat(all_df_ege, ignore_index=True)
-        df_ege = self._join_registry(df_ege, code_col=SYSOP_CODE_COL, cols=["status"])
-        # - map column headers to STAC attributes (energy.entity, energy.status, ...)
-        # - store as `stac_data.csv` for reference
-        # - transform into STAC meta
+        df_stac = self._prepare_for_stac(df_ege, df_eg_unique)
+        write_df_to_csv(df_stac, Path(self.output_dir, "stac_data.csv"))
+        log_unjoined_ids(zarr_ids, df_stac["id"])
+        # todo: convert to STAC
 
-        out_ege_path = Path(self.output_dir, "stac_data.csv")
-        write_df_to_csv(df_ege, out_ege_path)
-
+    # ------------------------------------------------------------------
+    # MAIN HELPERS
+    # ------------------------------------------------------------------
     def _get_coordinates(self, df_eg: pd.DataFrame) -> pd.DataFrame:
         """Add the coordinates of CEN's own EGE registry to the distinct EGE rows.
 
@@ -143,7 +189,7 @@ class CenProcessor:
         2. compare the registry name with the CEN name ('central'): where they differ, the
            ID link is doubtful, so the EGE is left to the pipeline to match by its own name
         3. check the registry point lies in the registry's own region: where it doesn't, the
-           record contradicts itself (e.g. a mislabelled UTM zone), so it's left out likewise
+           record contradicts itself (e.g. a mislabeled UTM zone), so it's left out likewise
 
         The rows are deliberately not deduped to one per EGE: the pipeline's own dedupe
         needs every variant (e.g. code-less EGEs, every fuel subtype an EGE reports). The
@@ -243,6 +289,135 @@ class CenProcessor:
 
         return df_ege.drop(columns=[f"{off}.id", f"{off}.name"])  # served their purpose
 
+    @staticmethod
+    def _prepare_for_zarr(df_eg: pd.DataFrame) -> pd.DataFrame:
+        """Prep raw CSV data (df_eg) for Zarr conversion by bringing it to the shared layout.
+
+        Return a df with columns ZARR_COLUMNS ("id", "timestamp", and "value").
+        - "id": get from global helper
+        - "timestamp": use "fecha_hora" column values, convert to UTC ISO 8601 format
+        - "value": use "gen_real_mw" column values, sum up values for each physical EGE.
+
+        CEN reports a physical EGE ('central'). Sometimes, these are split into different
+        operating configurations ('llave_opreal').
+        Of CEN's over 1000 EGEs, 53 thermal physical EGEs have such configs.
+        As these run at the same time, the EGE's generation output is defined as their sum.
+        When the EGE is a battery, the charging value is subtracted from the discharging one.
+
+        Args:
+            df_eg (pd.DataFrame): A raw CSV's rows, with their EGE's global 'id'.
+
+        Returns:
+            pd.DataFrame: The generation data in the ZARR_COLUMNS layout.
+        """
+        # convert local time with Chile's DST -> UTC ISO8601
+        # (daylight saving exists based on solar peak ~13:45 in January, ~12:45 in August)
+        # todo: double entry in fall (rewind), none in spring (jump)! How to handle??
+        utc = to_utc_iso(df_eg["timestamp"], tz="America/Santiago")
+
+        # net output: charging ('Retiro', batteries only) is reported positive as well
+        net = df_eg["value"].where(df_eg["fuel_subtype"] != "Retiro", -df_eg["value"])
+
+        summed = (
+            df_eg.assign(value=net, timestamp=utc)
+            .groupby(["timestamp", "id"], as_index=False)["value"]
+            .sum(min_count=1)  # all values missing stays missing, not 0
+        )
+        # todo: write to Zarr
+        return to_layout(summed, ZARR_COLUMNS)
+
+    def _prepare_for_stac(
+        self, df_ege: pd.DataFrame, df_eg_unique: pd.DataFrame
+    ) -> pd.DataFrame:
+        """Prep unique EGE data from coordinate finding (_ege) & raw (_eg_unique) for STAC.
+
+        Return a df with columns STAC_COLUMNS:
+        - "id": get from global helper
+        - "entity_ids": use "id_central" column value (for `"cen": ...`) and, if found via
+           coordinate finding, the ID of the locator used for matching (e.g. `"gem": ...`)
+        - "entity_name": use "central" column values from df_eg_unique
+        - "entity_type": hard-coded as "facility"
+        - "facility_name": -
+        - "group_name": -
+        - "operator": use "propietario" column values from df_eg_unique
+        - "fuel_type": use "tipo_tecnologia" column values from df_eg_unique
+        - "fuel_subtype": use "subtipo_tecnologia" column values from df_eg_unique
+        - "generation_capacity": use "potencia_maxima" column values from df_eg_unique
+        - "status": use "estado" column values from df_ege
+        - "measurement_type": hard-coded as "gross_output"
+        - "lat": use "lat" from df_ege
+        - "lon": use "lon" from df_ege
+        - "region": use "region" from df_ege
+        - "geometry_level": calculate
+        - "location_method": use "match_method" from df_ege
+
+        CEN reports a physical EGE ('central'). Sometimes, these are split into different
+        operating configurations ('llave_opreal') of units subdivided into fuel modes. E.g.
+            e.g. "TER KELAR" has 15 operating conditions such as
+            "KELAR TG1 (GNL)", "KELAR TG1 (Diesel)", "KELAR TG1 + 0.5 TV (Gas Arg)",
+            "KELAR TG1 + TG2 + TV (Gas Arg)", ... = 3 units (TG1, TG2, TV) mixed into >4 conf
+        For this reason, the metadata is defined for all provided EGEs as aforementioned.
+        Operator, fuels and capacity are the latest the generation data reports. An EGE
+        with several generating configurations has no row holding its own capacity (each
+        holds one unit and fuel mode's), so its capacity is unknown; a battery's charging
+        configuration doesn't count, as it is the same unit. A square bracket term in CEN's
+        name (e.g. "[NO_MOSTRAR]") is the EGE's true status, else the registry's "estado".
+
+        Args:
+            df_ege (pd.DataFrame): The EGEs as coordinate finding returned them.
+            df_eg_unique (pd.DataFrame): The EGE information from raw generation data.
+
+        Returns:
+            pd.DataFrame: The EGEs in the STAC_COLUMNS layout.
+        """
+        latest = df_eg_unique.drop_duplicates(subset=["id", "id_opreal"], keep="last")
+        per_ege = latest.groupby("id").agg(
+            operator=("operator", "last"),
+            # todo: map CEN's types to STAC's fuel vocabulary (formatting step)
+            fuel_type=("fuel_type", "last"),
+            fuel_subtype=(
+                "fuel_subtype",
+                lambda s: ", ".join(sorted(set(s.dropna()))) or None,
+            ),
+        )
+        # a battery charges and discharges through one unit: only generating configurations
+        # count, and with several of them no row holds the EGE's own capacity
+        generating = latest[latest["fuel_subtype"] != "Retiro"].groupby("id")
+        per_ege["generation_capacity"] = (
+            generating["generation_capacity"]
+            .last()
+            .where(generating["id_opreal"].nunique() == 1)
+        )
+
+        df_ege = self._join_registry(df_ege, code_col=SYSOP_CODE_COL, cols=["status"])
+        names = df_ege[SYSOP_NAME_COL]
+        codes = df_ege[SYSOP_CODE_COL]
+        df_ege = (
+            df_ege.assign(
+                id=ege_ids(SOURCE, codes, names),
+                entity_ids=entity_ids(df_ege, own={"cen": codes_as_text(codes)}),
+                entity_name=names.map(
+                    lambda n: (
+                        (strip_square_brackets(n) or n) if isinstance(n, str) else n
+                    )
+                ),
+                entity_type="facility",  # a CEN 'central' (s. docs/data_sources.md)
+                status=names.str.extract(r"\[([^\]]+)\]", expand=False).fillna(
+                    df_ege[f"{OFFICIAL_LOCATOR}.status"]
+                ),
+                measurement_type="gross_output",  # todo: no proof (s. data_sources.md)
+            )
+            .drop_duplicates(subset="id")  # an EGE in several resolutions
+            .merge(per_ege.reset_index(), on="id", how="left")
+        )
+
+        df_ege = to_layout(df_ege, STAC_COLUMNS, renames=LOCATION_COLUMNS)
+        df_ege["geometry_level"] = geometry_level(df_ege)
+        return df_ege
+
+    # ------------------------------------------------------------------
+    # SECONDARY HELPERS
+    # ------------------------------------------------------------------
     def _join_registry(
         self, df: pd.DataFrame, code_col: str, cols: list[str]
     ) -> pd.DataFrame:

@@ -35,9 +35,9 @@ def parse_arguments() -> Namespace:
         "--cfg_options",
         action="append",
         help=(
-            "Override YAML config values (supports nested keys). Example: "
-            "-o paths.dst_dir_raw=/your/raw/path/ paths.dst_dir_proc=/your/proc/path/ "
-            " access.api_key=YOUR-SECRET-KEY"
+            "Override YAML config values (supports nested keys), one -o per value. "
+            "Example: -o paths.dst_dir_raw=/your/raw/path/ "
+            "-o paths.dst_dir_proc=/your/proc/path/ -o access.api_key=YOUR-SECRET-KEY"
         ),
     )
     return parser.parse_args()

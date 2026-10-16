@@ -1,6 +1,7 @@
 # tests/energy/cen/test_processor.py
 """Tests for the CEN processor: CEN's own registry coordinates and the processing run."""
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,13 @@ import pytest
 from rbc.coordinates.pipelines import SharedResources
 from rbc.coordinates.resources.natural_earth import RegionRegistry
 from rbc.energy.cen import processor
-from rbc.energy.cen.processor import CODE_COL, NAME_COL, REGISTRY_RENAMES, CenProcessor
+from rbc.energy.cen.processor import (
+    CODE_COL,
+    NAME_COL,
+    REGISTRY_RENAMES,
+    CenProcessor,
+)
+from rbc.energy.processing import STAC_COLUMNS, ZARR_COLUMNS, global_ids
 
 
 # ----------------------------------
@@ -118,18 +125,116 @@ def _ege_rows(*rows: tuple[float | None, str | None]) -> pd.DataFrame:
     )
 
 
+def _gid(key: str) -> str:
+    """The global ID of a test EGE.
+
+    Args:
+        key (str): Its CEN ID as text, else its name.
+
+    Returns:
+        str: Its global ID.
+    """
+    return global_ids("cen", pd.Series([key]))[0]
+
+
+def _raw_row(
+    opreal: int,
+    code: float | None,
+    name: str,
+    timestamp: str,
+    generation: float,
+    capacity: float,
+    owner: str | None,
+    fuel: str,
+    subfuel: str,
+) -> dict:
+    """One raw row of CEN generation data (one configuration and hour).
+
+    Args:
+        opreal (int): The configuration's ID ('id_opreal').
+        code (float | None): The plant's ID ('id_central'), missing for batteries.
+        name (str): The plant's name ('central').
+        timestamp (str): The hour's start ('fecha_hora').
+        generation (float): The configuration's generation in MW ('gen_real_mw').
+        capacity (float): The configuration's capacity in MW ('potencia_maxima').
+        owner (str | None): The plant's owner ('propietario').
+        fuel (str): Its technology ('tipo_tecnologia').
+        subfuel (str): Its technology subtype ('subtipo_tecnologia').
+
+    Returns:
+        dict: The row, in CEN's own column names.
+    """
+    return {
+        "id_opreal": opreal,
+        CODE_COL: code,
+        NAME_COL: name,
+        "gen_real_mw": generation,
+        "fecha_hora": timestamp,
+        "potencia_maxima": capacity,
+        "propietario": owner,
+        "tipo_tecnologia": fuel,
+        "subtipo_tecnologia": subfuel,
+    }
+
+
 def _write_raw(raw_dir: Path) -> None:
-    """Write two days of raw CEN generation data, one row per EGE and hour.
+    """Write two days of raw CEN data, covering each way CEN reports an EGE (2 hours each).
+
+    - TER ALPHA (ID 1): two configurations producing at once, one row repeated exactly
+    - BESS BETA (no ID): a battery, discharging and charging, both reported positive
+    - PE GAMMA (ID 4): one configuration, a status marker in its name, its capacity
+      raised on the second day
 
     Args:
         raw_dir (Path): The operator's raw "1h" directory.
     """
     raw_dir.mkdir(parents=True)
-    for day in ("2024-01-01", "2024-01-02"):
-        rows = _ege_rows((1.0, "TER ALPHA"), (None, "BESS BETA"))
-        pd.concat([rows.assign(hour=h, generation=10.0 * h) for h in range(3)]).to_csv(
-            Path(raw_dir, f"{day}.csv"), index=False
-        )
+    for day, gamma_capacity in (("2024-01-01", 30.0), ("2024-01-02", 32.0)):
+        rows = []
+        for hour in ("00:00:00", "01:00:00"):
+            ts = f"{day} {hour}"
+            rows += [
+                _raw_row(
+                    10, 1.0, "TER ALPHA", ts, 5.0, 50.0, "GEN SA", "Térmica", "Diésel"
+                ),
+                _raw_row(
+                    11, 1.0, "TER ALPHA", ts, 7.0, 55.0, "GEN SA", "Térmica", "GNL"
+                ),
+                _raw_row(
+                    20, None, "BESS BETA", ts, 4.0, 10.0, None, "BESS", "Inyección"
+                ),
+                _raw_row(21, None, "BESS BETA", ts, 3.0, 10.0, None, "BESS", "Retiro"),
+                _raw_row(
+                    40,
+                    4.0,
+                    "PE GAMMA [NO_MOSTRAR]",
+                    ts,
+                    2.0,
+                    gamma_capacity,
+                    "VIENTO SA",
+                    "Eólica",
+                    "Eólica",
+                ),
+            ]
+        rows.append(rows[0])  # CEN repeats some rows exactly
+        pd.DataFrame(rows).to_csv(Path(raw_dir, f"{day}.csv"), index=False)
+
+
+@pytest.fixture
+def processed(make_processor: Callable, tmp_path: Path) -> tuple[Path, MagicMock]:
+    """Process the two days of raw CEN data.
+
+    Args:
+        make_processor (Callable): Factory for processors.
+        tmp_path (Path): Pytest-provided temporary directory.
+
+    Returns:
+        tuple[Path, MagicMock]: The output directory, and the (mocked) map builder.
+    """
+    _write_raw(Path(tmp_path, "raw", "cen", "1h"))
+    with patch.object(processor, "build_map") as mock_map:
+        make_processor().process_data()
+    return Path(tmp_path, "processed", "cen"), mock_map
 
 
 # ----------------------------------
@@ -280,36 +385,110 @@ def test_get_coordinates_match_kept_if_no_region(make_processor: Callable) -> No
 # ----------------------------------
 # Tests: the processing run
 # ----------------------------------
-def test_process_data(make_processor: Callable, tmp_path: Path) -> None:
-    """Happy path: a run mirrors each raw CSV and describes each EGE once.
+def test_zarr_and_stac_ids_join(processed: tuple[Path, MagicMock]) -> None:
+    """Happy path: the Zarr and STAC data describe the same EGEs, by the same IDs.
 
-    The generation data is written per raw file, under its raw name: decades of daily
-    CSVs would not fit into memory as one frame.
+    The Zarr IDs come from the raw rows, the STAC IDs from coordinate finding's output.
 
     Args:
-        make_processor (Callable): Factory for processors.
-        tmp_path (Path): Pytest-provided temporary directory.
+        processed (tuple[Path, MagicMock]): The output directory and the map builder.
     """
-    _write_raw(Path(tmp_path, "raw", "cen", "1h"))
-    proc = make_processor()
+    out_dir, _ = processed
+    zarr = pd.concat(pd.read_csv(p) for p in Path(out_dir, "1h").glob("*.csv"))
+    stac = pd.read_csv(Path(out_dir, "stac_data.csv"))
 
-    with patch.object(processor, "build_map") as mock_map:
-        proc.process_data()
+    assert set(zarr["id"]) == set(stac["id"])
+    assert zarr["id"].notna().all()
 
-    out_dir = Path(tmp_path, "processed", "cen")
-    for day in ("2024-01-01", "2024-01-02"):
-        mirrored = pd.read_csv(Path(out_dir, "1h", f"{day}.csv"))
-        raw = pd.read_csv(Path(tmp_path, "raw", "cen", "1h", f"{day}.csv"))
-        pd.testing.assert_frame_equal(mirrored, raw)
 
-    coords = pd.read_csv(Path(out_dir, "coordinates", "coordinates_1h.csv"))
-    assert sorted(coords["sysop.name"]) == ["BESS BETA", "TER ALPHA"]
+def test_generation_is_each_eges_net_output(processed: tuple[Path, MagicMock]) -> None:
+    """Happy path: each raw CSV becomes one row per EGE and hour, in the shared layout.
 
-    stac = pd.read_csv(Path(out_dir, "stac_data.csv")).set_index("sysop.name")
-    assert stac.at["TER ALPHA", "official.status"] == "Operativa"
-    assert stac.at["TER ALPHA", "match_method"] == "official_id_exact"
+    A plant's configurations producing at once are summed, a repeated row counts once,
+    and a battery's charging (reported positive) is subtracted: the net output.
 
+    Args:
+        processed (tuple[Path, MagicMock]): The output directory and the map builder.
+    """
+    out_dir, _ = processed
+    df = pd.read_csv(Path(out_dir, "1h", "2024-01-01.csv"))
+
+    assert list(df.columns) == ZARR_COLUMNS
+    first_hour = df[df["timestamp"] == "2024-01-01T03:00:00+00:00"].set_index("id")
+    assert first_hour["value"].to_dict() == {
+        _gid("1"): 12.0,
+        _gid("4"): 2.0,
+        _gid("BESS BETA"): 1.0,
+    }
+
+
+def test_ege_table_describes_each_ege_once(processed: tuple[Path, MagicMock]) -> None:
+    """Happy path: the EGE table has the shared columns and one row per EGE.
+
+    Its IDs are the generation data's, so both tables join.
+
+    Args:
+        processed (tuple[Path, MagicMock]): The output directory and the map builder.
+    """
+    out_dir, mock_map = processed
+    df = pd.read_csv(Path(out_dir, "stac_data.csv"))
+
+    assert list(df.columns) == STAC_COLUMNS
+    assert sorted(df["id"]) == sorted([_gid("1"), _gid("4"), _gid("BESS BETA")])
+    assert set(df["entity_type"]) == {"facility"}
+    assert set(df["measurement_type"]) == {"gross_output"}
     assert mock_map.call_args.kwargs["labels"] == ["cen_1h"]
+
+
+def test_ege_table_values(processed: tuple[Path, MagicMock]) -> None:
+    """Happy path: each EGE's own values, as far as CEN provides them.
+
+    - capacity: unknown for a plant with several generating configurations, a battery's
+      one generating configuration's, and the latest a plant reported
+    - status: a marker in the name overrides the registry's, and is dropped from the name
+    - operator: CEN gives batteries none
+    - entity IDs: CEN's own, where CEN gives one
+
+    Args:
+        processed (tuple[Path, MagicMock]): The output directory and the map builder.
+    """
+    out_dir, _ = processed
+    df = pd.read_csv(Path(out_dir, "stac_data.csv")).set_index("id")
+    alpha, gamma, beta = _gid("1"), _gid("4"), _gid("BESS BETA")
+
+    assert pd.isna(df.at[alpha, "generation_capacity"])
+    assert df.at[beta, "generation_capacity"] == 10.0
+    assert df.at[gamma, "generation_capacity"] == 32.0
+
+    assert df.at[alpha, "status"] == "Operativa"
+    assert df.at[gamma, "status"] == "NO_MOSTRAR"
+    assert df.at[gamma, "entity_name"] == "PE GAMMA"
+
+    assert df.at[alpha, "operator"] == "GEN SA"
+    assert pd.isna(df.at[beta, "operator"])
+    assert df.at[alpha, "fuel_subtype"] == "Diésel, GNL"
+
+    assert json.loads(df.at[gamma, "entity_ids"]) == {"cen": "4"}
+    assert pd.isna(df.at[beta, "entity_ids"])
+
+
+def test_ege_table_locations(processed: tuple[Path, MagicMock]) -> None:
+    """Happy path: each EGE's location and how certain it is.
+
+    Args:
+        processed (tuple[Path, MagicMock]): The output directory and the map builder.
+    """
+    out_dir, _ = processed
+    df = pd.read_csv(Path(out_dir, "stac_data.csv")).set_index("id")
+    ids = [_gid("1"), _gid("4"), _gid("BESS BETA")]
+
+    assert df.at[ids[0], "lat"] == -33.4
+    assert df.at[ids[0], "location_method"] == "official_id_exact"
+    assert df.loc[ids, "geometry_level"].tolist() == [
+        "point",
+        "region",  # in the registry without coordinates, but with its region
+        "country",
+    ]
 
 
 def test_process_data_without_raw(make_processor: Callable, tmp_path: Path) -> None:
