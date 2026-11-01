@@ -16,7 +16,7 @@ CHUNK_SIZE = 1024 * 1024  # download in 1 MB chunks
 HEADER = {
     "User-Agent": (
         "RenewBench-Crawler/1.0 "
-        "(+https://github.com/RenewBench-Association/RenewBench-Crawler)"
+        "(+https://github.com/Energybench-Association/RenewBench-Crawler)"
     )
 }
 
