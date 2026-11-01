@@ -254,7 +254,7 @@ RenewBench-Crawler package.
   4. The new window will show a field "Clave de usuario" with a long alphanumeric
      string. This is your API token!
 - Limitations: 60 queries per hour
-- License: ? (s. terms and conditions of API account registration)
+- License: academic, non-commercial use citing the source ([terms of use](https://www.coordinador.cl/terminos-y-condiciones/), §4)
 
 **Download & data structure**
 - Spatial resolution: per plant
@@ -300,25 +300,31 @@ RenewBench-Crawler package.
 
 **STAC**
 
-- `measurement_type`: `'?_gross_output'`
+- `measurement_type`: `'gross_output'`
 
-  No definitive proof for "as generated" (total gross production on-site, not net grid
-  injections) could be found, but:
-  - According to [the CNE](https://www.cne.cl/wp-content/uploads/2025/01/NTSyCS-Ene-2025.pdf):
-    - "Coordinated entities must supply the Coordinator with all Real-Time information deemed
-       necessary for the proper coordination of SI Real-Time operations."
-    - "the minimum set of variables to be monitored shall be as follows: a) Net active
-       power injected by each unit into the SI."
-  - According to the [API documentation](https://www.coordinador.cl/wp-content/uploads/2019/01/Uso-Api-SIP-Sistema-Informacion-Publica-v1.1.pdf):
-    "All endpoints shall deliver raw data—that is, data without aggregations or
-     transformations applied to the values ​​stored in the database."
-- `entity_type`: `'unit'` (?)
+  According to the [API documentation v2.0](https://www.coordinador.cl/wp-content/uploads/2023/11/Uso_Api_SIP__Sistema_Informacion_Publica_-v2.0.pdf)
+  (p. 57, `generacion-real`): "La Generación Real del Sistema Eléctrico Nacional,
+  corresponde a la Potencia bruta real del sistema, medida en MW" (= the real *gross*
+  power). Its endpoints deliver raw data, "sin agregaciones ni transformaciones".
+- `entity_type`: `'facility'`
 
-  No definitive proof, but the data indicates this in two ways:
-  - values for `central` showing same name with different numbers, i.e. `'BESS Andes'`,
-    `'BESS Andes IV'`
-  - there are more unique `id_opreal` values than `central` names than unique `id_central`
-    values
+  A `central` (`id_central`) is a physical plant. It may be reported in several operating
+  configurations (`id_opreal`, e.g. one per unit combination and fuel mode), which run at
+  the same time, so the processor sums them per plant and hour.
+- Time: each file is one local day (`America/Santiago`, incl. Chile's DST), and `hora` k
+  (1-24) is its local clock hour k-1 (`fecha_hora` = date + (`hora`-1) mod 24 hours).
+  Around DST changes, CEN reports:
+  - clocks set back (Saturday 24:00 → 23:00): Saturday holds its first 23:00 (DST); the
+    repeated 23:00 (standard time, e.g. 2023-04-02 03:00 UTC) is in **Sunday's** file as
+    `hora` 25, labelled Sunday 00:00 like `hora` 1.
+  - clocks set forward (Sunday 00:00 → 01:00): Sunday's `hora` 1, labelled 00:00, is a
+    placeholder for the skipped hour. Its real hours are `hora` 2-24, following straight on
+    from Saturday's last.
+
+- Licence: CEN's [terms of use](https://www.coordinador.cl/terminos-y-condiciones/) (§4)
+  allow downloading public information for personal or academic use and citing it with
+  the source clearly stated; commercial redistribution needs CEN's authorization. The
+  published Collections state this ("academic, non-commercial use").
 
 </details>
 
@@ -543,7 +549,7 @@ RenewBench-Crawler package.
   However, when citing, please use the credit notation in the following form: [...]"
 
 **Download & data structure**
-- Spatial resolution: per [region](https://github.com/RenewBench-Association/RenewBench-Crawler/blob/main/rbc/energy/rei/downloader.py#L28)
+- Spatial resolution: per [region](https://github.com/Energybench-Association/RenewBench-Crawler/blob/main/rbc/energy/rei/downloader.py#L28)
   (!)
 - Temporal resolution: hourly
 - Available data timespan: April 2016 to (two months before) now
