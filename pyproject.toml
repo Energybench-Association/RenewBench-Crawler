@@ -27,23 +27,28 @@ dependencies = [
     "boxsdk",
     "cdsapi",
     "country-converter",
+    "dask[array]",
     "entsoe-apy",
     "eptr2",
     "folium",
     "geopandas",
+    "icechunk>=2.1,<3",  # same on-disk format as energybench-backend
     "loguru",
-    "openelectricity @ git+https://github.com/RenewBench-Association/openelectricity-python.git@fix/async_get_facility_data",
+    "openelectricity @ git+https://github.com/Energybench-Association/openelectricity-python.git@fix/async_get_facility_data",
     "openpyxl",
     "osm_powerplants",
-    "pandas",
+    "pandas>=2.2,<3",  # pandas 3 breaks coordinate finding
     "powerplantmatching",
     "pyarrow",
+    "pystac[validation]",
     "pydantic",
     "pyyaml",
     "rapidfuzz",
     "requests",
     "shapely",
     "tqdm",
+    "xarray",
+    "zarr>=3",
 ]
 
 [project.optional-dependencies]
