@@ -54,6 +54,57 @@ def admin1_gdf() -> gpd.GeoDataFrame:
 
 
 # ----------------------------------
+# Tests - RegionRegistry (outlines)
+# ----------------------------------
+@pytest.mark.parametrize(
+    "region, area", [("Testshire", 1.0), ("Teszt", 1.0), (None, 2.0)]
+)
+def test_geometry_gives_the_region_or_country(
+    admin1_gdf: gpd.GeoDataFrame, region: str | None, area: float
+) -> None:
+    """Happy path: a region's exact polygon (by any name), or the country's union.
+
+    Args:
+        admin1_gdf (gpd.GeoDataFrame): Stand-in admin-1 frame.
+        region (str | None): The region's name, None for the whole country.
+        area (float): The expected area in square degrees.
+    """
+    with patch(f"{NE_MODULE}.gpd.read_file", return_value=admin1_gdf):
+        geom = RegionRegistry().geometry("Testland", region, generalize=0)
+    assert geom is not None
+    assert geom.area == pytest.approx(area)
+
+
+def test_geometry_generalized_still_covers_the_area(
+    admin1_gdf: gpd.GeoDataFrame,
+) -> None:
+    """Happy path: the generalized outline covers the exact one, so search finds it."""
+    with patch(f"{NE_MODULE}.gpd.read_file", return_value=admin1_gdf):
+        reg = RegionRegistry()
+        exact = reg.geometry("Testland", "Testshire", generalize=0)
+        generalized = reg.geometry("Testland", "Testshire")
+    assert exact is not None and generalized is not None
+    assert generalized.covers(exact)
+
+
+@pytest.mark.parametrize(
+    "country, region", [("Absurdistan", None), ("Testland", "Nowhereshire")]
+)
+def test_geometry_unknown(
+    admin1_gdf: gpd.GeoDataFrame, country: str, region: str | None
+) -> None:
+    """Failure path: an unknown country or region has no outline (None).
+
+    Args:
+        admin1_gdf (gpd.GeoDataFrame): Stand-in admin-1 frame.
+        country (str): The country.
+        region (str | None): The region's name.
+    """
+    with patch(f"{NE_MODULE}.gpd.read_file", return_value=admin1_gdf):
+        assert RegionRegistry().geometry(country, region) is None
+
+
+# ----------------------------------
 # Tests - RegionRegistry (classification)
 # ----------------------------------
 class TestClassifyMatch:
