@@ -8,20 +8,20 @@ RenewBench-Crawler package.
 
 ### Overview
 
-| Region                   | Source   | Status             | Resolution               | Access            | Resources                                                                                                                                                                                                                                                                                                              |
-|--------------------------|----------|--------------------|--------------------------|-------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Europe**               | ENTSO-e  | downloader &check; | hourly/higher; per plant | API token         | [TP](https://transparency.entsoe.eu/), [API guide](https://transparencyplatform.zendesk.com/hc/en-us/sections/12783116987028-Restful-API-integration-guide),<br> [API how-to](https://transparencyplatform.zendesk.com/hc/en-us/articles/12845911031188-How-to-get-security-token)                                     |
-| **Turkey**               | EPIAS    | downloader &check; | hourly; per plant        | Login credentials | [TP](https://seffaflik.epias.com.tr/home), [Docs](https://seffaflik.epias.com.tr/electricity-service/technical/en/index.html),<br> [Registration form](https://kayit.epias.com.tr/epias-transparency-platform-registration-form)                                                                                       |
-| **USA**                  | EIA      | downloader &check; | hourly; per company      | API token         | [API browser](https://www.eia.gov/opendata/browser/), [API docs](https://www.eia.gov/opendata/documentation.php),<br> [API registration form](https://www.eia.gov/opendata/register.php)                                                                                                                               |
-| **Canada<br> (Alberta)** | AESO     | downloader &check; | hourly/5 min; per plant  | `box` API token   | [Website](https://www.aeso.ca/market/market-and-system-reporting/data-requests/historical-generation-data/), [Data hosting](https://aeso.app.box.com/s/qofgn9axnnw6uq3ip1goiq2ngb11txe5/folder/196731538687), <br> [API how-to](https://developer.box.com/guides/authentication/tokens/developer-tokens) (s. details!) |
-| **Canada<br> (Ontario)** | IESO     | downloader &check; | hourly; per plant        | public            | [Website](https://www.ieso.ca/power-data/data-directory)                                                                                                                                                                                                                                                               |
-| **Chile**                | CEN      | downloader &check; | hourly; per plant        | API token         | [Website](https://www.coordinador.cl/reportes-y-estadisticas/#Estadisticas), [API site](https://portal.api.coordinador.cl/documentacion?service=sipubv2), <br> [API usage docs](https://cartas.coordinador.cl/download_anexos/66c7447c35635715c87c4271/0)                                                              |
-| **Brazil**               | ONS      | downloader &check; | hourly; per plant        | public            | [Website](https://dados.ons.org.br/dataset/geracao-usina-2), Data hosting on AWS S3                                                                                                                                                                                                                                    |
-| **Uruguay**              | ADME     | downloader &check; | hourly; per plant        | public            | [Website](https://www.adme.com.uy/controlpanel.php), Data hosting [old](https://www.adme.com.uy/gpf_historico.php) / [new](https://www.adme.com.uy/panelControl/gpf.php)                                                                                                                                               |
-| **Australia**            | AEMO     | downloader &check; | hourly/5 min; per plant  | API token         | [Website](https://www.aemo.com.au/),<br> [Python package](https://github.com/opennem/openelectricity-python), [API docs](https://docs.openelectricity.org.au/)                                                                                                                                                         |
-| **New<br>Zealand**       | EAT      | downloader &check; | 30 min; per plant        | public            | [Website / Data hosting](https://www.ea.govt.nz/data-and-insights/datasets/wholesale/generation/generation-output/)                                                                                                                                                                                                    |
-| **Japan**                | REI      | planned            | hourly; per region       | public            | [Website](https://www.renewable-ei.org/en/activities/statistics/20200619.php), [Dashboard](https://www.renewable-ei.org/en/statistics/electricity/#demand),<br> [Example JSON for 2020](https://www.renewable-ei.org/en/statistics/electricity/data/2020/power-data.json)                                              |
-| **Taiwan**               | Taipower | downloader &check; | 10 min; per plant        | public            | [Website](https://www.taipower.com.tw/d006/loadGraph/loadGraph/genshx_e.html), [JSON](https://www.taipower.com.tw/d006/loadGraph/loadGraph/data/genary_eng.json),<br> [Example parser](https://github.com/electricitymaps/electricitymaps-contrib/blob/master/electricitymap/contrib/parsers/TAIPOWER.py)              |
+| Region                   | Source   | Status                                  | Resolution               | Access            | Resources                                                                                                                                                                                                                                                                                                              |
+|--------------------------|----------|-----------------------------------------|--------------------------|-------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Europe**               | ENTSO-e  | downloader &check;                      | hourly/higher; per plant | API token         | [TP](https://transparency.entsoe.eu/), [API guide](https://transparencyplatform.zendesk.com/hc/en-us/sections/12783116987028-Restful-API-integration-guide),<br> [API how-to](https://transparencyplatform.zendesk.com/hc/en-us/articles/12845911031188-How-to-get-security-token)                                     |
+| **Turkey**               | EPIAS    | downloader &check;                      | hourly; per plant        | Login credentials | [TP](https://seffaflik.epias.com.tr/home), [Docs](https://seffaflik.epias.com.tr/electricity-service/technical/en/index.html),<br> [Registration form](https://kayit.epias.com.tr/epias-transparency-platform-registration-form)                                                                                       |
+| **USA**                  | EIA      | downloader &check;                      | hourly; per company      | API token         | [API browser](https://www.eia.gov/opendata/browser/), [API docs](https://www.eia.gov/opendata/documentation.php),<br> [API registration form](https://www.eia.gov/opendata/register.php)                                                                                                                               |
+| **Canada<br> (Alberta)** | AESO     | downloader &check;                      | hourly/5 min; per plant  | `box` API token   | [Website](https://www.aeso.ca/market/market-and-system-reporting/data-requests/historical-generation-data/), [Data hosting](https://aeso.app.box.com/s/qofgn9axnnw6uq3ip1goiq2ngb11txe5/folder/196731538687), <br> [API how-to](https://developer.box.com/guides/authentication/tokens/developer-tokens) (s. details!) |
+| **Canada<br> (Ontario)** | IESO     | downloader &check;                      | hourly; per plant        | public            | [Website](https://www.ieso.ca/power-data/data-directory)                                                                                                                                                                                                                                                               |
+| **Chile**                | CEN      | downloader &check;<br>processor &check; | hourly; per plant        | API token         | [Website](https://www.coordinador.cl/reportes-y-estadisticas/#Estadisticas), [API site](https://portal.api.coordinador.cl/documentacion?service=sipubv2), <br> [API usage docs](https://cartas.coordinador.cl/download_anexos/66c7447c35635715c87c4271/0)                                                              |
+| **Brazil**               | ONS      | downloader &check;                      | hourly; per plant        | public            | [Website](https://dados.ons.org.br/dataset/geracao-usina-2), Data hosting on AWS S3                                                                                                                                                                                                                                    |
+| **Uruguay**              | ADME     | downloader &check;                      | hourly; per plant        | public            | [Website](https://www.adme.com.uy/controlpanel.php), Data hosting [old](https://www.adme.com.uy/gpf_historico.php) / [new](https://www.adme.com.uy/panelControl/gpf.php)                                                                                                                                               |
+| **Australia**            | AEMO     | downloader &check;                      | hourly/5 min; per plant  | API token         | [Website](https://www.aemo.com.au/),<br> [Python package](https://github.com/opennem/openelectricity-python), [API docs](https://docs.openelectricity.org.au/)                                                                                                                                                         |
+| **New<br>Zealand**       | EAT      | downloader &check;                      | 30 min; per plant        | public            | [Website / Data hosting](https://www.ea.govt.nz/data-and-insights/datasets/wholesale/generation/generation-output/)                                                                                                                                                                                                    |
+| **Japan**                | REI      | downloader &check;                      | hourly; per region       | public            | [Website](https://www.renewable-ei.org/en/activities/statistics/20200619.php), [Dashboard](https://www.renewable-ei.org/en/statistics/electricity/#demand),<br> [Example JSON for 2020](https://www.renewable-ei.org/en/statistics/electricity/data/2020/power-data.json)                                              |
+| **Taiwan**               | Taipower | downloader &check;                      | 10 min; per plant        | public            | [Website](https://www.taipower.com.tw/d006/loadGraph/loadGraph/genshx_e.html), [JSON](https://www.taipower.com.tw/d006/loadGraph/loadGraph/data/genary_eng.json),<br> [Example parser](https://github.com/electricitymaps/electricitymaps-contrib/blob/master/electricitymap/contrib/parsers/TAIPOWER.py)              |
 
 ### Data Source Details
 
@@ -274,9 +274,10 @@ RenewBench-Crawler package.
 
   `gen_real_mw` - real generation in MW
 
-  `fecha_hora` - timestamp start in local format (`YYYY-MM-DD HH:MM:SS`)
+  `fecha_hora` - timestamp start in local time (`America/Santiago`, `YYYY-MM-DD HH:MM:SS`)
 
-  `hora` - hour of the day (1 to 24)
+  `hora` - hour of the day (1 to 24; 25 on the day after the clocks are set back, s. Time
+  below)
 
   `potencia_maxima` - maximum capacity or gross maximum power of the plant in MW
 
@@ -288,7 +289,8 @@ RenewBench-Crawler package.
 
   `coordinado` - name of the coordinated entity/operator
 
-  `tipo_tecnologia` - technology type (e.g. `Térmico`, `Hidráulica`, etc)
+  `tipo_tecnologia` - technology type (e.g. `Térmica`, `Hidráulica`, `Solar`, `Eólica`,
+  `Geotérmica`, `BESS`)
 
   `subtipo_tecnologia` - technology subtype (e.g. `Retiro`, `Inyección`, `Embalse`, etc)
 
@@ -325,6 +327,20 @@ RenewBench-Crawler package.
   allow downloading public information for personal or academic use and citing it with
   the source clearly stated; commercial redistribution needs CEN's authorization. The
   published Collections state this ("academic, non-commercial use").
+
+**Processing** (`python -m scripts.energy.cen_process`, s. [usage guide](guide_usage.md))
+
+- Access: an API token is required to access the CEN plant registry for location findint.
+- Coordinates: are taken from CEN's plant registry first. A plant, whose registry name
+  differs from CEN's `central`, or whose registry point lies outside its own registry
+  region is left to [coordinate finding](coordinate_finding.md).
+- IDs: The unique IDs for the Zarr file are generated as `cen-<id_central>`, or `cen-<central>` (lowercase, dashes) for a plant without one.
+- Values: some plants are comprised of multiple configurations - the plant output is the summ of these configurations.
+  Additionally, for battery storage, the charging process (`Retiro`), is considered negative.
+- Time: converted to UTC as described above.
+- Vocabulary: `tipo_tecnologia`/`subtipo_tecnologia` and the registry's `estado` map to
+  STAC's fuel types and statuses in [`rbc/energy/cen/mappings.py`](../rbc/energy/cen/mappings.py)
+  (`STAC_FUELS`, `STAC_COGENERATION_FUELS`, `STAC_STATUSES`).
 
 </details>
 
