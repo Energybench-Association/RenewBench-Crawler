@@ -340,7 +340,9 @@ RenewBench-Crawler package.
 - Time: converted to UTC as described above.
 - Vocabulary: `tipo_tecnologia`/`subtipo_tecnologia` and the registry's `estado` map to
   STAC's fuel types and statuses in [`rbc/energy/cen/mappings.py`](../rbc/energy/cen/mappings.py)
-  (`STAC_FUELS`, `STAC_COGENERATION_FUELS`, `STAC_STATUSES`).
+  (`STAC_FUELS`, `STAC_COGENERATION_FUELS`, `STAC_STATUSES`). A square bracket term in
+  `central` (e.g. `[NO_MOSTRAR]`) is the EGE's true status and overrides `estado`
+  (`STAC_NAME_STATUSES`).
 
 </details>
 
