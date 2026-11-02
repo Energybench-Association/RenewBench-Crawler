@@ -119,6 +119,14 @@ STAC_COGENERATION_FUELS: dict[int, tuple[str, str | None]] = {
 }
 
 # ======= STATUSES =======
+# Map: square bracket term in CEN's name (the EGE's true status, before the registry's)
+STAC_NAME_STATUSES: dict[str, str] = {
+    "NO_MOSTRAR": "decommissioned",
+    "No_Mostrar": "decommissioned",
+    "EN_REVISION": "under_construction",
+    "En_Revision": "under_construction",
+}
+
 # Map: CEN registry's 'estado'.
 STAC_STATUSES: dict[str, str] = {
     "Operativa": "active",
