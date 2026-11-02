@@ -9,13 +9,17 @@ Both identify an EGE by its global ID ('id', s. `global_ids`), the STAC item's I
 A column an operator doesn't provide stays empty, i.e. its value is unknown.
 """
 
-import hashlib
 import json
+from typing import Literal
 
+import numpy as np
 import pandas as pd
 from loguru import logger
+from shapely.geometry import mapping
 
 from rbc.coordinates.mappings import SYSOP_REGION_COL
+from rbc.coordinates.resources.natural_earth import RegionRegistry
+from rbc.coordinates.utils.values import normalize_name
 
 # Columns of the Zarr data: one row per EGE and timestamp
 ZARR_COLUMNS = ["id", "timestamp", "value"]
@@ -31,18 +35,19 @@ STAC_COLUMNS = [
     "operator",
     "fuel_type",
     "fuel_subtype",
+    "hybrid_fuel_types",
     "generation_capacity",
+    "storage_power",
     "status",
     "measurement_type",
     "lat",
     "lon",
     "region",
-    "geometry_level",
-    "location_method",
+    "geometry",
 ]
 
 # Map: coordinate finding's output columns → the EGE table's (the same for every operator)
-LOCATION_COLUMNS = {SYSOP_REGION_COL: "region", "match_method": "location_method"}
+LOCATION_COLUMNS = {SYSOP_REGION_COL: "region"}
 
 
 # ------------------------------------------------------------------
@@ -79,9 +84,11 @@ def codes_as_text(codes: pd.Series) -> pd.Series:
 
 
 def global_ids(sysop: str, keys: pd.Series) -> pd.Series:
-    """Give each EGE an ID unique across all operators: '<sysop>_<hash of its key>'.
+    """Give each EGE a readable ID unique across all operators: '<sysop>-<its key>'.
 
-    Hashing needs no stored state: the same key gets the same ID in every run, and an EGE
+    The key is written in lowercase ASCII with dashes (e.g. CEN's plant ID 1907 gives
+    "cen-1907", a plant known only by its name "BESS Andes" gives "cen-bess-andes").
+    It needs no stored state: the same key gets the same ID in every run, and an EGE
     added later can't take an existing one's.
 
     Args:
@@ -89,41 +96,88 @@ def global_ids(sysop: str, keys: pd.Series) -> pd.Series:
         keys (pd.Series): Each EGE's key, unique within its operator (e.g. its code).
 
     Returns:
-        pd.Series: The EGEs' global IDs (e.g. "cen_e8bdbb4a2d39"), missing without a key.
+        pd.Series: The EGEs' global IDs (e.g. "cen-1907"), missing without a key.
 
     Raises:
-        ValueError: If two keys hash to the same ID.
+        ValueError: If two keys give the same ID (e.g. "BESS Andes", "BESS-ANDES").
     """
     lookup = {
-        key: f"{sysop}_{hashlib.sha256(str(key).encode()).hexdigest()[:12]}"
+        key: f"{sysop}-{normalize_name(str(key)).replace(' ', '-')}"
         for key in keys.dropna().unique()
     }
-    if len(set(lookup.values())) < len(lookup):
-        raise ValueError(
-            f"Two '{sysop}' EGE keys share a global ID: lengthen the hash."
-        )
+    seen: dict[str, object] = {}
+    for key, gid in lookup.items():
+        if gid in seen:
+            raise ValueError(
+                f"'{sysop}' EGE keys '{seen[gid]}' and '{key}' share the ID '{gid}'."
+            )
+        seen[gid] = key
     return keys.map(lookup)
 
 
-def to_utc_iso(timestamps: pd.Series, tz: str) -> pd.Series:
-    """Convert local timestamps to UTC in ISO 8601 (e.g. '2024-01-01T03:00:00+00:00').
+def to_utc(
+    timestamps: pd.Series,
+    tz: str,
+    dst: pd.Series,
+    skipped: Literal["raise", "NaT"] = "raise",
+) -> pd.Series:
+    """Convert local timestamps to UTC, keeping every hour.
 
-    The time zone applies its country's DST rules, past ones included. A local time a
-    DST change makes ambiguous or skips stays empty: which hour it means is unknown.
+    The time zone applies its country's DST rules, past ones included. The hour a DST
+    change repeats (clocks set back) is told apart by `dst`. An hour a DST change skips
+    (clocks set forward) can't hold real data, so it raises instead of being guessed,
+    unless the caller handles such rows itself (`skipped="NaT"`).
 
     Args:
         timestamps (pd.Series): Naive local timestamps, e.g. '2024-01-01 00:00:00'.
         tz (str): The operator's IANA time zone, e.g. "America/Santiago".
+        dst (pd.Series): Whether each timestamp is daylight saving time. Only read where
+            the local time is repeated, e.g. True for the first of its two rows.
+        skipped (Literal["raise", "NaT"], optional): What a timestamp in an hour a DST
+            change skips gets: an error, or NaT for the caller to handle. Defaults to
+            "raise".
 
     Returns:
-        pd.Series: The timestamps in UTC as text, missing where ambiguous or skipped.
+        pd.Series: The timestamps in UTC (tz-aware), none missing (unless skipped).
+
+    Raises:
+        ValueError: If a timestamp is missing or (by default) lies in an hour a DST
+            change skips.
     """
-    local = pd.to_datetime(timestamps).dt.tz_localize(
-        tz, ambiguous="NaT", nonexistent="NaT"
+    local = pd.to_datetime(timestamps)
+    if missing := int(local.isna().sum()):
+        raise ValueError(f"{missing} timestamps are missing.")
+
+    aware = local.dt.tz_localize(
+        tz, ambiguous=dst.to_numpy(dtype=bool), nonexistent="NaT"
     )
-    if unknown := int((local.isna() & timestamps.notna()).sum()):
-        logger.warning(f"{unknown} timestamps at a DST change left empty ({tz}).")
-    return local.dt.tz_convert("UTC").dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    if skipped == "raise" and (in_gap := aware.isna()).any():
+        raise ValueError(
+            f"{int(in_gap.sum())} timestamps lie in an hour a DST change skips ({tz}), "
+            f"e.g. {sorted(local[in_gap].astype(str).unique())[:5]}."
+        )
+    return aware.dt.tz_convert("UTC")
+
+
+def check_totals_kept(before: pd.Series, after: pd.Series, what: str) -> None:
+    """Raise if a reshaping step changed any EGE's total, so no value was lost or added.
+
+    Args:
+        before (pd.Series): Each EGE's total before the step, indexed by its ID.
+        after (pd.Series): Each EGE's total after the step, indexed by its ID.
+        what (str): The data the totals are of, for the error, e.g. a file name.
+
+    Raises:
+        ValueError: If an EGE's totals differ (beyond float rounding).
+    """
+    before, after = before.align(after, fill_value=0.0)
+    changed = ~np.isclose(before.to_numpy(float), after.to_numpy(float))
+    if changed.any():
+        diff = (after - before)[changed]
+        raise ValueError(
+            f"Totals changed for {int(changed.sum())} EGEs in {what}: "
+            f"{diff.head(5).round(3).to_dict()}"
+        )
 
 
 def log_unjoined_ids(zarr_ids: set[str], stac_ids: pd.Series) -> None:
@@ -213,16 +267,74 @@ def entity_ids(df_ege: pd.DataFrame, own: dict[str, pd.Series]) -> pd.Series:
     )
 
 
-def geometry_level(df: pd.DataFrame) -> pd.Series:
-    """Name the smallest geometry each EGE's location is certain to.
+def combine_fuels(fuels: pd.DataFrame) -> pd.DataFrame:
+    """Combine each EGE's reported fuels into its STAC fuel fields.
 
     Args:
-        df (pd.DataFrame): EGEs in the STAC_COLUMNS layout.
+        fuels (pd.DataFrame): One row per EGE and reported fuel, with the columns "id",
+            "fuel_type" and "fuel_subtype" (in STAC's vocabulary).
 
     Returns:
-        pd.Series: "point" where coordinates were found, else "region" where the region
-            is known, else "country".
+        pd.DataFrame: Indexed by EGE ID, with "fuel_type", "fuel_subtype" and
+            "hybrid_fuel_types" (a list, only for hybrids).
+
+    Raises:
+        ValueError: If an EGE reports no fuel at all.
     """
-    level = pd.Series("country", index=df.index, dtype=object)
-    level = level.mask(df["region"].notna(), "region")
-    return level.mask(df["lat"].notna(), "point")
+    named = fuels.dropna(subset=["fuel_type"])
+    if missing := sorted(set(fuels["id"]) - set(named["id"])):
+        raise ValueError(f"{len(missing)} EGEs report no fuel type: {missing[:5]}")
+
+    rows: dict[str, tuple[str, str | None, list[str] | None]] = {}
+    for ege, group in named.groupby("id"):
+        types = sorted(set(group["fuel_type"]))
+        subtypes = sorted(set(group["fuel_subtype"].dropna()))
+        if len(types) == 1:
+            rows[ege] = (types[0], subtypes[0] if len(subtypes) == 1 else None, None)
+        else:
+            rows[ege] = ("hybrid", None, types)
+    return pd.DataFrame.from_dict(
+        rows,
+        orient="index",
+        columns=["fuel_type", "fuel_subtype", "hybrid_fuel_types"],
+    )
+
+
+def geometries(
+    df: pd.DataFrame, country: str, region_reg: RegionRegistry | None
+) -> pd.Series:
+    """Give each EGE the smallest geometry its location is certain to, as GeoJSON.
+
+    A point where coordinates were found, else its region's polygon where the region is
+    known (s. Natural Earth), else its country's polygon.
+
+    Args:
+        df (pd.DataFrame): EGEs in the STAC_COLUMNS layout ("lat", "lon", "region").
+        country (str): The operator's country, e.g. "Chile".
+        region_reg (RegionRegistry | None): Natural Earth region lookup for polygons.
+
+    Returns:
+        pd.Series: Each EGE's geometry (GeoJSON dict), in the index of `df`.
+
+    Raises:
+        ValueError: If an EGE needs a polygon but none is found for its country.
+    """
+    shapes: dict = {}  # polygons are shared by many EGEs: look each up once
+
+    def polygon(region: str | None) -> dict | None:
+        if region not in shapes:
+            geom = region_reg.geometry(country, region) if region_reg else None
+            shapes[region] = mapping(geom) if geom is not None else None
+        return shapes[region]
+
+    out = []
+    for lat, lon, region in zip(df["lat"], df["lon"], df["region"]):
+        if pd.notna(lat) and pd.notna(lon):
+            out.append({"type": "Point", "coordinates": [lon, lat]})
+        elif pd.notna(region) and (geom := polygon(region)) is not None:
+            out.append(geom)
+        elif (geom := polygon(None)) is not None:
+            out.append(geom)
+        else:
+            raise ValueError(f"No polygon found for '{country}' to place EGEs in.")
+    return pd.Series(out, index=df.index, dtype=object)
