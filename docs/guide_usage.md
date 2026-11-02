@@ -122,11 +122,3 @@ whenever it wrote new data.
 | Rows a processor keeps out of the data for review (s. the source in the [data sources catalogue](data_sources.md)) | `<dst_dir_proc>/` |
 | Coordinate finding results and map | `<dst_dir_proc>/coordinates/` |
 | Logs | `<dst_dir_proc>/logs/` |
-
-### On a Slurm cluster
-
-`scripts/energy/slurm/pipeline.sh` runs a source's download (resuming) and processing in
-one job; its header lists what it needs (configs, the S3 credentials file):
-```commandline
-sbatch --job-name=<source> --export=ALL,SOURCE=<source> scripts/energy/slurm/pipeline.sh
-```
