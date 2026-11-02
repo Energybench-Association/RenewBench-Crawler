@@ -95,8 +95,6 @@ started, the following are available:
 - [**Coordinate finding**](docs/coordinate_finding.md):
   How energy generating entities are located (locator sources, matching strategy,
   examples) and how to run and compare coordinate finding.
-- [**CEN (Chile) status**](docs/cen_status.md):
-  What the first end-to-end region (CEN) does, how it was verified, and the open work.
 
 ## How to contribute
 Check out our [contribution guidelines](CONTRIBUTING.md) if you are interested in contributing to the RenewBench project :fire:.
