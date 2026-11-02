@@ -82,3 +82,48 @@ for key, value in EGE_NAME_BASE_TRANSLATIONS.items():
             EGE_NAME_TRANSLATIONS[key.removesuffix("l") + "es"] = value
         elif key.endswith("el"):
             EGE_NAME_TRANSLATIONS[key.removesuffix("l") + "is"] = value
+
+
+# ---------------------------------------------------------------------------
+# STAC Definitions (the energy extension's vocabulary)
+# ---------------------------------------------------------------------------
+# ======= FUEL TYPES =======
+# Map: CEN's (tipo_tecnologia, subtipo_tecnologia) → STAC (energy:fuel_type, energy:fuel_subtype).
+STAC_FUELS: dict[tuple[str, str | None], tuple[str, str | None]] = {
+    ("Solar", None): ("solar", "pv"),
+    ("Eólica", None): ("wind", "onshore"),
+    ("Geotérmica", None): ("geothermal", None),
+    ("Hidráulica", "Embalse"): ("hydro", "reservoir"),
+    ("Hidráulica", "Pasada"): ("hydro", "run_of_river"),
+    ("BESS", "Inyección"): ("storage", None),  # discharging
+    ("BESS", "Retiro"): ("storage", None),  # charging
+    ("Térmica", "Carbón"): ("coal", None),
+    ("Térmica", "Gas Natural"): ("gas", None),
+    ("Térmica", "GLP"): ("gas", "lpg"),
+    ("Térmica", "BioGas"): ("gas", "biogas"),
+    ("Térmica", "Diésel"): ("oil", "diesel"),
+    ("Térmica", "Fuel Oil"): ("oil", "fuel_oil"),
+    ("Térmica", "PetCoke"): ("oil", "petcoke"),  # petroleum coke: an oil product (IEA)
+    ("Térmica", "Biomasa"): ("biomass", None),
+    ("Térmica", "Termosolar"): ("solar", "csp"),
+}
+
+# CEN's combination for combined heat and power.
+COGENERATION = ("Térmica", "Cogeneración")
+# Map: CEN plant ID → STAC (energy:fuel_type, energy:fuel_subtype), for the plants CEN
+# reports only as COGENERATION
+STAC_COGENERATION_FUELS: dict[int, tuple[str, str | None]] = {
+    397: ("wasteheat", "chp"),  # TER PLANTA DE ACIDO SULFURICO MEJILLONES: process heat
+    1844: ("biomass", "chp"),  # TER ARAUCO MAPA: pulp mill
+    1907: ("biomass", "chp"),  # TER NUEVA ALDEA: pulp mill (biomass, black liquor)
+}
+
+# ======= STATUSES =======
+# Map: CEN registry's 'estado'.
+STAC_STATUSES: dict[str, str] = {
+    "Operativa": "active",
+    "Operativa – Autodespacho DS88": "active",  # self-dispatched small plant (DS 88)
+    "En Pruebas": "active",  # generating, in commissioning tests
+    "En Construcción": "under_construction",
+    "Fuera de Servicio": "inactive",  # out of service (the registry has no "retired")
+}
