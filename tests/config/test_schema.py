@@ -126,3 +126,22 @@ def test_config_leaves_proc_dir_to_processing(
     assert Path(tmp_path, "ons").is_dir()
     assert cfg.paths.dst_dir_proc == Path(tmp_path, "processed", "ons")
     assert not cfg.paths.dst_dir_proc.exists()
+
+
+def test_publish_config_names_unset_urls(source_configs: dict) -> None:
+    """Happy & failure path: the public config's placeholders are named, real URLs not.
+
+    Args:
+        source_configs (dict): Dictionary of all source configurations.
+    """
+    schema = SCHEMA_REGISTRY["publish"]
+    cfg = schema.model_validate(source_configs["publish"])
+    assert cfg.unset_urls() == []
+
+    placeholders = {
+        **source_configs["publish"],
+        "data_base_url": "YOUR-DATA-BASE-URL",
+        "storage": {"endpoint": "YOUR-S3-ENDPOINT"},
+    }
+    cfg = schema.model_validate(placeholders)
+    assert cfg.unset_urls() == ["data_base_url", "storage.endpoint"]

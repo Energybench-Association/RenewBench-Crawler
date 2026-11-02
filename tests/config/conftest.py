@@ -61,6 +61,12 @@ def source_configs(tmp_path: Path) -> dict:
         "coordinates": {
             "paths": {"resources_dir": str(Path(tmp_path, "coordinate_resources"))},
         },
+        "publish": {
+            "release": "v0.1.0",
+            "data_base_url": "https://data.example.org",
+            "storage": {"endpoint": "https://s3.example.org"},
+            "stac_api": "https://stac.example.org",
+        },
     }
 
 
