@@ -49,7 +49,7 @@ ENERGY_FIELDS = [
     "status",
     "measurement_type",
 ]
-# The fields summarized as value lists in the Collection (the Explorer's facets)
+# The fields summarized as value lists in the Collection (for filtering a search)
 SUMMARY_FIELDS = ["fuel_type", "entity_type", "status", "measurement_type"]
 
 

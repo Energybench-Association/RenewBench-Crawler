@@ -153,7 +153,7 @@ def test_existing_release_with_other_eges_raises(tmp_path: Path) -> None:
 
 
 def test_repo_prefix_and_storage_href(tmp_path: Path) -> None:
-    """Happy path: the backend's prefix layout, and where readers find the repository."""
+    """Happy path: the repository prefix layout, and where readers find it."""
     prefix = repo_prefix("cen", "1h")
     assert prefix == "energy/cen/PT1H/repository"
     assert repo_prefix("entsoe", "15min") == "energy/entsoe/PT15M/repository"

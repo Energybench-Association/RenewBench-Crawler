@@ -28,8 +28,7 @@ class StorageInfo:
     """Where a repository lives, as the STAC Items' data asset names it.
 
     Readers never reach the storage directly: a published repository is named by its
-    permanent data URL, which energybench's reception redirects to the storage's current
-    temporary links.
+    permanent data URL, which redirects to the storage's current temporary links.
 
     Attributes:
         prefix (str): Repository prefix in the bucket, e.g. "energy/cen/PT1H/repository".

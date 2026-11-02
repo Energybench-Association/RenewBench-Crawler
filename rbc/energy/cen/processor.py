@@ -302,8 +302,8 @@ class CenProcessor:
         if self.upload and not store.reused:
             logger.warning(
                 f"Release '{release}' wrote new objects: readers reach them through "
-                f"{storage.href} only once a new batch of temporary links is delivered "
-                f"to reception (by the LSDF)."
+                f"{storage.href} only once the LSDF delivers a new batch of temporary "
+                f"links for them."
             )
         # kept for review: CEN's rows for hours the clocks skipped (no real hour)
         write_df_to_csv(

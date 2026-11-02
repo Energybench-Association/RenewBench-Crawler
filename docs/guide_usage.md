@@ -101,7 +101,7 @@ The publishing config (`configs/publish/publish.yaml`) defines:
   STAC asset's `href` is `{data_base_url}/{bucket}/{prefix}`.
 - `storage`: the S3 endpoint and bucket the repositories are written to, and
   `s3_region`, the region S3 requests are signed for. This must be the s3 regions expected
-   by the S3 backend (e.g. `us-east-1`).
+   by the S3 storage (e.g. `us-east-1`).
 - `stac_api`: the STAC API the records are published to.
 - `chunks`: the arrays' chunk shape, in EGEs and days of data (whatever the resolution).
 
@@ -109,8 +109,8 @@ For example, publishing release `v0.2.0`:
 ```commandline
 python -m scripts.energy.<source>_process -o release=v0.2.0 -o data_base_url=<data_base_url> -o storage.endpoint=<s3_endpoint> -o stac_api=<stac_api_url>
 ```
-A release's new objects are reachable through the data URL only once reception has a new
-batch of temporary links for them (delivered by the LSDF). The run logs a reminder
+A release's new objects are reachable through the data URL only once the LSDF has
+delivered a new batch of temporary links for them. The run logs a reminder
 whenever it wrote new data.
 
 ### Outputs

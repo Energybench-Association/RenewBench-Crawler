@@ -98,8 +98,8 @@ def test_items_and_collection_are_valid(needs_stac_schemas: None) -> None:
     stac.validate(coll, items)
 
 
-def test_items_carry_the_backends_fields() -> None:
-    """Happy path: Items hold the energy fields and the backend's data asset."""
+def test_items_carry_the_energy_fields_and_data_asset() -> None:
+    """Happy path: Items hold the energy fields and the repository's data asset."""
     coll, items = _built()
 
     a, b = items
