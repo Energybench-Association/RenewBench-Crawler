@@ -145,3 +145,13 @@ def test_publish_config_names_unset_urls(source_configs: dict) -> None:
     }
     cfg = schema.model_validate(placeholders)
     assert cfg.unset_urls() == ["data_base_url", "storage.endpoint"]
+
+    # writing to a shared filesystem instead needs no S3 endpoint
+    placeholders["storage"] = {"endpoint": "YOUR-S3-ENDPOINT", "local_root": "/lsdf"}
+    cfg = schema.model_validate(placeholders)
+    assert cfg.unset_urls() == ["data_base_url"]
+
+    # and handing the records over through a folder needs no STAC API
+    placeholders.update(stac_api="YOUR-STAC-API-URL", stac_inbox="/lsdf/inbox")
+    cfg = schema.model_validate(placeholders)
+    assert cfg.unset_urls() == ["data_base_url"]

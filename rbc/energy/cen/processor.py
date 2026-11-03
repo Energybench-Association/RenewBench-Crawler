@@ -54,6 +54,7 @@ from rbc.publish.stac import (
     DatasetInfo,
     build_collection,
     build_items,
+    drop_stac,
     publish,
     validate,
     write_stac,
@@ -302,8 +303,7 @@ class CenProcessor:
         if self.upload and not store.reused:
             logger.warning(
                 f"Release '{release}' wrote new objects: readers reach them through "
-                f"{storage.href} only once the LSDF delivers a new batch of temporary "
-                f"links for them."
+                f"{storage.href} only once new temporary links are signed for them."
             )
         # kept for review: CEN's rows for hours the clocks skipped (no real hour)
         write_df_to_csv(
@@ -329,7 +329,9 @@ class CenProcessor:
         )
         validate(collection, items)
         write_stac(Path(self.output_dir, "stac"), collection, items)
-        if self.upload:
+        if self.upload and self.publish_cfg.stac_inbox:
+            drop_stac(self.publish_cfg.stac_inbox, collection, items)
+        elif self.upload:
             publish(self.publish_cfg.stac_api, collection, items)
 
     # ------------------------------------------------------------------
@@ -742,9 +744,11 @@ class CenProcessor:
             ic.Repository: The opened repository.
         """
         cfg = self.publish_cfg.storage
+        # published straight to a shared filesystem: <local_root>/<bucket>/<prefix>
+        published_dir = Path(cfg.local_root, cfg.bucket) if cfg.local_root else None
         return open_repository(
             storage.prefix,
-            local_dir=storage.local_dir,
+            local_dir=storage.local_dir or published_dir,
             endpoint=cfg.endpoint,
             bucket=cfg.bucket,
             s3_region=cfg.s3_region,

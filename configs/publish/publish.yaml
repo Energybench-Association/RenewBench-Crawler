@@ -9,4 +9,10 @@ storage:
   endpoint: YOUR-S3-ENDPOINT  # S3 endpoint the processing writes to
   bucket: energybench
   s3_region: us-east-1  # region
+  # On a cluster that mounts the storage (e.g. the LSDF), write the repositories straight
+  # to <local_root>/<bucket>/ instead of over S3; then no endpoint or S3 keys are needed.
+  # local_root: /path/to/the/directory/holding/the/bucket
 stac_api: YOUR-STAC-API-URL  # root of the STAC API (with Transactions)
+# Where the API can't be reached (e.g. from a cluster), hand the STAC records over
+# through a folder the platform watches instead; then stac_api is not needed.
+# stac_inbox: /path/to/the/inbox

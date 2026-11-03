@@ -626,6 +626,54 @@ def test_publishing_refuses_placeholder_urls(make_processor: Callable) -> None:
     make_processor(publish_cfg=placeholders, upload=False)
 
 
+def test_publishing_from_a_cluster(make_processor: Callable, tmp_path: Path) -> None:
+    """Happy path: with `local_root` and `stac_inbox`, publishing needs no network.
+
+    The repository is written straight to the shared filesystem, and the STAC records,
+    still naming the public data URL, are handed over through the inbox instead of the
+    STAC API. No S3 endpoint, credentials or API URL are involved.
+
+    Args:
+        make_processor (Callable): Factory for processors.
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+    lsdf = Path(tmp_path, "lsdf")
+    cfg = PUBLISH_CFG.model_copy(
+        update={
+            "storage": PUBLISH_CFG.storage.model_copy(
+                update={
+                    "endpoint": "YOUR-S3-ENDPOINT",
+                    "local_root": Path(lsdf, "data"),
+                }
+            ),
+            "stac_api": "YOUR-STAC-API-URL",
+            "stac_inbox": Path(lsdf, "inbox"),
+        }
+    )
+    _write_raw(Path(tmp_path, "raw", "cen", "1h"))
+    with (
+        patch.object(processor, "build_map"),
+        patch.object(processor, "validate", _skip),
+        patch.object(processor, "publish") as mock_publish,
+    ):
+        make_processor(
+            region_reg=_region_reg({}), publish_cfg=cfg, upload=True
+        ).process_data()
+
+    prefix = "energy/cen/PT1H/repository"
+    repo = ic.Repository.open(
+        ic.local_filesystem_storage(str(Path(lsdf, "data", "energybench", prefix)))
+    )
+    folder = Path(lsdf, "inbox", "cen__v0.1.0")
+    item = json.loads(next(Path(folder, "items").glob("*.json")).read_text())
+    data = item["assets"]["data"]
+    assert data["href"] == f"https://data.example.org/energybench/{prefix}"
+    assert data["icechunk:snapshot"] == repo.lookup_tag("v0.1.0")
+    assert Path(folder, "collection.json").is_file()
+    mock_publish.assert_not_called()
+    assert not Path(tmp_path, "processed", "cen", "icechunk").exists()
+
+
 def test_process_data_without_raw(make_processor: Callable, tmp_path: Path) -> None:
     """Failure path: with no raw data, processing stops instead of publishing nothing.
 

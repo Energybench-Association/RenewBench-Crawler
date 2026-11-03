@@ -184,6 +184,24 @@ def test_write_stac(tmp_path: Path) -> None:
     assert sorted(p.stem for p in Path(folder, "items").iterdir()) == ["op_a", "op_b"]
 
 
+def test_drop_stac_replaces_a_waiting_release(tmp_path: Path) -> None:
+    """Happy path: a release is moved into the inbox whole, replacing one still waiting.
+
+    Args:
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+    coll, items = _built()
+    stale = Path(tmp_path, coll["id"], "items", "gone.json")
+    stale.parent.mkdir(parents=True)
+    stale.write_text("{}")
+
+    folder = stac.drop_stac(tmp_path, coll, items)
+
+    assert folder == Path(tmp_path, coll["id"])
+    assert sorted(p.stem for p in Path(folder, "items").iterdir()) == ["op_a", "op_b"]
+    assert not any(Path(tmp_path, ".incoming").iterdir())
+
+
 def test_publish_creates_or_replaces() -> None:
     """Happy path: existing records (409) are replaced; a refusal raises."""
     coll, items = _built()

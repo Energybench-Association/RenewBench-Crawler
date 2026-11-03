@@ -5,6 +5,7 @@ Describe a release as a STAC Collection with one Item per energy generating enti
 
 import json
 import math
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -322,6 +323,30 @@ def write_stac(out_dir: Path, collection: JSON, items: list[JSON]) -> Path:
         Path(folder, "items", f"{item['id']}.json").write_text(json.dumps(item))
     logger.info(f"Wrote STAC Collection and {len(items)} Items to {folder}")
     return folder
+
+
+def drop_stac(inbox: Path, collection: JSON, items: list[JSON]) -> Path:
+    """Hand the Collection and its Items over through a folder the platform watches.
+
+    They are written beside the folder, under `.incoming`, then moved in at once, so
+    the platform never picks up a half-written release; one already waiting is replaced.
+
+    Args:
+        inbox (Path): The watched folder, e.g. on the LSDF.
+        collection (JSON): The Collection.
+        items (list[JSON]): Its Items.
+
+    Returns:
+        Path: The release's folder in the inbox.
+    """
+    staging = Path(inbox, ".incoming", collection["id"])
+    shutil.rmtree(staging, ignore_errors=True)  # leftovers of an interrupted run
+    write_stac(staging.parent, collection, items)
+    target = Path(inbox, collection["id"])
+    shutil.rmtree(target, ignore_errors=True)  # not yet picked up: replace it
+    staging.rename(target)
+    logger.info(f"Handed Collection '{collection['id']}' over in {target}")
+    return target
 
 
 def publish(api_url: str, collection: JSON, items: list[JSON]) -> None:

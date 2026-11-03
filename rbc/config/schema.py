@@ -363,11 +363,15 @@ class PublishStorage(BaseModel):
         endpoint (str): S3 endpoint the processing writes to.
         bucket (str): Bucket of the repositories.
         s3_region (str): Region the S3 requests are signed for.
+        local_root (Path | None): Directory holding the bucket's directory on a shared
+            filesystem (e.g. the LSDF, mounted on a cluster). If set, repositories are
+            written there directly instead of over S3, and `endpoint` is not needed.
     """
 
     endpoint: str
     bucket: str = "energybench"
     s3_region: str = "us-east-1"
+    local_root: Path | None = None
 
 
 class PublishChunks(BaseModel):
@@ -392,6 +396,9 @@ class PublishConfig(BaseModel):
         data_base_url (str): Permanent public data URL the STAC assets name.
         storage (PublishStorage): Where the Icechunk repositories are written.
         stac_api (str): Root URL of the STAC API the records are published to.
+        stac_inbox (Path | None): Folder the hosting platform picks the records up from
+            (e.g. on the LSDF), used instead of `stac_api` where the API can't be
+            reached, as from a cluster.
         chunks (PublishChunks): Chunk shape of the generation arrays.
     """
 
@@ -400,6 +407,7 @@ class PublishConfig(BaseModel):
     data_base_url: str
     storage: PublishStorage
     stac_api: str
+    stac_inbox: Path | None = None
     chunks: PublishChunks = PublishChunks()
 
     def unset_urls(self) -> list[str]:
@@ -410,8 +418,12 @@ class PublishConfig(BaseModel):
         """
         urls = {
             "data_base_url": self.data_base_url,
-            "storage.endpoint": self.storage.endpoint,
-            "stac_api": self.stac_api,
+            # writing to a shared filesystem needs no S3 endpoint
+            "storage.endpoint": self.storage.endpoint
+            if self.storage.local_root is None
+            else "",
+            # handing the records over through a folder needs no STAC API
+            "stac_api": self.stac_api if self.stac_inbox is None else "",
         }
         return [name for name, url in urls.items() if url.startswith("YOUR-")]
 

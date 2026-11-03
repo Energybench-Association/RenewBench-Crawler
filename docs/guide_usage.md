@@ -102,22 +102,29 @@ The publishing config (`configs/publish/publish.yaml`) defines:
 - `storage`: the S3 endpoint and bucket the repositories are written to, and
   `s3_region`, the region S3 requests are signed for. This must be the s3 regions expected
    by the S3 storage (e.g. `us-east-1`).
-- `stac_api`: the STAC API the records are published to.
+  To write straight to a shared filesystem that holds the bucket instead (the LSDF,
+  mounted on a cluster), set `storage.local_root` to the directory containing the
+  bucket's directory: repositories go to `<local_root>/<bucket>/<prefix>`, and neither
+  the endpoint nor S3 credentials are needed. The `href`s are the same either way.
+- `stac_api`: the STAC API the records are published to. Where it can't be reached (from
+  a cluster), set `stac_inbox` instead: a folder the platform watches (on the LSDF), into
+  which each release's records are moved once complete. The platform publishes them and
+  signs links for the new data within minutes.
 - `chunks`: the arrays' chunk shape, in EGEs and days of data (whatever the resolution).
 
 For example, publishing release `v0.2.0`:
 ```commandline
 python -m scripts.energy.<source>_process -o release=v0.2.0 -o data_base_url=<data_base_url> -o storage.endpoint=<s3_endpoint> -o stac_api=<stac_api_url>
 ```
-A release's new objects are reachable through the data URL only once the LSDF has
-delivered a new batch of temporary links for them. The run logs a reminder
+A release's new objects are reachable through the data URL only once new temporary
+links have been signed for them. The run logs a reminder
 whenever it wrote new data.
 
 ### Outputs
 
 | Output | Where |
 |---|---|
-| Icechunk repositories | published: S3 (`storage`), prefix `energy/<source>/<resolution>/repository`; with `--no-publish`: `<dst_dir_proc>/icechunk/` |
+| Icechunk repositories | published: S3 (`storage`), or `<storage.local_root>/<bucket>/` if set, prefix `energy/<source>/<resolution>/repository`; with `--no-publish`: `<dst_dir_proc>/icechunk/` |
 | STAC Collection and Items | `<dst_dir_proc>/stac/<source>__<release>/` (a static catalog), and the STAC API when published |
 | Rows a processor keeps out of the data for review (s. the source in the [data sources catalogue](data_sources.md)) | `<dst_dir_proc>/` |
 | Coordinate finding results and map | `<dst_dir_proc>/coordinates/` |
