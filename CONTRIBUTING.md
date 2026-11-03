@@ -10,7 +10,7 @@ By participating, you can help improve the project and make it even better :rais
 
 2. **Clone Your Fork**: Clone your forked repository to your local machine using Git :octocat::
    ```bash
-   git clone https://github.com/RenewBench-Association/RenewBench-Crawler
+   git clone https://github.com/Energybench-Association/RenewBench-Crawler
    ```
 
 3. **Install the Package with Development Options** in a separate virtual environment from the main branch of your repo.
@@ -109,7 +109,7 @@ By participating, you can help improve the project and make it even better :rais
    git push origin features/your-feature-name
    ```
 
-9. **Open a Pull Request**: Go to the [original repository](https://github.com/RenewBench-Association/RenewBench-Crawler) and click the "New Pull Request" button. Follow the guidelines in the template to submit your pull request. Resolve possible merge conflicts with the current main branch.
+9. **Open a Pull Request**: Go to the [original repository](https://github.com/Energybench-Association/RenewBench-Crawler) and click the "New Pull Request" button. Follow the guidelines in the template to submit your pull request. Resolve possible merge conflicts with the current main branch.
 
 ## Code of Conduct
 
@@ -117,6 +117,6 @@ Please note that we have a [Code of Conduct](CODE_OF_CONDUCT.md), and we expect 
 
 ## Questions or Issues
 
-If you have questions or encounter any issues, please create an issue in the [Issues](https://github.com/RenewBench-Association/RenewBench-Crawler/issues) section of this repository.
+If you have questions or encounter any issues, please create an issue in the [Issues](https://github.com/Energybench-Association/RenewBench-Crawler/issues) section of this repository.
 
 Thank you for your contribution :pray:!

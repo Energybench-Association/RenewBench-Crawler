@@ -7,9 +7,9 @@
 [![](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![pre-commit.ci status](https://results.pre-commit.ci/badge/github/RenewBench-Association/RenewBench-Crawler/main.svg)](https://results.pre-commit.ci/latest/github/RenewBench-Association/RenewBench-Crawler/main)
+[![pre-commit.ci status](https://results.pre-commit.ci/badge/github/Energybench-Association/RenewBench-Crawler/main.svg)](https://results.pre-commit.ci/latest/github/Energybench-Association/RenewBench-Crawler/main)
 [![](https://img.shields.io/badge/Contact-renewbench%40lists.kit.edu-orange)](renewbench@lists.kit.edu)
-[![codecov](https://codecov.io/gh/RenewBench-Association/RenewBench-Crawler/graph/badge.svg?token=WPJJT4S0RA)](https://codecov.io/gh/RenewBench-Association/RenewBench-Crawler)
+[![codecov](https://codecov.io/gh/Energybench-Association/RenewBench-Crawler/graph/badge.svg?token=WPJJT4S0RA)](https://codecov.io/gh/Energybench-Association/RenewBench-Crawler)
 
 ## What is the RenewBench Crawler Repository?
 
@@ -21,12 +21,12 @@ configuration files and scripts to run the downloads.
 We heavily recommend installing the `rcb`package in a dedicated `Python3.11+` virtual environment. You can
 install ``rcp`` directly from the GitHub repository via:
 ```bash
-pip install git+https://github.com/RenewBench-Association/RenewBench-Crawler
+pip install git+https://github.com/Energybench-Association/RenewBench-Crawler
 ```
 Alternatively, you can install ``rcb`` locally. To achieve this, there are two steps you need to follow:
 1. Clone the RenewBench-Crawler repository:
    ```bash
-   git clone https://github.com/RenewBench-Association/RenewBench-Crawler
+   git clone https://github.com/Energybench-Association/RenewBench-Crawler
    ```
 2. Install the package from the main branch. There are multiple installation options available:
    - Install basic dependencies: ``pip install .``

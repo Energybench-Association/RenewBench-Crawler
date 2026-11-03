@@ -11,6 +11,7 @@ from pathlib import Path
 import geopandas as gpd
 from loguru import logger
 from shapely.geometry import Point
+from shapely.geometry.base import BaseGeometry
 from shapely.prepared import PreparedGeometry, prep
 
 from rbc.coordinates.utils.resources import fetch_resource
@@ -97,6 +98,37 @@ class RegionRegistry:
             return "within_bounds"
 
         return "mismatch"
+
+    def geometry(
+        self, country: str, region: str | None = None, generalize: float = 0.1
+    ) -> BaseGeometry | None:
+        """Give a region's outline, or the whole country's without a region.
+
+        Used to place EGEs located only to their region or country (e.g. as STAC
+        geometry).
+
+        Args:
+            country (str): The country.
+            region (str | None, optional): The region's name, as the sysop gives it.
+                Defaults to None, which gives the country's outline.
+            generalize (float, optional): Buffer and simplification in degrees
+                (0.1° ≈ 10 km). Defaults to 0.1; 0 gives the exact polygon.
+
+        Returns:
+            BaseGeometry | None: The (multi)polygon in lon/lat, None if unknown.
+        """
+        if region is None:
+            gdf = self._get_admin1_df()
+            gdf = gdf[gdf["admin"].map(normalize_name) == normalize_name(country)]
+            if gdf.empty:
+                return None
+            geom = gdf.geometry.union_all()
+        else:
+            polys = self._get_country_polys(country).get(normalize_name(region))
+            if polys is None:
+                return None
+            geom = polys[0].context
+        return geom.buffer(generalize).simplify(generalize) if generalize else geom
 
     # ------------------------------------------------------------------
     # Internal helpers

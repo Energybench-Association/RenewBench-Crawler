@@ -354,6 +354,69 @@ class CoordinatesConfig(PathValidation, BaseModel):
 
 
 # ----------------------------------
+# Publishing schemas
+# ----------------------------------
+class PublishStorage(BaseModel):
+    """S3 storage the Icechunk repositories are written to.
+
+    Attributes:
+        endpoint (str): S3 endpoint the processing writes to.
+        bucket (str): Bucket of the repositories.
+        s3_region (str): Region the S3 requests are signed for.
+    """
+
+    endpoint: str
+    bucket: str = "energybench"
+    s3_region: str = "us-east-1"
+
+
+class PublishChunks(BaseModel):
+    """Chunk shape of the generation arrays.
+
+    Attributes:
+        entities (int): EGEs per chunk.
+        days (int): Days of data per chunk, whatever the data's temporal resolution
+            (e.g. 365 days = 8760 hourly or 35040 15-minute steps).
+    """
+
+    entities: int = 16
+    days: int = 365
+
+
+class PublishConfig(BaseModel):
+    """Configuration schema for publishing processed data to energybench.
+
+    Attributes:
+        source (Literal): Name of the config.
+        release (str): The release to write and publish, e.g. "v0.1.0".
+        data_base_url (str): Permanent public data URL the STAC assets name.
+        storage (PublishStorage): Where the Icechunk repositories are written.
+        stac_api (str): Root URL of the STAC API the records are published to.
+        chunks (PublishChunks): Chunk shape of the generation arrays.
+    """
+
+    source: Literal["publish"] = "publish"
+    release: str
+    data_base_url: str
+    storage: PublishStorage
+    stac_api: str
+    chunks: PublishChunks = PublishChunks()
+
+    def unset_urls(self) -> list[str]:
+        """Name the URLs still holding their placeholder, which publishing needs set.
+
+        Returns:
+            list[str]: e.g. ["data_base_url", "storage.endpoint"]; empty if all are set.
+        """
+        urls = {
+            "data_base_url": self.data_base_url,
+            "storage.endpoint": self.storage.endpoint,
+            "stac_api": self.stac_api,
+        }
+        return [name for name, url in urls.items() if url.startswith("YOUR-")]
+
+
+# ----------------------------------
 # Schema registry
 # ----------------------------------
 SCHEMA_REGISTRY: dict[str, Type[BaseModel]] = {
@@ -373,4 +436,5 @@ SCHEMA_REGISTRY: dict[str, Type[BaseModel]] = {
     "icon_dream_eu": IconDreamEuConfig,
     "icon_dream_global": IconDreamGlobalConfig,
     "coordinates": CoordinatesConfig,
+    "publish": PublishConfig,
 }

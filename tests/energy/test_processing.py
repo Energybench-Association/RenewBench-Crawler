@@ -2,22 +2,25 @@
 """Tests for the energy processors' shared output layout."""
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 from loguru import logger
+from shapely.geometry import Polygon, mapping
 
 from rbc.energy.processing import (
     STAC_COLUMNS,
     ZARR_COLUMNS,
+    check_totals_kept,
+    combine_fuels,
     ege_ids,
     entity_ids,
-    geometry_level,
+    geometries,
     global_ids,
     log_unjoined_ids,
     to_layout,
-    to_utc_iso,
+    to_utc,
 )
 
 
@@ -54,9 +57,8 @@ def test_global_ids_are_the_same_in_every_run() -> None:
     first = global_ids("cen", pd.Series(["116", "BESS BETA"]))
     later = global_ids("cen", pd.Series(["2", "BESS BETA", "116"]))
 
-    assert first.tolist() == [later[2], later[1]]
+    assert first.tolist() == [later[2], later[1]] == ["cen-116", "cen-bess-beta"]
     assert later.nunique() == 3
-    assert first.str.fullmatch(r"cen_[0-9a-f]{12}").all()
 
 
 def test_global_ids_differ_between_operators() -> None:
@@ -72,11 +74,9 @@ def test_global_ids_missing_without_key() -> None:
 
 
 def test_global_ids_raise_on_clash() -> None:
-    """Failure path: two keys hashing to the same ID raise, so no two EGEs share one."""
-    with patch("rbc.energy.processing.hashlib.sha256") as sha:
-        sha.return_value.hexdigest.return_value = "0" * 64
-        with pytest.raises(ValueError, match="share a global ID"):
-            global_ids("cen", pd.Series(["1", "2"]))
+    """Failure path: two keys written the same way raise, so no two EGEs share an ID."""
+    with pytest.raises(ValueError, match="share the ID 'cen-bess-beta'"):
+        global_ids("cen", pd.Series(["BESS Beta", "BESS-BETA"]))
 
 
 @pytest.mark.parametrize(
@@ -105,25 +105,67 @@ def test_ege_ids(code: float | str | None, name: str, key: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "local, utc",
+    "local, dst, utc",
     [
-        ("2024-01-01 00:00:00", "2024-01-01T03:00:00+00:00"),  # summer: DST, UTC-3
-        ("2025-08-01 00:00:00", "2025-08-01T04:00:00+00:00"),  # winter: UTC-4
-        ("2024-04-06 23:00:00", None),  # DST ends: this hour happens twice
-        ("2024-09-08 00:00:00", None),  # DST starts: this hour is skipped
+        ("2024-01-01 00:00:00", True, "2024-01-01 03:00:00"),  # summer: DST, UTC-3
+        ("2025-08-01 00:00:00", True, "2025-08-01 04:00:00"),  # winter: UTC-4
+        ("2023-04-01 23:00:00", True, "2023-04-02 02:00:00"),  # repeated: 1st, DST
+        ("2023-04-01 23:00:00", False, "2023-04-02 03:00:00"),  # repeated: 2nd, std
+        ("2015-06-01 00:00:00", True, "2015-06-01 03:00:00"),  # 2015: DST all year
     ],
 )
-def test_to_utc_iso(local: str, utc: str | None) -> None:
-    """Happy & failure path: local time becomes UTC by the date's own offset.
+def test_to_utc(local: str, dst: bool, utc: str) -> None:
+    """Happy path: local time becomes UTC by the date's own offset, every hour kept.
 
-    An hour a DST change makes ambiguous or skips stays empty, rather than guessed.
+    The hour clocks are set back is told apart by its DST flag, not left empty.
 
     Args:
         local (str): A local timestamp in Chile.
-        utc (str | None): The expected UTC timestamp, None if it can't be known.
+        dst (bool): Whether the row is the DST one of a repeated hour.
+        utc (str): The expected UTC timestamp.
     """
-    out = to_utc_iso(pd.Series([local]), tz="America/Santiago")
-    assert out.tolist() == [utc] if utc else out.isna().all()
+    out = to_utc(pd.Series([local]), tz="America/Santiago", dst=pd.Series([dst]))
+    assert out.tolist() == [pd.Timestamp(utc, tz="UTC")]
+
+
+def test_to_utc_keeps_both_rows_of_the_repeated_hour() -> None:
+    """Happy path: the day clocks are set back has 25 distinct UTC hours."""
+    hours = [f"2023-04-01 {h:02d}:00:00" for h in range(24)] + ["2023-04-01 23:00:00"]
+    dst = pd.Series(hours).duplicated().map({False: True, True: False})
+
+    out = to_utc(pd.Series(hours), tz="America/Santiago", dst=dst)
+
+    assert out.nunique() == 25
+    assert out.min() == pd.Timestamp("2023-04-01 03:00", tz="UTC")  # 00:00, UTC-3
+    assert out.max() == pd.Timestamp("2023-04-02 03:00", tz="UTC")  # 2nd 23:00, UTC-4
+
+
+@pytest.mark.parametrize(
+    "local", ["2023-09-03 00:00:00", None], ids=["skipped_hour", "missing"]
+)
+def test_to_utc_raises_instead_of_dropping(local: str | None) -> None:
+    """Failure path: an hour clocks skip, or no timestamp, raises instead of vanishing.
+
+    Args:
+        local (str | None): A timestamp no UTC hour exists for.
+    """
+    with pytest.raises(ValueError):
+        to_utc(pd.Series([local]), tz="America/Santiago", dst=pd.Series([True]))
+
+
+def test_check_totals_kept_passes_equal_totals() -> None:
+    """Happy path: totals equal up to float rounding pass silently."""
+    check_totals_kept(
+        pd.Series({"a": 0.1 + 0.2, "b": 5.0}), pd.Series({"a": 0.3, "b": 5.0}), "x"
+    )
+
+
+def test_check_totals_kept_raises_on_lost_values() -> None:
+    """Failure path: an EGE whose values shrank or vanished raises with its ID."""
+    with pytest.raises(ValueError, match="2 EGEs in day.csv"):
+        check_totals_kept(
+            pd.Series({"a": 3.0, "b": 5.0}), pd.Series({"a": 2.0}), "day.csv"
+        )
 
 
 @pytest.mark.parametrize(
@@ -215,12 +257,70 @@ def test_entity_ids_without_any_locators_columns() -> None:
     assert _entity_ids([{"cen": "1", "match_method": "unmatched"}]) == [{"cen": "1"}]
 
 
-def test_geometry_level_names_the_smallest_certain_geometry() -> None:
-    """Happy path: a point where coordinates were found, else the region, else the country."""
+def test_geometries_give_the_smallest_certain_geometry() -> None:
+    """Happy path: a point where coordinates were found, else the region, else the country.
+
+    A region with no polygon of that name falls back to the country, so no EGE is unplaced.
+    """
+    region, country = (
+        Polygon([(0, 0), (1, 0), (1, 1)]),
+        Polygon([(0, 0), (5, 0), (5, 5)]),
+    )
+    reg = MagicMock()
+    reg.geometry.side_effect = lambda _c, r=None: {None: country, "Biobío": region}.get(
+        r
+    )
     df = pd.DataFrame(
         {
-            "lat": [-37.3, None, None],
-            "region": ["Biobío", "Coquimbo", None],
+            "lat": [-37.3, None, None, None],
+            "lon": [-72.5, None, None, None],
+            "region": ["Biobío", "Biobío", "Atlántida", None],
         }
     )
-    assert geometry_level(df).tolist() == ["point", "region", "country"]
+
+    out = geometries(df, country="Chile", region_reg=reg)
+
+    assert out[0] == {"type": "Point", "coordinates": [-72.5, -37.3]}
+    assert out[1] == mapping(region)
+    assert out[2] == out[3] == mapping(country)
+
+
+def test_geometries_raise_without_a_country_polygon() -> None:
+    """Failure path: an EGE that can't be placed at all raises, rather than lacking one."""
+    reg = MagicMock()
+    reg.geometry.return_value = None
+    df = pd.DataFrame({"lat": [None], "lon": [None], "region": [None]})
+    with pytest.raises(ValueError, match="No polygon"):
+        geometries(df, country="Chile", region_reg=reg)
+
+
+@pytest.mark.parametrize(
+    "fuels, expected",
+    [
+        ([("coal", None)], ("coal", None, None)),
+        ([("hydro", "reservoir")], ("hydro", "reservoir", None)),
+        ([("gas", "lng"), ("gas", None)], ("gas", "lng", None)),
+        ([("gas", "lng"), ("gas", "lpg")], ("gas", None, None)),
+        ([("gas", "lng"), ("oil", "diesel")], ("hybrid", None, ["gas", "oil"])),
+        ([("gas", None), (None, "chp")], ("gas", None, None)),
+    ],
+)
+def test_combine_fuels(fuels: list[tuple], expected: tuple) -> None:
+    """Happy path: one fuel is the fuel type, several make a hybrid listing them.
+
+    Args:
+        fuels (list[tuple]): An EGE's reported (fuel_type, fuel_subtype) rows.
+        expected (tuple): Its expected fuel_type, fuel_subtype, hybrid_fuel_types.
+    """
+    df = pd.DataFrame(
+        [("a", *f) for f in fuels], columns=["id", "fuel_type", "fuel_subtype"]
+    )
+    out = combine_fuels(df)
+    assert tuple(out.loc["a"]) == expected
+
+
+def test_combine_fuels_raises_without_any_fuel() -> None:
+    """Failure path: an EGE reporting no fuel at all raises, rather than lacking one."""
+    df = pd.DataFrame({"id": ["a"], "fuel_type": [None], "fuel_subtype": ["chp"]})
+    with pytest.raises(ValueError, match="no fuel type"):
+        combine_fuels(df)

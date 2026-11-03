@@ -11,7 +11,7 @@ from typing import cast
 from loguru import logger
 
 from rbc.config.loader import load_config, parse_key_value_pairs
-from rbc.config.schema import CoordinatesConfig
+from rbc.config.schema import CoordinatesConfig, PublishConfig
 from rbc.energy.cen.processor import SOURCE, CenProcessor
 from rbc.utils import setup_logging
 
@@ -22,14 +22,16 @@ def parse_arguments() -> Namespace:
     Returns:
         argparse.Namespace: Namespace parsed command line arguments.
     """
-    parser = ArgumentParser(prog="CEN data processing into Zarr and STAC")
-    # parser.add_argument(
-    #     "--no-resume",
-    #     dest="resume",
-    #     action="store_false",
-    #     help="Do not resume processing from a previous checkpoint.",
-    # )
-    # parser.set_defaults(resume=True)
+    parser = ArgumentParser(prog="CEN data processing into Icechunk and STAC")
+    parser.add_argument(
+        "--no-publish",
+        dest="upload",
+        action="store_false",
+        help=(
+            "Write the Icechunk repository and the STAC JSON into the processed data "
+            "directory only, instead of to S3 and the STAC API."
+        ),
+    )
     parser.add_argument(
         "-o",
         "--cfg_options",
@@ -37,7 +39,8 @@ def parse_arguments() -> Namespace:
         help=(
             "Override YAML config values (supports nested keys), one -o per value. "
             "Example: -o paths.dst_dir_raw=/your/raw/path/ "
-            "-o paths.dst_dir_proc=/your/proc/path/ -o access.api_key=YOUR-SECRET-KEY"
+            "-o paths.dst_dir_proc=/your/proc/path/ -o access.api_key=YOUR-SECRET-KEY "
+            "-o release=YOUR-RELEASE"
         ),
     )
     return parser.parse_args()
@@ -52,18 +55,22 @@ def main() -> None:
     coordinates_cfg = cast(
         CoordinatesConfig, load_config(source="coordinates", overrides=overrides)
     )
+    publish_cfg = cast(
+        PublishConfig, load_config(source="publish", overrides=overrides)
+    )
     setup_logging(output_dir=cfg.paths.dst_dir_proc)
 
     logger.info(f"Flags for processing:\n{pformat(vars(args), sort_dicts=False)}")
-    logger.info(
-        f"Config schema for processing:\n{pformat(dict(cfg), sort_dicts=False)}"
-    )
+    shown = cfg.model_dump(exclude={"access"})  # never log the API token
+    logger.info(f"Config schema for processing:\n{pformat(shown, sort_dicts=False)}")
 
     processor = CenProcessor(
         token=cfg.access.api_key,
         input_dir=cfg.paths.dst_dir_raw,
         output_dir=cfg.paths.dst_dir_proc,
         resources_dir=coordinates_cfg.paths.resources_dir,
+        publish_cfg=publish_cfg,
+        upload=args.upload,
     )
     processor.process_data()
 
