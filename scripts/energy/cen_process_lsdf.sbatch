@@ -8,10 +8,11 @@
 #
 # Usage, from the crawler checkout on a login node:
 #   export CEN_API_KEY=...            # never put it in this file
-#   mkdir -p logs                     # Slurm writes its log there, but won't create it
-#   sbatch scripts/energy/cen_process_lsdf.sbatch
-# The crawler's own detailed log is in $WORK/processed/cen/logs/.
-# Override any setting below the same way, e.g. RELEASE=v0.0.2 sbatch ...
+#   bash scripts/energy/cen_process_lsdf.sbatch
+# Run with bash, it creates logs/ and submits itself with its Slurm log there (Slurm
+# won't create the folder); the crawler's own detailed log is in
+# $WORK/processed/cen/logs/. Override any setting below the same way, e.g.
+# RELEASE=v0.0.2 bash ...
 
 #SBATCH --job-name=cen-lsdf
 #SBATCH --partition=intel-spr
@@ -20,11 +21,17 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64000mb
 #SBATCH --time=04:00:00
-#SBATCH --output=logs/%x-%j.out
 
 set -euo pipefail
 
 : "${CEN_API_KEY:?export CEN_API_KEY before submitting}"
+
+# Not yet in a job: make the log folder, then submit this script with its log there.
+if [ -z "${SLURM_JOB_ID:-}" ]; then
+    mkdir -p logs
+    exec sbatch --output=logs/%x-%j.out "$0" "$@"
+fi
+
 RELEASE="${RELEASE:-v0.0.1}"                      # test release; not v0.1.0
 MONTHS="${MONTHS:-2025-01 2025-02 2025-03}"
 LSDF="${LSDF:-/lsdf/kit/scc/projects/renewbench}"
