@@ -543,9 +543,8 @@ class CenProcessor:
         utc = to_utc(
             clock, tz=TZ, dst=pd.Series(True, index=clock.index), skipped="NaT"
         )
-        utc[repeated] = start - pd.Timedelta(
-            hours=1
-        )  # the repeated 23:00, standard time
+        # the repeated 23:00, standard time
+        utc = utc.mask(repeated, start - pd.Timedelta(hours=1))
         placeholder = utc.isna()
         if placeholder.any() and end - start != pd.Timedelta(hours=23):
             raise ValueError(
