@@ -8,7 +8,9 @@
 #
 # Usage, from the crawler checkout on a login node:
 #   export CEN_API_KEY=...            # never put it in this file
+#   mkdir -p logs                     # Slurm writes its log there, but won't create it
 #   sbatch scripts/energy/cen_process_lsdf.sbatch
+# The crawler's own detailed log is in $WORK/processed/cen/logs/.
 # Override any setting below the same way, e.g. RELEASE=v0.0.2 sbatch ...
 
 #SBATCH --job-name=cen-lsdf
@@ -18,7 +20,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64000mb
 #SBATCH --time=04:00:00
-#SBATCH --output=cen-lsdf-%j.out
+#SBATCH --output=logs/%x-%j.out
 
 set -euo pipefail
 
