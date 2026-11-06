@@ -202,7 +202,8 @@ def _raw_row(
 def _write_raw(raw_dir: Path) -> None:
     """Write two days of raw CEN data, covering each way CEN reports an EGE (2 hours each).
 
-    - TER ALPHA (ID 1): two configurations producing at once, one row repeated exactly
+    - TER ALPHA (ID 1): two configurations producing at once, one row repeated exactly,
+      another repeated with the plant details of a later download
     - BESS BETA (no ID): a battery, discharging and charging, both reported positive
     - PE GAMMA (ID 4): one configuration, a status marker in its name, its capacity
       raised on the second day
@@ -239,6 +240,7 @@ def _write_raw(raw_dir: Path) -> None:
                 ),
             ]
         rows.append(rows[0])  # CEN repeats some rows exactly
+        rows.append({**rows[1], "propietario": "GEN SPA"})  # or with later details
         pd.DataFrame(rows).to_csv(Path(raw_dir, f"{day}.csv"), index=False)
 
 
@@ -704,7 +706,7 @@ def _day(day: str, hours: list[tuple[str, int]]) -> pd.DataFrame:
             "id": "cen_x",
             "id_opreal": 1,
             "timestamp": [f"{day} {t}:00" for t, _ in hours],
-            "hora": [h for _, h in hours],
+            "hour": [h for _, h in hours],
             "value": 1.0,
             "fuel_subtype": "Carbón",
         }
@@ -786,12 +788,12 @@ def test_spring_forward_placeholder_is_kept_out_and_returned(
         make_processor (Callable): Factory for processors.
     """
     df = _day("2023-09-03", _clock("2023-09-03", list(range(1, 25))))
-    df.loc[df["hora"] == 1, "value"] = 0.0
+    df.loc[df["hour"] == 1, "value"] = 0.0
     out, placeholders = make_processor()._prepare_for_zarr(df, "2023-09-03")
 
     assert out["timestamp"].nunique() == 23
     assert out["timestamp"].min() == pd.Timestamp("2023-09-03 04:00", tz="UTC")
-    assert placeholders["hora"].tolist() == [1]
+    assert placeholders["hour"].tolist() == [1]
 
 
 @pytest.mark.parametrize(
@@ -817,6 +819,48 @@ def test_hours_that_cant_be_placed_raise(
     df = _day(day, rows).assign(value=[1.0, 2.0][: len(rows)])
     with pytest.raises(ValueError):
         make_processor()._prepare_for_zarr(df, day)
+
+
+# ----------------------------------
+# Tests: repeated hours
+# ----------------------------------
+def test_repeated_hours_keep_the_first_rows() -> None:
+    """Happy path: a configuration's hour held again with the same value is dropped.
+
+    As in CEN's 31 December files, the repeat carries the plant details of a later
+    download, so dropping identical rows leaves it in. The first copy's rows stay.
+    """
+    day = "2009-12-31"
+    first = _day(day, _clock(day, [1, 2, 3])).assign(operator="GEN SA")
+    again = _day(day, _clock(day, [2, 3])).assign(operator="GEN SPA")
+    df = pd.concat([first, again], ignore_index=True)
+
+    out = CenProcessor._drop_repeated_hours(df, day)
+
+    assert out["hour"].tolist() == [1, 2, 3]
+    assert (out["operator"] == "GEN SA").all()
+
+
+def test_fall_back_hour_25_is_not_a_repeat() -> None:
+    """Happy path: 'hora' 25 shares its 00:00 label with 'hora' 1, but is its own hour."""
+    day = "2023-04-02"
+    df = _day(day, _clock(day, list(range(1, 26))))
+
+    assert len(CenProcessor._drop_repeated_hours(df, day)) == 25
+
+
+def test_repeated_hour_with_another_value_raises() -> None:
+    """Failure path: a repeated hour that reports another value stops processing.
+
+    Neither copy is known to be right, and dropping either changes the plant's total.
+    """
+    day = "2009-12-31"
+    first = _day(day, _clock(day, [1, 2]))
+    again = _day(day, _clock(day, [2])).assign(value=3.0)
+    df = pd.concat([first, again], ignore_index=True)
+
+    with pytest.raises(ValueError, match="report another value"):
+        CenProcessor._drop_repeated_hours(df, day)
 
 
 @pytest.mark.parametrize(

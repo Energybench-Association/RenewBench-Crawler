@@ -85,6 +85,7 @@ REGISTRY_RENAMES = {
 }
 # Map: CEN's raw columns → the shared layout's (s. docs/data_sources.md, renamed on loading)
 CEN_COLUMNS = {
+    "hora": "hour",
     "fecha_hora": "timestamp",
     "gen_real_mw": "value",
     "propietario": "operator",
@@ -256,6 +257,7 @@ class CenProcessor:
         )
         if df_ege is None or len(df_ege) == 0:
             raise ValueError(f"Coordinate finding returned no EGEs for {run.name}.")
+
         build_map([df_ege], labels=[run.map_label], output_dir=self.coordinates_dir)
         entities = sorted(
             ege_ids(SOURCE, df_ege[SYSOP_CODE_COL], df_ege[SYSOP_NAME_COL])
@@ -285,6 +287,7 @@ class CenProcessor:
         for path in run.files:
             df_eg = load_df_from_file(path).drop_duplicates()  # remove repeated rows
             df_eg = df_eg.rename(columns=CEN_COLUMNS)  # layout names now!
+            df_eg = self._drop_repeated_hours(df_eg, day=path.stem)
             df_eg["id"] = ege_ids(SOURCE, df_eg[CODE_COL], df_eg[NAME_COL])
             eg_unique = df_eg[
                 ["id", CODE_COL, CONFIG_COL, "operator", "generation_capacity"]
@@ -299,6 +302,7 @@ class CenProcessor:
             store.add(df_zarr["id"], df_zarr["timestamp"], df_zarr["value"])
             zarr_ids.update(df_zarr["id"].dropna())
             placeholders.append(df_placeholders)
+
         snapshot = store.finish(message=f"{SOURCE} {release}: {days[0]} to {days[-1]}")
         if self.upload and not store.reused:
             logger.warning(
@@ -445,6 +449,53 @@ class CenProcessor:
 
         return df_ege.drop(columns=[f"{off}.id", f"{off}.name"])  # served their purpose
 
+    @staticmethod
+    def _drop_repeated_hours(df_eg: pd.DataFrame, day: str) -> pd.DataFrame:
+        """Keep a configuration's first row for an hour CEN's raw CSV holds more than once.
+
+        Some raw CSVs repeat rows: the *-12-31.csv files of several years hold hours 2-24
+        a second (or third) time. Those rows have the same generation, but the EGE details
+        from later years (e.g. newer names, capacities, owners). Specific logic is needed to
+        remove these duplicate rows. If the ID, hour and generation value are identical,
+        the first copy of a row is chosen (complete, with its own period's details). If
+        something differs, an error is raised and processing stopped.
+
+        Repeats are matched on the configuration and 'hour', not 'fecha_hora': on the day
+        the clocks go back, 'hour' 25 shares its label with 'hour' 1 (s. `_hours_to_utc`).
+
+        Args:
+            df_eg (pd.DataFrame): A raw CSV's rows, in the shared layout's names.
+            day (str): The local date the CSV holds, e.g. '2009-12-31'.
+
+        Returns:
+            pd.DataFrame: The rows, each configuration's hour once.
+
+        Raises:
+            ValueError: If a repeated hour reports another generation value (neither copy
+                is known to be right and removing one/all changes the EGE's summed total).
+        """
+        key = [CONFIG_COL, "hour"]
+        repeated = df_eg.duplicated(subset=key)
+        if not repeated.any():
+            return df_eg
+
+        first = df_eg[~repeated].set_index(key)["value"]
+        again = df_eg[repeated].set_index(key)["value"]
+        kept = first.reindex(again.index)
+        differ = (kept != again) & ~(kept.isna() & again.isna())
+        if differ.any():
+            examples = pd.DataFrame({"first": kept[differ], "again": again[differ]})
+            raise ValueError(
+                f"{day}: {int(differ.sum())} repeated configuration hours report another "
+                f"value, e.g. {examples.head(3).reset_index().to_dict('records')}."
+            )
+
+        logger.warning(
+            f"{day}: {int(repeated.sum())} repeated configuration hours dropped (same "
+            f"values, other plant details), each one's first row kept."
+        )
+        return df_eg[~repeated]
+
     def _prepare_for_zarr(
         self, df_eg: pd.DataFrame, day: str
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -510,7 +561,7 @@ class CenProcessor:
         """Place one raw CSV's hours in UTC, as CEN reports them around DST changes.
 
         Args:
-            df_eg (pd.DataFrame): A raw CSV's rows ("timestamp" = 'fecha_hora', "hora").
+            df_eg (pd.DataFrame): A raw CSV's rows ("timestamp"='fecha_hora', "hour"='hora').
             day (str): The local date the CSV holds, e.g. '2023-04-02'.
 
         Returns:
@@ -518,18 +569,18 @@ class CenProcessor:
                 placeholder), and which rows are placeholders for a skipped hour.
 
         Raises:
-            ValueError: If 'hora' lies outside 1-25 or disagrees with 'fecha_hora', or a
+            ValueError: If 'hour' lies outside 1-25 or disagrees with 'fecha_hora', or a
                 row of a DST change appears on a day without that change.
         """
-        hora = df_eg["hora"].astype(int)
-        if not hora.between(1, 25).all():
-            raise ValueError(f"{day}: 'hora' outside 1-25: {sorted(set(hora))}")
-        clock = pd.Timestamp(day) + pd.to_timedelta((hora - 1) % 24, unit="h")
+        hour = df_eg["hour"].astype(int)
+        if not hour.between(1, 25).all():
+            raise ValueError(f"{day}: 'hora' outside 1-25: {sorted(set(hour))}")
+        clock = pd.Timestamp(day) + pd.to_timedelta((hour - 1) % 24, unit="h")
         if (pd.to_datetime(df_eg["timestamp"]) != clock).any():
             raise ValueError(f"{day}: 'fecha_hora' disagrees with 'hora'.")
 
         start, end = local_day_in_utc(day)
-        repeated = hora == 25
+        repeated = hour == 25
         if repeated.any():
             prev_start, prev_end = local_day_in_utc(
                 str((pd.Timestamp(day) - pd.Timedelta(days=1)).date())
