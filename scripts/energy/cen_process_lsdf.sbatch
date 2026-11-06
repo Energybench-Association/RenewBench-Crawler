@@ -20,7 +20,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64000mb
-#SBATCH --time=04:00:00
+#SBATCH --time=24:00:00
 
 set -euo pipefail
 
@@ -32,11 +32,11 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exec sbatch --output=logs/%x-%j.out "$0" "$@"
 fi
 
-RELEASE="${RELEASE:-v0.0.1}"                      # test release; not v0.1.0
-MONTHS="${MONTHS:-2025-01 2025-02 2025-03}"
+RELEASE="${RELEASE:-v0.1.0}"                      # first full release
 LSDF="${LSDF:-/lsdf/kit/scc/projects/renewbench}"
 RAW="${RAW:-$LSDF/raw/energy/cen/1h}"
 RESOURCES="${RESOURCES:-$LSDF/coordinate_resources}"
+MONTHS="${MONTHS:-$(ls "$RAW" | cut -c1-4 | grep -E '^[0-9]{4}$' | grep -vx "$(date +%Y)" | sort -u | tr '\n' ' ')}"  # every year in RAW except the current one
 ENERGYBENCH="${ENERGYBENCH:-$LSDF/energybench}"   # the VM's /mnt/lsdf-data
 WORK="${WORK:-$HOME/energybench-cen-$RELEASE}"    # run directory, logs, local copies
 CRAWLER="${CRAWLER:-$PWD}"
