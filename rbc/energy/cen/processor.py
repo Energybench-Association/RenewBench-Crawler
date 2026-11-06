@@ -20,6 +20,7 @@ from rbc.coordinates.mappings import (
 from rbc.coordinates.orchestrator import find_coordinates
 from rbc.coordinates.pipelines import build_shared_resources
 from rbc.coordinates.utils.tokenizer import strip_square_brackets
+from rbc.coordinates.utils.values import normalize_name
 from rbc.energy.cen.mappings import (
     COGENERATION,
     STAC_COGENERATION_FUELS,
@@ -714,6 +715,10 @@ class CenProcessor:
     def _stac_fuels(df_eg_unique: pd.DataFrame) -> pd.DataFrame:
         """Map each EGE's reported technology (type, subtype) to STAC's fuel (s. STAC_FUELS).
 
+        CEN spells the same technology in several ways (e.g. 'Cogeneración' and
+        'Cogeneracion'), so both sides are compared normalized: without case, accents or
+        punctuation (s. `normalize_name`).
+
         Args:
             df_eg_unique (pd.DataFrame): The EGE rows with "id", "id_central", "fuel_type"
                 and "fuel_subtype" as CEN reports them.
@@ -725,27 +730,41 @@ class CenProcessor:
         Raises:
             ValueError: If a combination has no mapping, listing all such combinations.
         """
+        fuels = {
+            (normalize_name(main), normalize_name(sub)): fuel
+            for (main, sub), fuel in STAC_FUELS.items()
+        }
+        cogeneration = (
+            normalize_name(COGENERATION[0]),
+            normalize_name(COGENERATION[1]),
+        )
+
         rows, unknown = [], set()
         cols = ["id", CODE_COL, "fuel_type", "fuel_subtype"]
         for ege, code, main, sub in (
             df_eg_unique[cols].drop_duplicates().itertuples(index=False)
         ):
-            pair = (main, sub if isinstance(sub, str) else None)
-            if pair == COGENERATION:
+            main = main if isinstance(main, str) else None
+            sub = sub if isinstance(sub, str) else None
+            pair = (normalize_name(main), normalize_name(sub))
+            if pair == cogeneration:
                 fuel = (
                     STAC_COGENERATION_FUELS.get(int(code)) if pd.notna(code) else None
                 )
                 rows.append((ege, *(fuel or (None, None))))
-            elif pair in STAC_FUELS:
-                rows.append((ege, *STAC_FUELS[pair]))
+            elif pair in fuels:
+                rows.append((ege, *fuels[pair]))
             else:
-                unknown.add(pair)
+                unknown.add((main, sub))  # as CEN spells it
 
         if unknown:
             raise ValueError(
                 f"CEN technology types without a STAC fuel: {sorted(unknown, key=str)}"
             )
-        return pd.DataFrame(rows, columns=["id", "fuel_type", "fuel_subtype"])
+        # an EGE reported in two spellings maps to the same fuel twice: keep it once
+        return pd.DataFrame(
+            rows, columns=["id", "fuel_type", "fuel_subtype"]
+        ).drop_duplicates(ignore_index=True)
 
     @staticmethod
     def _stac_status(name_terms: pd.Series, estado: pd.Series) -> pd.Series:

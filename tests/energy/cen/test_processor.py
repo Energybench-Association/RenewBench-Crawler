@@ -897,6 +897,23 @@ def test_stac_fuels(main: str, sub: str | None, fuel: tuple) -> None:
     assert tuple(out.loc[0, ["fuel_type", "fuel_subtype"]]) == fuel
 
 
+def test_stac_fuels_ignore_case_and_accents() -> None:
+    """Happy path: CEN's spellings of one technology map alike, one row per EGE.
+
+    E.g. 'Cogeneracion' and 'Cogeneración' (CEN uses both), or 'TÉRMICA' and 'Térmica'.
+    """
+    df = pd.DataFrame(
+        {
+            "id": ["a", "a", "b"],
+            CODE_COL: [1907.0, 1907.0, 5.0],
+            "fuel_type": ["Térmica", "Termica", "TÉRMICA"],
+            "fuel_subtype": ["Cogeneración", "Cogeneracion", "Carbón"],
+        }
+    )
+    out = CenProcessor._stac_fuels(df)
+    assert out.values.tolist() == [["a", "biomass", "chp"], ["b", "coal", None]]
+
+
 def test_unmapped_vocabulary_raises() -> None:
     """Failure path: a type or status without a mapping stops processing, all listed."""
     df = pd.DataFrame(
