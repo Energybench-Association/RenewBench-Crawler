@@ -32,33 +32,34 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exec sbatch --output=logs/%x-%j.out "$0" "$@"
 fi
 
+SYSOP=cen
 RELEASE="${RELEASE:-v0.1.0}"                      # first full release
 LSDF="${LSDF:-/lsdf/kit/scc/projects/renewbench}"
-RAW="${RAW:-$LSDF/raw/energy/cen/1h}"
+RAW="${RAW:-$LSDF/raw/energy/$SYSOP/1h}"
 RESOURCES="${RESOURCES:-$LSDF/coordinate_resources}"
 MONTHS="${MONTHS:-$(ls "$RAW" | cut -c1-4 | grep -E '^[0-9]{4}$' | grep -vx "$(date +%Y)" | sort -u | tr '\n' ' ')}"  # every year in RAW except the current one
 ENERGYBENCH="${ENERGYBENCH:-$LSDF/energybench}"   # the VM's /mnt/lsdf-data
-WORK="${WORK:-$HOME/energybench-cen-$RELEASE}"    # run directory, logs, local copies
+WORK="${WORK:-$LSDF/work/$SYSOP/run-$RELEASE}"       # run directory, links to the raw files, logs
 CRAWLER="${CRAWLER:-$PWD}"
 
 # Group-writable, so the VM can read the data and move the release out of the inbox.
 umask 0002
 
 echo "== raw files for: $MONTHS"
-mkdir -p "$WORK/raw/cen/1h"
-find "$WORK/raw/cen/1h" -maxdepth 1 -type l -delete
+mkdir -p "$WORK/raw/$SYSOP/1h"
+find "$WORK/raw/$SYSOP/1h" -maxdepth 1 -type l -delete
 for month in $MONTHS; do
-    ln -s "$RAW/$month"-*.csv "$WORK/raw/cen/1h/"
+    ln -s "$RAW/$month"-*.csv "$WORK/raw/$SYSOP/1h/"
 done
-find "$WORK/raw/cen/1h" -maxdepth 1 -type l | wc -l
+find "$WORK/raw/$SYSOP/1h" -maxdepth 1 -type l | wc -l
 
 echo "== processing release $RELEASE"
 cd "$CRAWLER"
 # shellcheck disable=SC1091
 source .venv/bin/activate
 python -m scripts.energy.cen_process \
-    -o paths.dst_dir_raw="$WORK/raw/cen" \
-    -o paths.dst_dir_proc="$WORK/processed/cen" \
+    -o paths.dst_dir_raw="$WORK/raw/$SYSOP" \
+    -o paths.dst_dir_proc="$WORK/processed/$SYSOP" \
     -o paths.resources_dir="$RESOURCES" \
     -o access.api_key="$CEN_API_KEY" \
     -o release="$RELEASE" \
