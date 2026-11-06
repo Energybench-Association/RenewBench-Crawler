@@ -36,7 +36,7 @@ RELEASE="${RELEASE:-v0.0.1}"                      # test release; not v0.1.0
 MONTHS="${MONTHS:-2025-01 2025-02 2025-03}"
 LSDF="${LSDF:-/lsdf/kit/scc/projects/renewbench}"
 RAW="${RAW:-$LSDF/raw/energy/cen/1h}"
-RESOURCES="${RESOURCES:-$LSDF/raw/coordinates}"
+RESOURCES="${RESOURCES:-$LSDF/coordinate_resources}"
 ENERGYBENCH="${ENERGYBENCH:-$LSDF/energybench}"   # the VM's /mnt/lsdf-data
 WORK="${WORK:-$HOME/energybench-cen-$RELEASE}"    # run directory, logs, local copies
 CRAWLER="${CRAWLER:-$PWD}"
@@ -62,7 +62,7 @@ python -m scripts.energy.cen_process \
     -o paths.resources_dir="$RESOURCES" \
     -o access.api_key="$CEN_API_KEY" \
     -o release="$RELEASE" \
-    -o data_base_url=https://energybench.org/files \
+    -o data_base_url=https://www.energybench.org/files \
     -o storage.local_root="$ENERGYBENCH/data" \
     -o stac_inbox="$ENERGYBENCH/inbox"
 
