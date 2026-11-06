@@ -849,18 +849,27 @@ def test_fall_back_hour_25_is_not_a_repeat() -> None:
     assert len(CenProcessor._drop_repeated_hours(df, day)) == 25
 
 
-def test_repeated_hour_with_another_value_raises() -> None:
-    """Failure path: a repeated hour that reports another value stops processing.
+def test_repeated_hour_in_doubt_leaves_the_eges_hour_out() -> None:
+    """Happy path: copies that disagree, even by rounding, leave the EGE's hour out.
 
-    Neither copy is known to be right, and dropping either changes the plant's total.
+    Neither copy is known to be right. The EGE's other configurations go too, so its
+    total for the hour is missing rather than too low; other EGEs keep the hour.
     """
-    day = "2009-12-31"
+    day = "2017-12-31"
     first = _day(day, _clock(day, [1, 2]))
-    again = _day(day, _clock(day, [2])).assign(value=3.0)
-    df = pd.concat([first, again], ignore_index=True)
+    again = _day(day, _clock(day, [2])).assign(value=1.004)
+    other_config = _day(day, _clock(day, [1, 2])).assign(id_opreal=2)
+    other_ege = _day(day, _clock(day, [1, 2])).assign(id="cen_y", id_opreal=3)
+    df = pd.concat([first, again, other_config, other_ege], ignore_index=True)
 
-    with pytest.raises(ValueError, match="report another value"):
-        CenProcessor._drop_repeated_hours(df, day)
+    out = CenProcessor._drop_repeated_hours(df, day)
+
+    assert sorted(zip(out["id"], out["id_opreal"], out["hour"])) == [
+        ("cen_x", 1, 1),
+        ("cen_x", 2, 1),
+        ("cen_y", 3, 1),
+        ("cen_y", 3, 2),
+    ]
 
 
 @pytest.mark.parametrize(

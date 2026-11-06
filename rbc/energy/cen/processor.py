@@ -287,8 +287,8 @@ class CenProcessor:
         for path in run.files:
             df_eg = load_df_from_file(path).drop_duplicates()  # remove repeated rows
             df_eg = df_eg.rename(columns=CEN_COLUMNS)  # layout names now!
-            df_eg = self._drop_repeated_hours(df_eg, day=path.stem)
             df_eg["id"] = ege_ids(SOURCE, df_eg[CODE_COL], df_eg[NAME_COL])
+            df_eg = self._drop_repeated_hours(df_eg, day=path.stem)
             eg_unique = df_eg[
                 ["id", CODE_COL, CONFIG_COL, "operator", "generation_capacity"]
                 + ["fuel_type", "fuel_subtype"]
@@ -454,25 +454,25 @@ class CenProcessor:
         """Keep a configuration's first row for an hour CEN's raw CSV holds more than once.
 
         Some raw CSVs repeat rows: the *-12-31.csv files of several years hold hours 2-24
-        a second (or third) time. Those rows have the same generation, but the EGE details
-        from later years (e.g. newer names, capacities, owners). Specific logic is needed to
-        remove these duplicate rows. If the ID, hour and generation value are identical,
-        the first copy of a row is chosen (complete, with its own period's details). If
-        something differs, an error is raised and processing stopped.
+        a second (or third) time. Those rows mostly have the same generation, but the EGE
+        details from later years (e.g. newer names, capacities, owners). Specific logic is
+        needed to remove these duplicate rows. If the ID, hour and generation value are
+        identical, the first copy of a row is chosen (complete, with its own period's
+        details). If the generation values differ, none of the rows is known to be right -
+        the hour is deleted for the whole EGE (incl. all of its  configurations), so that
+        its total is missing (NaN) rather than wrong.
 
         Repeats are matched on the configuration and 'hour', not 'fecha_hora': on the day
         the clocks go back, 'hour' 25 shares its label with 'hour' 1 (s. `_hours_to_utc`).
 
         Args:
-            df_eg (pd.DataFrame): A raw CSV's rows, in the shared layout's names.
+            df_eg (pd.DataFrame): A raw CSV's rows, in the shared layout's names, with
+                their EGE's global 'id'.
             day (str): The local date the CSV holds, e.g. '2009-12-31'.
 
         Returns:
-            pd.DataFrame: The rows, each configuration's hour once.
-
-        Raises:
-            ValueError: If a repeated hour reports another generation value (neither copy
-                is known to be right and removing one/all changes the EGE's summed total).
+            pd.DataFrame: The rows, each configuration's hour once, and none for an
+                EGE's hour whose copies disagree.
         """
         key = [CONFIG_COL, "hour"]
         repeated = df_eg.duplicated(subset=key)
@@ -483,18 +483,25 @@ class CenProcessor:
         again = df_eg[repeated].set_index(key)["value"]
         kept = first.reindex(again.index)
         differ = (kept != again) & ~(kept.isna() & again.isna())
-        if differ.any():
-            examples = pd.DataFrame({"first": kept[differ], "again": again[differ]})
-            raise ValueError(
-                f"{day}: {int(differ.sum())} repeated configuration hours report another "
-                f"value, e.g. {examples.head(3).reset_index().to_dict('records')}."
+
+        # the EGEs' hours in doubt, and every row of them (all their configurations)
+        in_doubt = df_eg.set_index(key).index.isin(again.index[differ])
+        ege_hours = df_eg.loc[in_doubt, ["id", "hour"]].drop_duplicates()
+        left_out = pd.MultiIndex.from_frame(df_eg[["id", "hour"]]).isin(
+            pd.MultiIndex.from_frame(ege_hours)
+        )
+        if left_out.any():
+            logger.warning(
+                f"{day}: copies of {int(differ.sum())} repeated configuration hours "
+                f"report different values, so these EGEs' hours are left out (NaN): "
+                f"{ege_hours.groupby('id')['hour'].apply(sorted).to_dict()}."
             )
 
         logger.warning(
-            f"{day}: {int(repeated.sum())} repeated configuration hours dropped (same "
-            f"values, other plant details), each one's first row kept."
+            f"{day}: {int(repeated.sum())} repeated configuration hours dropped (other "
+            f"plant details), each one's first row kept unless left out."
         )
-        return df_eg[~repeated]
+        return df_eg[~repeated.to_numpy() & ~left_out]
 
     def _prepare_for_zarr(
         self, df_eg: pd.DataFrame, day: str
