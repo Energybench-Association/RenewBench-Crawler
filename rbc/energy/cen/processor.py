@@ -99,9 +99,9 @@ CEN_COLUMNS = {
 CEN_TERMS_URL = "https://www.coordinador.cl/terminos-y-condiciones/"
 CEN_DATASET = DatasetInfo(
     dataset=SOURCE,
-    title="CEN (Chile) hourly generation per plant",
+    title="CEN (Chile) {tres} generation per plant",
     description=(
-        "Hourly gross generation in MW of each power plant of Chile's National "
+        "{Tres} gross generation in MW of each power plant of Chile's National "
         "Electric System (SEN), as reported by the Coordinador Eléctrico Nacional "
         "(CEN) through its public information system (SIP) API.\n\n"
         "For academic, non-commercial use only, citing the source, as CEN's terms of "
@@ -127,8 +127,8 @@ CEN_DATASET = DatasetInfo(
         "Processed and published by the Energybench Association, "
         "https://energybench.org."
     ),
-    values="Hourly gross generation (MW)",
-    keywords=["Chile", "CEN", "hourly"],
+    values="{Tres} gross generation (MW)",
+    keywords=["Chile", "CEN"],
 )
 
 
@@ -320,7 +320,7 @@ class CenProcessor:
         df_stac = self._prepare_for_stac(df_ege, df_eg_unique)
         log_unjoined_ids(zarr_ids, df_stac["id"])
         items = build_items(
-            df_stac, store.spans(), CEN_DATASET, release, storage, snapshot
+            df_stac, store.spans(), CEN_DATASET, release, storage, snapshot, step_iso
         )
         collection = build_collection(
             CEN_DATASET,

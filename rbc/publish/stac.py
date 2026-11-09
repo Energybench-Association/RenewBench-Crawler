@@ -5,8 +5,9 @@ Describe a release as a STAC Collection with one Item per energy generating enti
 
 import json
 import math
+import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,7 @@ ITEM_ASSETS_EXT = "https://stac-extensions.github.io/item-assets/v1.0.0/schema.j
 DATACUBE_EXT = "https://stac-extensions.github.io/datacube/v2.2.0/schema.json"
 SCIENTIFIC_EXT = "https://stac-extensions.github.io/scientific/v1.0.0/schema.json"
 DOMAIN_SCHEME = "https://energybench.org/domains"
-# Separator of a dataset's release Collections, e.g. "cen__v0.1.0"
+# Separator of a dataset's release Collections, e.g. "cen-pt1h__v0.1.0"
 RELEASE_SEP = "__"
 
 # The energy extension's Item properties, as columns of the STAC data (without "energy:")
@@ -58,17 +59,22 @@ SUMMARY_FIELDS = ["fuel_type", "entity_type", "status", "measurement_type"]
 class DatasetInfo:
     """What a dataset's Collections say about its source, licence and processing.
 
+    A dataset can come in several temporal resolutions, so its title, description and
+    values name the resolution as `{tres}`, e.g. "hourly" or "15-minute", or as `{Tres}`
+    at the start of a sentence (s. `for_resolution`).
+
     Attributes:
         dataset (str): ID of the dataset, e.g. "cen".
-        title (str): Its title, e.g. "CEN (Chile) hourly generation per plant".
+        title (str): Its title, e.g. "CEN (Chile) {tres} generation per plant".
         description (str): Its description, incl. licence terms and processing steps.
         license (str): The STAC licence value, e.g. "proprietary" for terms of use.
         license_url (str): Link to the licence's terms.
         providers (list[JSON]): STAC providers, e.g. the operator as "licensor".
         citation (str): How to cite the data (the scientific extension's citation).
-        values (str): What the repository's `values` hold, e.g. "Hourly gross
+        values (str): What the repository's `values` hold, e.g. "{Tres} gross
             generation (MW)".
-        keywords (list[str]): Extra keywords, e.g. the country.
+        keywords (list[str]): Extra keywords, e.g. the country; the resolution is
+            added to them.
     """
 
     dataset: str
@@ -81,18 +87,51 @@ class DatasetInfo:
     values: str
     keywords: list[str] = field(default_factory=list)
 
+    def for_resolution(self, step: str) -> "DatasetInfo":
+        """Fill the texts in for one temporal resolution.
 
-def collection_id(dataset: str, release: str) -> str:
-    """Give a dataset's Collection ID for one release.
+        Args:
+            step (str): The time step as an ISO 8601 duration, e.g. "PT1H", "PT15M".
+
+        Returns:
+            DatasetInfo: A copy whose texts name the resolution in words, e.g.
+                "hourly" or "15-minute", and whose keywords end with it.
+
+        Raises:
+            ValueError: If the time step isn't a number of minutes, hours or days.
+        """
+        if match := re.fullmatch(r"PT(\d+)([HM])", step):
+            count, unit = int(match[1]), {"H": "hour", "M": "minute"}[match[2]]
+        elif match := re.fullmatch(r"P(\d+)D", step):
+            count, unit = int(match[1]), "day"
+        else:
+            raise ValueError(f"'{step}' isn't a time step such as 'PT1H' or 'PT15M'.")
+        if count == 1 and unit != "minute":
+            word = "hourly" if unit == "hour" else "daily"
+        else:
+            word = f"{count}-{unit}"  # as in "15-minute generation"
+        words = {"tres": word, "Tres": word.capitalize()}
+        return replace(
+            self,
+            title=self.title.format(**words),
+            description=self.description.format(**words),
+            values=self.values.format(**words),
+            keywords=[*self.keywords, word],
+        )
+
+
+def collection_id(dataset: str, step: str, release: str) -> str:
+    """Give a dataset's Collection ID for one temporal resolution and release.
 
     Args:
         dataset (str): ID of the dataset, e.g. "cen".
+        step (str): The time step as an ISO 8601 duration, e.g. "PT1H".
         release (str): The release, e.g. "v0.1.0".
 
     Returns:
-        str: e.g. "cen__v0.1.0".
+        str: e.g. "cen-pt1h__v0.1.0".
     """
-    return f"{dataset}{RELEASE_SEP}{release}"
+    return f"{dataset}-{step.lower()}{RELEASE_SEP}{release}"
 
 
 # ------------------------------------------------------------------
@@ -105,6 +144,7 @@ def build_items(
     release: str,
     storage: StorageInfo,
     snapshot: str,
+    step: str,
 ) -> list[JSON]:
     """Build one Item per EGE that has any value in the release.
 
@@ -119,6 +159,7 @@ def build_items(
         release (str): The release, e.g. "v0.1.0".
         storage (StorageInfo): Where the release's repository lives.
         snapshot (str): The release tag's snapshot ID.
+        step (str): The repository's time step as an ISO 8601 duration, e.g. "PT1H".
 
     Returns:
         list[JSON]: The Items, in the order of `df_stac`, linked as files of a static
@@ -137,7 +178,8 @@ def build_items(
     if (no_geom := df["geometry"].isna()).any():
         raise ValueError(f"EGEs without geometry: {df.loc[no_geom, 'id'].tolist()[:5]}")
 
-    cid = collection_id(info.dataset, release)
+    cid = collection_id(info.dataset, step, release)
+    info = info.for_resolution(step)
     created = _iso(pd.Timestamp.now(tz="UTC"))
     return [
         _item(row, cid, release, storage, snapshot, info, created)
@@ -170,6 +212,7 @@ def build_collection(
     Returns:
         JSON: The Collection, linked as the root of a static catalog (s. `write_stac`).
     """
+    info = info.for_resolution(step)
     props = [it["properties"] for it in items]
     summaries: JSON = {}
     for f in SUMMARY_FIELDS:  # only those any Item has (STAC forbids empty lists)
@@ -197,7 +240,7 @@ def build_collection(
         min(p["start_datetime"] for p in props),
         max(p["end_datetime"] for p in props),
     ]
-    cid = collection_id(info.dataset, release)
+    cid = collection_id(info.dataset, step, release)
     return {
         "type": "Collection",
         "id": cid,

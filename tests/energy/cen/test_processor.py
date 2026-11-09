@@ -444,7 +444,7 @@ def _items(out_dir: Path) -> dict[str, dict]:
     Returns:
         dict[str, dict]: The Items.
     """
-    folder = Path(out_dir, "stac", "cen__v0.1.0", "items")
+    folder = Path(out_dir, "stac", "cen-pt1h__v0.1.0", "items")
     return {p.stem: json.loads(p.read_text()) for p in folder.glob("*.json")}
 
 
@@ -579,12 +579,15 @@ def test_collection_describes_the_release(processed: tuple[Path, MagicMock]) -> 
     Args:
         processed (tuple[Path, MagicMock]): The output directory and the map builder.
     """
-    path = Path(processed[0], "stac", "cen__v0.1.0", "collection.json")
+    path = Path(processed[0], "stac", "cen-pt1h__v0.1.0", "collection.json")
     coll = json.loads(path.read_text())
 
-    assert coll["id"] == "cen__v0.1.0"
+    assert coll["id"] == "cen-pt1h__v0.1.0"
+    assert coll["title"] == "CEN (Chile) hourly generation per plant — release v0.1.0"
+    assert coll["keywords"] == ["generation", "v0.1.0", "Chile", "CEN", "hourly"]
     assert coll["summaries"]["energy:fuel_type"] == ["hybrid", "storage", "wind"]
     assert coll["links"][0]["href"] == processor.CEN_TERMS_URL
+    assert coll["description"].startswith("Hourly gross generation in MW")
     assert "academic, non-commercial" in coll["description"]
     assert coll["extent"]["temporal"]["interval"] == [
         ["2024-01-01T03:00:00Z", "2024-01-02T05:00:00Z"]
@@ -666,7 +669,7 @@ def test_publishing_from_a_cluster(make_processor: Callable, tmp_path: Path) -> 
     repo = ic.Repository.open(
         ic.local_filesystem_storage(str(Path(lsdf, "data", "energybench", prefix)))
     )
-    folder = Path(lsdf, "inbox", "cen__v0.1.0")
+    folder = Path(lsdf, "inbox", "cen-pt1h__v0.1.0")
     item = json.loads(next(Path(folder, "items").glob("*.json")).read_text())
     data = item["assets"]["data"]
     assert data["href"] == f"https://data.example.org/energybench/{prefix}"

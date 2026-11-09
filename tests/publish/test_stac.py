@@ -13,13 +13,14 @@ from rbc.publish.icechunk_store import StorageInfo
 
 INFO = stac.DatasetInfo(
     dataset="op",
-    title="Operator",
-    description="Test data.",
+    title="Operator {tres} generation",
+    description="{Tres} test data.",
     license="proprietary",
     license_url="https://example.org/terms",
     providers=[{"name": "Operator", "roles": ["producer", "licensor"]}],
     citation="Operator: generation data.",
-    values="Hourly gross generation (MW)",
+    values="{Tres} gross generation (MW)",
+    keywords=["Somewhere"],
 )
 ENTITIES = ["op_a", "op_b"]
 TIMES = pd.date_range("2024-01-01 03:00", "2024-03-01 02:00", freq="h")
@@ -73,7 +74,7 @@ def _built(df: pd.DataFrame | None = None) -> tuple[dict, list[dict]]:
         tuple[dict, list[dict]]: The Collection and the Items.
     """
     items = stac.build_items(
-        _rows() if df is None else df, SPANS, INFO, "v0.1.0", STORAGE, "SNAP"
+        _rows() if df is None else df, SPANS, INFO, "v0.1.0", STORAGE, "SNAP", "PT1H"
     )
     coll = stac.build_collection(
         INFO,
@@ -121,7 +122,7 @@ def test_items_carry_the_energy_fields_and_data_asset() -> None:
     }
     assert {link["rel"] for link in a["links"]} == {"collection", "parent", "root"}
     assert a["properties"]["created"].endswith("Z")
-    assert coll["id"] == "op__v0.1.0" == a["collection"]
+    assert coll["id"] == "op-pt1h__v0.1.0" == a["collection"]
     assert coll["summaries"]["energy:fuel_type"] == ["hybrid", "wind"]
     assert coll["summaries"]["energy:generation_capacity"] == {
         "minimum": 10.0,
@@ -151,6 +152,31 @@ def test_collection_describes_the_repository() -> None:
     assert item_links == ["./items/op_a.json", "./items/op_b.json"]
 
 
+@pytest.mark.parametrize(
+    "step, word",
+    [("PT1H", "hourly"), ("PT15M", "15-minute"), ("P1D", "daily"), ("PT3H", "3-hour")],
+)
+def test_texts_name_the_resolution(step: str, word: str) -> None:
+    """Happy path: the dataset's texts and keywords name the time step in words.
+
+    Args:
+        step (str): The time step as an ISO 8601 duration.
+        word (str): How the texts name it.
+    """
+    info = INFO.for_resolution(step)
+    assert info.title == f"Operator {word} generation"
+    assert info.description == f"{word.capitalize()} test data."
+    assert info.values == f"{word.capitalize()} gross generation (MW)"
+    assert info.keywords == ["Somewhere", word]
+    assert stac.collection_id("op", step, "v0.1.0") == f"op-{step.lower()}__v0.1.0"
+
+
+def test_texts_reject_other_durations() -> None:
+    """Failure path: a month (ISO 8601 "P1M") isn't a time step the texts can name."""
+    with pytest.raises(ValueError, match="P1M"):
+        INFO.for_resolution("P1M")
+
+
 def test_validate_rejects_a_missing_required_field(needs_stac_schemas: None) -> None:
     """Failure path: an Item without a fuel type breaks the energy extension.
 
@@ -166,7 +192,7 @@ def test_validate_rejects_a_missing_required_field(needs_stac_schemas: None) -> 
 def test_ege_without_values_gets_no_item() -> None:
     """Happy path: an EGE with no value at all has no span, so no Item."""
     df = _rows(id=["op_a", "op_c"])
-    items = stac.build_items(df, SPANS, INFO, "v0.1.0", STORAGE, "SNAP")
+    items = stac.build_items(df, SPANS, INFO, "v0.1.0", STORAGE, "SNAP", "PT1H")
     assert [it["id"] for it in items] == ["op_a"]
 
 
@@ -224,7 +250,7 @@ def test_publish_creates_or_replaces() -> None:
     http.put.assert_called_once()
     assert (
         http.put.call_args.args[0]
-        == "https://stac.example.org/collections/op__v0.1.0/items/op_a"
+        == "https://stac.example.org/collections/op-pt1h__v0.1.0/items/op_a"
     )
 
     http.post.side_effect = [MagicMock(status_code=400, ok=False, text="bad")]
