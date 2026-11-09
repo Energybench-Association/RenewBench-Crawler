@@ -20,6 +20,9 @@ INFO = stac.DatasetInfo(
     providers=[{"name": "Operator", "roles": ["producer", "licensor"]}],
     citation="Operator: generation data.",
     values="{Tres} gross generation (MW)",
+    system_operator="Grid Operator",
+    countries={"CL": "Chile", "AR": "Argentina"},
+    continents=["South America"],
     keywords=["Somewhere"],
 )
 ENTITIES = ["op_a", "op_b"]
@@ -131,7 +134,24 @@ def test_items_carry_the_energy_fields_and_data_asset() -> None:
     assert coll["extent"]["temporal"]["interval"] == [
         ["2024-01-01T03:00:00Z", "2024-03-01T03:00:00Z"]
     ]
-    assert coll["themes"][0]["concepts"] == [{"id": "generation"}]
+    assert coll["themes"] == [
+        {"scheme": stac.DOMAIN_SCHEME, "concepts": [{"id": "generation"}]},
+        {
+            "scheme": "https://energybench.org/system-operators",
+            "concepts": [{"id": "op", "title": "Grid Operator"}],
+        },
+        {
+            "scheme": "https://energybench.org/countries",
+            "concepts": [
+                {"id": "CL", "title": "Chile"},
+                {"id": "AR", "title": "Argentina"},
+            ],
+        },
+        {
+            "scheme": "https://energybench.org/continents",
+            "concepts": [{"id": "south-america", "title": "South America"}],
+        },
+    ]
 
 
 def test_collection_describes_the_repository() -> None:

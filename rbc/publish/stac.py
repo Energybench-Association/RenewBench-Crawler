@@ -73,6 +73,11 @@ class DatasetInfo:
         citation (str): How to cite the data (the scientific extension's citation).
         values (str): What the repository's `values` hold, e.g. "{Tres} gross
             generation (MW)".
+        system_operator (str): The system operator's name, e.g. "Coordinador
+            Eléctrico Nacional (CEN)".
+        countries (dict[str, str]): The countries it covers: ISO 3166-1 alpha-2 code
+            → name, e.g. {"CL": "Chile"}.
+        continents (list[str]): The continents it covers, e.g. ["South America"].
         keywords (list[str]): Extra keywords, e.g. the country; the resolution is
             added to them.
     """
@@ -85,6 +90,9 @@ class DatasetInfo:
     providers: list[JSON]
     citation: str
     values: str
+    system_operator: str
+    countries: dict[str, str]
+    continents: list[str]
     keywords: list[str] = field(default_factory=list)
 
     def for_resolution(self, step: str) -> "DatasetInfo":
@@ -257,7 +265,27 @@ def build_collection(
         "description": info.description,
         "license": info.license,
         "keywords": ["generation", release, *info.keywords],
-        "themes": [{"scheme": DOMAIN_SCHEME, "concepts": [{"id": "generation"}]}],
+        # the domain, then what the website's Browse filters offer (s. STAC contract)
+        "themes": [
+            {"scheme": DOMAIN_SCHEME, "concepts": [{"id": "generation"}]},
+            {
+                "scheme": "https://energybench.org/system-operators",
+                "concepts": [{"id": info.dataset, "title": info.system_operator}],
+            },
+            {
+                "scheme": "https://energybench.org/countries",  # ISO 3166-1 alpha-2
+                "concepts": [
+                    {"id": code, "title": name} for code, name in info.countries.items()
+                ],
+            },
+            {
+                "scheme": "https://energybench.org/continents",
+                "concepts": [  # e.g. "south-america", "South America"
+                    {"id": name.lower().replace(" ", "-"), "title": name}
+                    for name in info.continents
+                ],
+            },
+        ],
         "providers": info.providers,
         "version": release,
         "deprecated": False,

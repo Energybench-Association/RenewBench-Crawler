@@ -585,6 +585,12 @@ def test_collection_describes_the_release(processed: tuple[Path, MagicMock]) -> 
     assert coll["id"] == "cen-pt1h__v0.1.0"
     assert coll["title"] == "CEN (Chile) hourly generation per plant — release v0.1.0"
     assert coll["keywords"] == ["generation", "v0.1.0", "Chile", "CEN", "hourly"]
+    # the system operator, country and continent the website's filters offer
+    assert [theme["concepts"] for theme in coll["themes"][1:]] == [
+        [{"id": "cen", "title": "Coordinador Eléctrico Nacional (CEN)"}],
+        [{"id": "CL", "title": "Chile"}],
+        [{"id": "south-america", "title": "South America"}],
+    ]
     assert coll["summaries"]["energy:fuel_type"] == ["hybrid", "storage", "wind"]
     assert coll["links"][0]["href"] == processor.CEN_TERMS_URL
     assert coll["description"].startswith("Hourly gross generation in MW")

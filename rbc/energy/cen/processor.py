@@ -128,6 +128,9 @@ CEN_DATASET = DatasetInfo(
         "https://energybench.org."
     ),
     values="{Tres} gross generation (MW)",
+    system_operator="Coordinador Eléctrico Nacional (CEN)",
+    countries={"CL": "Chile"},
+    continents=["South America"],
     keywords=["Chile", "CEN"],
 )
 
