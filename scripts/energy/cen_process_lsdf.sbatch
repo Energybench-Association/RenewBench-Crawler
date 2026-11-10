@@ -1,5 +1,5 @@
 #!/bin/bash
-# Process CEN data on the FTP cluster and publish it to energybench through the LSDF.
+# Process CEN data on the FTP cluster and publish it to EnergyBench through the LSDF.
 #
 # The repository is written straight into the bucket on the LSDF (storage.local_root),
 # and the STAC records are handed over through the inbox (stac_inbox), which the VM

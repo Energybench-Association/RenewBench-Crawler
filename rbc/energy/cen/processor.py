@@ -116,7 +116,7 @@ CEN_DATASET = DatasetInfo(
             "url": "https://www.coordinador.cl",
         },
         {
-            "name": "Energybench Association",
+            "name": "EnergyBench Association",
             "roles": ["processor", "host"],
             "url": "https://energybench.org",
         },
@@ -124,7 +124,7 @@ CEN_DATASET = DatasetInfo(
     citation=(
         "Coordinador Eléctrico Nacional (CEN), Chile: real generation per plant "
         "(Generación Real), Sistema de Información Pública, https://www.coordinador.cl. "
-        "Processed and published by the Energybench Association, "
+        "Processed and published by the EnergyBench Association, "
         "https://energybench.org."
     ),
     values="{Tres} gross generation (MW)",

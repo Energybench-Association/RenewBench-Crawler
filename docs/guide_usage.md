@@ -32,7 +32,7 @@ For more information, use `--help`.
 
 ## Processing
 
-Processing turns a source's downloaded raw data into the data energybench serves. Sources
+Processing turns a source's downloaded raw data into the data EnergyBench serves. Sources
 with a processor have a script `scripts/energy/<source>_process.py`. One run of this processor
 performs the following steps:
 
@@ -49,7 +49,7 @@ performs the following steps:
    (e.g. `PT1H`, `PT15M`) and a time axis at that step.
 4. **Catalog**: describes the release as a STAC Collection with one Item per EGE, maps the
    source's fuel types and statuses to the
-   [energy extension](https://github.com/Energybench-Association/stac-extension-energy)'s
+   [energy extension](https://github.com/EnergyBench-Association/stac-extension-energy)'s
    vocabulary, validates everything against STAC and each extension used (this fetches
    the official schemas) and publishes it to the STAC API.
 
@@ -89,7 +89,7 @@ To process without publishing, add `--no-publish`: the repositories are written 
 `<dst_dir_proc>/icechunk/` and the STAC records only as files, so none of the publishing
 URLs or S3 credentials are needed.
 
-### Publishing to energybench
+### Publishing to EnergyBench
 
 The publishing config (`configs/publish/publish.yaml`) defines:
 

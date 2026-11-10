@@ -388,7 +388,7 @@ class PublishChunks(BaseModel):
 
 
 class PublishConfig(BaseModel):
-    """Configuration schema for publishing processed data to energybench.
+    """Configuration schema for publishing processed data to EnergyBench.
 
     Attributes:
         source (Literal): Name of the config.

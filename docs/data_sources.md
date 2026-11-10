@@ -567,7 +567,7 @@ RenewBench-Crawler package.
   However, when citing, please use the credit notation in the following form: [...]"
 
 **Download & data structure**
-- Spatial resolution: per [region](https://github.com/Energybench-Association/RenewBench-Crawler/blob/main/rbc/energy/rei/downloader.py#L28)
+- Spatial resolution: per [region](https://github.com/EnergyBench-Association/RenewBench-Crawler/blob/main/rbc/energy/rei/downloader.py#L28)
   (!)
 - Temporal resolution: hourly
 - Available data timespan: April 2016 to (two months before) now

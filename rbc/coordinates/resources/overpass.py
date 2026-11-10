@@ -32,7 +32,7 @@ OVERPASS_CLIENT_TIMEOUT = OVERPASS_SERVER_TIMEOUT + 60
 HEADER = {
     "User-Agent": (
         "RenewBench-Crawler/1.0 "
-        "(+https://github.com/Energybench-Association/RenewBench-Crawler)"
+        "(+https://github.com/EnergyBench-Association/RenewBench-Crawler)"
     ),
     "Accept": "application/json",
 }
