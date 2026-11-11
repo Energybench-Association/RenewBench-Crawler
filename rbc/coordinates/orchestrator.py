@@ -118,7 +118,7 @@ def perform_coordinate_finding(
 
         except Exception as e:
             logger.exception(
-                f"Error occurred while analysing {run.map_label}: {e}. Skipping..."
+                f"Error occurred while analyzing {run.map_label}: {e}. Skipping..."
             )
 
     if dataframes:

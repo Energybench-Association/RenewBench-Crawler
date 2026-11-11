@@ -350,7 +350,7 @@ class TestGetWeightedTokenScore:
 
         Unlike boilerplate, a differing unit designator is evidence: "Maua 3" is not
         "Maua 6". It only counts when the candidate has a designator of its own, so a
-        plant-level candidate (no unit number at all) is not penalised for lacking one.
+        plant-level candidate (no unit number at all) is not penalized for lacking one.
 
         Args:
             tok_plain (NameTokenizer): Tokenizer without a name_mapping.

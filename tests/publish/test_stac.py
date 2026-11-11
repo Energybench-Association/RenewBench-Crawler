@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from pystac.errors import STACValidationError
 
 from rbc.publish import stac
 from rbc.publish.icechunk_store import StorageInfo
@@ -92,14 +93,14 @@ def _built(df: pd.DataFrame | None = None) -> tuple[dict, list[dict]]:
     return coll, items
 
 
-def test_items_and_collection_are_valid(needs_stac_schemas: None) -> None:
-    """Happy path: the records are valid STAC (incl. every extension they use).
-
-    Args:
-        needs_stac_schemas (None): Skips the test when the schemas can't be fetched.
-    """
+def test_validate_checks_every_record() -> None:
+    """Happy path: the Collection and each Item are validated, without network access."""
     coll, items = _built()
-    stac.validate(coll, items)
+    with patch.object(stac, "validate_dict") as mock_validate:
+        stac.validate(coll, items)
+
+    checked = [c.args[0]["id"] for c in mock_validate.call_args_list]
+    assert checked == [coll["id"], "op_a", "op_b"]
 
 
 def test_items_carry_the_energy_fields_and_data_asset() -> None:
@@ -197,15 +198,24 @@ def test_texts_reject_other_durations() -> None:
         INFO.for_resolution("P1M")
 
 
-def test_validate_rejects_a_missing_required_field(needs_stac_schemas: None) -> None:
-    """Failure path: an Item without a fuel type breaks the energy extension.
-
-    Args:
-        needs_stac_schemas (None): Skips the test when the schemas can't be fetched.
-    """
+def test_validate_names_the_invalid_record() -> None:
+    """Failure path: an invalid Item raises with its ID and the schema's reason."""
     coll, items = _built()
-    del items[0]["properties"]["energy:fuel_type"]
-    with pytest.raises(ValueError, match="op_a"):
+
+    def _reject_op_a(obj: dict) -> None:
+        if obj["id"] == "op_a":
+            raise STACValidationError(
+                "Validation failed against schema at https://example.org/energy.json\n"
+                "'energy:fuel_type' is a required property"
+            )
+
+    with (
+        patch.object(stac, "validate_dict", side_effect=_reject_op_a),
+        pytest.raises(
+            ValueError,
+            match="STAC Feature 'op_a' is invalid: 'energy:fuel_type' is a required",
+        ),
+    ):
         stac.validate(coll, items)
 
 

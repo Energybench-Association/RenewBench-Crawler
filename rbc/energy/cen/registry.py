@@ -162,8 +162,8 @@ def utm_to_latlon(easting, northing, zone) -> tuple[float | None, float | None]:
     CEN's number formats, e.g. '679310,49', '6.287.533,3', '300.000', '5762380.85'.
 
     Args:
-        easting (str | None): Easting in metres ('coordenada_este').
-        northing (str | None): Northing in metres ('coordenada_norte').
+        easting (str | None): Easting in meters ('coordenada_este').
+        northing (str | None): Northing in meters ('coordenada_norte').
         zone (str | None): UTM zone, e.g. '18G', '19 H' ('zona_huso').
 
     Returns:

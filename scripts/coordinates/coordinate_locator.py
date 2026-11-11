@@ -32,7 +32,7 @@ def parse_arguments() -> Namespace:
         "-s",
         type=str,
         choices=SOURCES,
-        help="Energy source to find locations for. Only one source can be analysed at a time.",
+        help="Energy source to find locations for. Only one source can be analyzed at a time.",
     )
     parser.add_argument(
         "--input",

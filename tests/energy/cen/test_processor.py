@@ -387,7 +387,7 @@ def test_get_coordinates_match_removed_if_outside_region(
 ) -> None:
     """Happy path: a registry point clearly outside the registry's own region is dropped.
 
-    The record contradicts itself then (e.g. a mislabelled UTM zone put PFV TUTUVEN
+    The record contradicts itself then (e.g. a mislabeled UTM zone put PFV TUTUVEN
     544 km away). A point just over the border (within the buffer) is kept.
 
     Args:
@@ -665,7 +665,7 @@ def test_publishing_from_a_cluster(make_processor: Callable, tmp_path: Path) -> 
     with (
         patch.object(processor, "build_map"),
         patch.object(processor, "validate", _skip),
-        patch.object(processor, "publish") as mock_publish,
+        patch.object(processor, "publish_stac") as mock_publish,
     ):
         make_processor(
             region_reg=_region_reg({}), publish_cfg=cfg, publish=True
@@ -723,7 +723,7 @@ def _day(day: str, hours: list[tuple[str, int]]) -> pd.DataFrame:
 
 
 def _clock(day: str, horas: list[int]) -> list[tuple[str, int]]:
-    """CEN's labels for its hours of a day: 'hora' k is labelled (k-1) % 24 o'clock.
+    """CEN's labels for its hours of a day: 'hora' k is labeled (k-1) % 24 o'clock.
 
     Args:
         day (str): The local date.
@@ -769,7 +769,7 @@ def test_fall_back_saturday_holds_the_first_repeated_hour(
 def test_fall_back_sunday_adds_the_repeated_hour_as_hora_25(
     make_processor: Callable,
 ) -> None:
-    """Happy path: Sunday's 'hora' 25 (labelled 00:00) is the repeated 23:00, UTC-4.
+    """Happy path: Sunday's 'hora' 25 (labeled 00:00) is the repeated 23:00, UTC-4.
 
     So Saturday's and Sunday's files together give every UTC hour exactly once.
 
@@ -790,7 +790,7 @@ def test_spring_forward_placeholder_is_kept_out_and_returned(
 ) -> None:
     """Happy path: the placeholder for the skipped hour is returned for review.
 
-    Sunday's 'hora' 1 is labelled 00:00, a time the clocks skipped, so it isn't an hour.
+    Sunday's 'hora' 1 is labeled 00:00, a time the clocks skipped, so it isn't an hour.
     The 23 real hours become UTC.
 
     Args:

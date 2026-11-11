@@ -269,8 +269,8 @@ class _EgeMap:
             )
             return self.map
 
-        centre = [sum(all_lats) / len(all_lats), sum(all_lons) / len(all_lons)]
-        self.map = folium.Map(location=centre, zoom_start=6, tiles=self.tiles)
+        center = [sum(all_lats) / len(all_lats), sum(all_lons) / len(all_lons)]
+        self.map = folium.Map(location=center, zoom_start=6, tiles=self.tiles)
         self._add_markers()
 
         folium.LayerControl(collapsed=False).add_to(self.map)

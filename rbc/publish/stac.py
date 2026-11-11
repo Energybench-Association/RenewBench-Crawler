@@ -57,7 +57,7 @@ SUMMARY_FIELDS = ["fuel_type", "entity_type", "status", "measurement_type"]
 
 @dataclass(frozen=True)
 class DatasetInfo:
-    """What a dataset's Collections say about its source, licence and processing.
+    """What a dataset's Collections say about its source, license and processing.
 
     A dataset can come in several temporal resolutions, so its title, description and
     values name the resolution as `{tres}`, e.g. "hourly" or "15-minute", or as `{Tres}`
@@ -66,9 +66,9 @@ class DatasetInfo:
     Attributes:
         dataset (str): ID of the dataset, e.g. "cen".
         title (str): Its title, e.g. "CEN (Chile) {tres} generation per plant".
-        description (str): Its description, incl. licence terms and processing steps.
-        license (str): The STAC licence value, e.g. "proprietary" for terms of use.
-        license_url (str): Link to the licence's terms.
+        description (str): Its description, incl. license terms and processing steps.
+        license (str): The STAC license value, e.g. "proprietary" for terms of use.
+        license_url (str): Link to the license's terms.
         providers (list[JSON]): STAC providers, e.g. the operator as "licensor".
         citation (str): How to cite the data (the scientific extension's citation).
         values (str): What the repository's `values` hold, e.g. "{Tres} gross
@@ -439,7 +439,7 @@ def publish_stac(api_url: str, collection: JSON, items: list[JSON]) -> None:
         (f"{root}/collections/{collection['id']}/items", item) for item in items
     ]
     for url, obj in targets:
-        # only absolute links (e.g. the licence's): the API links its records itself
+        # only absolute links (e.g. the license's): the API links its records itself
         body = {**obj, "links": [ln for ln in obj["links"] if "://" in ln["href"]]}
         r = http.post(url, json=body, timeout=60)
         if r.status_code == 409:  # it exists already: replace it
