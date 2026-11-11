@@ -56,7 +56,7 @@ from rbc.publish.stac import (
     build_collection,
     build_items,
     drop_stac,
-    publish,
+    publish_stac,
     validate,
     write_stac,
 )
@@ -161,7 +161,7 @@ class CenProcessor:
         output_dir (Path): The output directory for processed energy generation data.
         coordinates_dir (Path): The output directory for coordinate finding results.
         publish_cfg (PublishConfig): Where and as which release the data is published.
-        upload (bool): Whether to write to S3 and the STAC API, or only locally.
+        publish (bool): Whether to publish the release, or only write it locally.
         df_registry (pd.DataFrame): The dataframe of EGE info from CEN API registry.
         shared (SharedResources): The dataclass of shared resources for coordinate finding.
     """
@@ -173,7 +173,7 @@ class CenProcessor:
         resources_dir: Path,
         output_dir: Path,
         publish_cfg: PublishConfig,
-        upload: bool = True,
+        publish: bool = True,
     ):
         """Initialize the CEN raw data processor.
 
@@ -183,8 +183,8 @@ class CenProcessor:
             resources_dir (Path): The directory containing resources for coordinate finding.
             output_dir (Path): The output directory for processed energy generation data.
             publish_cfg (PublishConfig): Where and as which release to publish.
-            upload (bool, optional): Whether to write the repository to S3 and the STAC
-                records to the STAC API. If False, the repository is written into
+            publish (bool, optional): Whether to publish the repository and the STAC
+                records (s. `publish_cfg`). If False, the repository is written into
                 `output_dir` and the STAC records only as JSON. Defaults to True.
 
         Raises:
@@ -195,8 +195,8 @@ class CenProcessor:
         self.output_dir = output_dir
         self.coordinates_dir = Path(output_dir, "coordinates")
         self.publish_cfg = publish_cfg
-        self.upload = upload
-        if upload and (unset := publish_cfg.unset_urls()):
+        self.publish = publish
+        if publish and (unset := publish_cfg.unset_urls()):
             raise ValueError(
                 f"Publishing needs real values for {unset} (pass them with -o "
                 f"key=value or a local config), or run with --no-publish."
@@ -308,7 +308,7 @@ class CenProcessor:
             placeholders.append(df_placeholders)
 
         snapshot = store.finish(message=f"{SOURCE} {release}: {days[0]} to {days[-1]}")
-        if self.upload and not store.reused:
+        if self.publish and not store.reused:
             logger.warning(
                 f"Release '{release}' wrote new objects: readers reach them through "
                 f"{storage.href} only once new temporary links are signed for them."
@@ -337,10 +337,10 @@ class CenProcessor:
         )
         validate(collection, items)
         write_stac(Path(self.output_dir, "stac"), collection, items)
-        if self.upload and self.publish_cfg.stac_inbox:
+        if self.publish and self.publish_cfg.stac_inbox:
             drop_stac(self.publish_cfg.stac_inbox, collection, items)
-        elif self.upload:
-            publish(self.publish_cfg.stac_api, collection, items)
+        elif self.publish:
+            publish_stac(self.publish_cfg.stac_api, collection, items)
 
     # ------------------------------------------------------------------
     # MAIN HELPERS
@@ -796,7 +796,7 @@ class CenProcessor:
         return from_name.fillna(from_registry)
 
     def _storage(self, prefix: str) -> StorageInfo:
-        """Return storage location - on S3 if uploading, else locally.
+        """Return storage location - the published one if publishing, else locally.
 
         Args:
             prefix (str): The repository's prefix, e.g. "energy/cen/PT1H/repository".
@@ -804,7 +804,7 @@ class CenProcessor:
         Returns:
             StorageInfo: The repository's location.
         """
-        if self.upload:
+        if self.publish:
             cfg = self.publish_cfg.storage
             return StorageInfo(
                 prefix=prefix,

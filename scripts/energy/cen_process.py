@@ -25,11 +25,11 @@ def parse_arguments() -> Namespace:
     parser = ArgumentParser(prog="CEN data processing into Icechunk and STAC")
     parser.add_argument(
         "--no-publish",
-        dest="upload",
+        dest="publish",
         action="store_false",
         help=(
             "Write the Icechunk repository and the STAC JSON into the processed data "
-            "directory only, instead of to S3 and the STAC API."
+            "directory only, instead of publishing them."
         ),
     )
     parser.add_argument(
@@ -70,7 +70,7 @@ def main() -> None:
         output_dir=cfg.paths.dst_dir_proc,
         resources_dir=coordinates_cfg.paths.resources_dir,
         publish_cfg=publish_cfg,
-        upload=args.upload,
+        publish=args.publish,
     )
     processor.process_data()
 

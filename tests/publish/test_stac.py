@@ -260,7 +260,7 @@ def test_publish_creates_or_replaces() -> None:
     http.put.return_value = MagicMock(status_code=200, ok=True)
 
     with patch.object(stac.requests, "Session", return_value=http):
-        stac.publish("https://stac.example.org/", coll, items)
+        stac.publish_stac("https://stac.example.org/", coll, items)
 
     assert http.post.call_args_list[0].args[0] == "https://stac.example.org/collections"
     # the static catalog's relative links stay out: the API links records itself
@@ -276,4 +276,4 @@ def test_publish_creates_or_replaces() -> None:
     http.post.side_effect = [MagicMock(status_code=400, ok=False, text="bad")]
     with patch.object(stac.requests, "Session", return_value=http):
         with pytest.raises(stac.requests.HTTPError, match="bad"):
-            stac.publish("https://stac.example.org", coll, items)
+            stac.publish_stac("https://stac.example.org", coll, items)

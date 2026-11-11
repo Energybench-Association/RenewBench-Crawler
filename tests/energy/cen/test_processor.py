@@ -78,7 +78,7 @@ def make_processor(
     def _make(
         region_reg: RegionRegistry | None = None,
         publish_cfg: PublishConfig = PUBLISH_CFG,
-        upload: bool = False,
+        publish: bool = False,
     ) -> CenProcessor:
         shared = SharedResources(
             gem_loc=None,
@@ -101,7 +101,7 @@ def make_processor(
                 resources_dir=Path(tmp_path, "resources"),
                 output_dir=Path(tmp_path, "processed", "cen"),
                 publish_cfg=publish_cfg,
-                upload=upload,
+                publish=publish,
             )
 
     return _make
@@ -633,8 +633,8 @@ def test_publishing_refuses_placeholder_urls(make_processor: Callable) -> None:
         update={"data_base_url": "YOUR-DATA-BASE-URL", "stac_api": "YOUR-STAC-API-URL"}
     )
     with pytest.raises(ValueError, match="data_base_url.*stac_api"):
-        make_processor(publish_cfg=placeholders, upload=True)
-    make_processor(publish_cfg=placeholders, upload=False)
+        make_processor(publish_cfg=placeholders, publish=True)
+    make_processor(publish_cfg=placeholders, publish=False)
 
 
 def test_publishing_from_a_cluster(make_processor: Callable, tmp_path: Path) -> None:
@@ -668,7 +668,7 @@ def test_publishing_from_a_cluster(make_processor: Callable, tmp_path: Path) -> 
         patch.object(processor, "publish") as mock_publish,
     ):
         make_processor(
-            region_reg=_region_reg({}), publish_cfg=cfg, upload=True
+            region_reg=_region_reg({}), publish_cfg=cfg, publish=True
         ).process_data()
 
     prefix = "energy/cen/PT1H/repository"

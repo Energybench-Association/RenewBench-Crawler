@@ -420,7 +420,7 @@ def drop_stac(inbox: Path, collection: JSON, items: list[JSON]) -> Path:
     return target
 
 
-def publish(api_url: str, collection: JSON, items: list[JSON]) -> None:
+def publish_stac(api_url: str, collection: JSON, items: list[JSON]) -> None:
     """Create or replace the Collection and its Items in a STAC API (Transactions).
 
     The static catalog's relative links are left out: the API links its records itself.
