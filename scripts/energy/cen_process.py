@@ -10,7 +10,7 @@ from typing import cast
 
 from loguru import logger
 
-from rbc.config.loader import load_config, parse_key_value_pairs
+from rbc.config.loader import load_config, parse_key_value_pairs, parse_release
 from rbc.config.schema import CoordinatesConfig, PublishConfig
 from rbc.energy.cen.processor import SOURCE, CenProcessor
 from rbc.utils import setup_logging
@@ -23,6 +23,16 @@ def parse_arguments() -> Namespace:
         argparse.Namespace: Namespace parsed command line arguments.
     """
     parser = ArgumentParser(prog="CEN data processing into Icechunk and STAC")
+    parser.add_argument(
+        "--release",
+        required=True,
+        type=parse_release,
+        help=(
+            "The release to write and publish, as v<major>.<minor>.<patch>. It tags the "
+            "repositories and names the STAC Collection. Initial full runs use v0.1.0; "
+            "raise it for new data, as a reused release writes nothing new."
+        ),
+    )
     parser.add_argument(
         "--no-publish",
         dest="publish",
@@ -39,8 +49,7 @@ def parse_arguments() -> Namespace:
         help=(
             "Override YAML config values (supports nested keys), one -o per value. "
             "Example: -o paths.dst_dir_raw=/your/raw/path/ "
-            "-o paths.dst_dir_proc=/your/proc/path/ -o access.api_key=YOUR-SECRET-KEY "
-            "-o release=YOUR-RELEASE"
+            "-o paths.dst_dir_proc=/your/proc/path/ -o access.api_key=YOUR-SECRET-KEY"
         ),
     )
     return parser.parse_args()
@@ -69,6 +78,7 @@ def main() -> None:
         input_dir=cfg.paths.dst_dir_raw,
         output_dir=cfg.paths.dst_dir_proc,
         resources_dir=coordinates_cfg.paths.resources_dir,
+        release=args.release,
         publish_cfg=publish_cfg,
         publish=args.publish,
     )

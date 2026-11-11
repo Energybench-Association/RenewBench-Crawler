@@ -1,5 +1,4 @@
 route: lsdf
-release: v0.1.0
 bucket: energybench
 url_public: https://www.energybench.org/files
 lsdf:

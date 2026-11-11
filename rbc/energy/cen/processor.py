@@ -160,7 +160,8 @@ class CenProcessor:
         resources_dir (Path): The directory containing resources for coordinate finding.
         output_dir (Path): The output directory for processed energy generation data.
         coordinates_dir (Path): The output directory for coordinate finding results.
-        publish_cfg (PublishConfig): Where and as which release the data is published.
+        release (str): The release to write and publish, e.g. "v0.1.0".
+        publish_cfg (PublishConfig): Where the data is published.
         publish (bool): Whether to publish the release, or only write it locally.
         df_registry (pd.DataFrame): The dataframe of EGE info from CEN API registry.
         shared (SharedResources): The dataclass of shared resources for coordinate finding.
@@ -172,6 +173,7 @@ class CenProcessor:
         input_dir: Path,
         resources_dir: Path,
         output_dir: Path,
+        release: str,
         publish_cfg: PublishConfig,
         publish: bool = True,
     ):
@@ -182,7 +184,8 @@ class CenProcessor:
             input_dir (Path): The directory containing subfolders of CEN raw data.
             resources_dir (Path): The directory containing resources for coordinate finding.
             output_dir (Path): The output directory for processed energy generation data.
-            publish_cfg (PublishConfig): Where and as which release to publish.
+            release (str): The release to write and publish, e.g. "v0.1.0".
+            publish_cfg (PublishConfig): Where to publish.
             publish (bool, optional): Whether to publish the repository and the STAC
                 records (s. `publish_cfg`). If False, the repository is written into
                 `output_dir` and the STAC records only as JSON. Defaults to True.
@@ -195,6 +198,7 @@ class CenProcessor:
         self.resources_dir = resources_dir
         self.output_dir = output_dir
         self.coordinates_dir = Path(output_dir, "coordinates")
+        self.release = release
         self.publish_cfg = publish_cfg
         self.publish = publish
         if publish:
@@ -249,7 +253,7 @@ class CenProcessor:
         Raises:
             ValueError: If coordinate finding returns no EGEs.
         """
-        release = self.publish_cfg.release
+        release = self.release
 
         # Step 1.1: CEN-specific coordinate finding
         df_ege = self._get_coordinates(df_eg=run.df)

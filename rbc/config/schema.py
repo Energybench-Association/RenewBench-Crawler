@@ -399,7 +399,6 @@ class PublishConfig(BaseModel):
     Attributes:
         source (Literal): Name of the config.
         route (Literal["lsdf", "s3"]): How the data is published (s. `lsdf`, `s3`).
-        release (str): The release to write and publish, e.g. "v0.1.0".
         bucket (str): Bucket of the repositories, on either route.
         url_public (str): Permanent public URL the STAC assets name, on either route
             (only used when publishing: else they name the local repository).
@@ -410,7 +409,6 @@ class PublishConfig(BaseModel):
 
     source: Literal["publish"] = "publish"
     route: Literal["lsdf", "s3"]
-    release: str
     bucket: str = "energybench"
     url_public: str
     lsdf: PublishLsdf

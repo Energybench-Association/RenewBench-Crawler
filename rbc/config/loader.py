@@ -4,6 +4,7 @@ Loader for user-defined parameters (YAML config and CLI arguments)
 """
 
 import argparse
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ from rbc.config.schema import SCHEMA_REGISTRY
 
 ROOT_DIR: Path = Path(__file__).resolve().parents[2]
 CONFIGS_DIR: Path = Path(ROOT_DIR, "configs")
+# A release's version, e.g. "v0.1.0"
+RELEASE_PATTERN = re.compile(r"v\d+\.\d+\.\d+")
 
 
 def load_config(
@@ -127,3 +130,22 @@ def parse_key_value_pairs(pairs: list[str]) -> dict[str, Any]:
         current[last_key] = value
 
     return result
+
+
+def parse_release(release: str) -> str:
+    """Check a release has the format `v<major>.<minor>.<patch>`.
+
+    Args:
+        release (str): The release, e.g. "v0.1.0".
+
+    Returns:
+        str: The release, unchanged.
+
+    Raises:
+        ArgumentTypeError: If the release isn't of that format.
+    """
+    if not RELEASE_PATTERN.fullmatch(release):
+        raise argparse.ArgumentTypeError(
+            f"Invalid release '{release}', expected v<major>.<minor>.<patch>, e.g. v0.1.0"
+        )
+    return release

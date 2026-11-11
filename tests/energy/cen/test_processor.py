@@ -26,9 +26,9 @@ from rbc.energy.cen.processor import (
 )
 from rbc.energy.processing import combine_fuels, global_ids
 
+RELEASE = "v0.1.0"
 PUBLISH_CFG = PublishConfig(
     route="s3",
-    release="v0.1.0",
     url_public="https://data.example.org",
     lsdf={"dst_dir_data": "/lsdf/data", "dst_dir_inbox": "/lsdf/inbox"},
     s3={
@@ -104,6 +104,7 @@ def make_processor(
                 input_dir=Path(tmp_path, "raw", "cen"),
                 resources_dir=Path(tmp_path, "resources"),
                 output_dir=Path(tmp_path, "processed", "cen"),
+                release=RELEASE,
                 publish_cfg=publish_cfg,
                 publish=publish,
             )
@@ -435,7 +436,7 @@ def _store(out_dir: Path) -> xr.Dataset:
     """
     path = Path(out_dir, "icechunk", "energy", "cen", "PT1H", "repository")
     repo = ic.Repository.open(ic.local_filesystem_storage(str(path)))
-    session = repo.readonly_session(tag=PUBLISH_CFG.release)
+    session = repo.readonly_session(tag=RELEASE)
     return xr.open_zarr(session.store, consolidated=False).load()
 
 

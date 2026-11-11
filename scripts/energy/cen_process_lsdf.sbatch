@@ -8,11 +8,12 @@
 #
 # Usage, from the crawler checkout on a login node:
 #   export CEN_API_KEY=...            # never put it in this file
-#   bash scripts/energy/cen_process_lsdf.sbatch
+#   RELEASE=v0.1.0 bash scripts/energy/cen_process_lsdf.sbatch
+# RELEASE is required (v<major>.<minor>.<patch>, v0.1.0 for the first full run).
 # Run with bash, it creates logs/ and submits itself with its Slurm log there (Slurm
 # won't create the folder); the crawler's own detailed log is in
 # $WORK/processed/cen/logs/. Override any setting below the same way, e.g.
-# RELEASE=v0.0.2 bash ...
+# MONTHS="2024 2025" RELEASE=v0.1.0 bash ...
 
 #SBATCH --job-name=cen-lsdf
 #SBATCH --partition=intel-spr
@@ -25,6 +26,7 @@
 set -euo pipefail
 
 : "${CEN_API_KEY:?export CEN_API_KEY before submitting}"
+: "${RELEASE:?set RELEASE, e.g. RELEASE=v0.1.0 for the first full run}"
 
 # Not yet in a job: make the log folder, then submit this script with its log there.
 if [ -z "${SLURM_JOB_ID:-}" ]; then
@@ -33,7 +35,6 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
 fi
 
 SYSOP=cen
-RELEASE="${RELEASE:-v0.1.0}"                      # first full release
 LSDF="${LSDF:-/lsdf/kit/scc/projects/renewbench}"
 RAW="${RAW:-$LSDF/raw/energy/$SYSOP/1h}"
 RESOURCES="${RESOURCES:-$LSDF/coordinate_resources}"
@@ -58,11 +59,11 @@ cd "$CRAWLER"
 # shellcheck disable=SC1091
 source .venv/bin/activate
 python -m scripts.energy.cen_process \
+    --release "$RELEASE" \
     -o paths.dst_dir_raw="$WORK/raw/$SYSOP" \
     -o paths.dst_dir_proc="$WORK/processed/$SYSOP" \
     -o paths.resources_dir="$RESOURCES" \
     -o access.api_key="$CEN_API_KEY" \
-    -o release="$RELEASE" \
     -o route=lsdf \
     -o lsdf.dst_dir_data="$ENERGYBENCH/data" \
     -o lsdf.dst_dir_inbox="$ENERGYBENCH/inbox"

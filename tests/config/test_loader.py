@@ -137,3 +137,24 @@ def test_parse_key_value_pairs_invalid_input(invalid_input: list, msg: str) -> N
     """
     with pytest.raises(argparse.ArgumentTypeError, match=msg):
         loader.parse_key_value_pairs(invalid_input)
+
+
+@pytest.mark.parametrize("release", ["v0.1.0", "v1.12.3"])
+def test_parse_release(release: str) -> None:
+    """Happy path: a release of the format v<major>.<minor>.<patch> is kept as is.
+
+    Args:
+        release (str): A valid release.
+    """
+    assert loader.parse_release(release) == release
+
+
+@pytest.mark.parametrize("release", ["0.1.0", "v0.1", "v0.1.0-rc1", "V0.1.0", ""])
+def test_parse_release_invalid_input(release: str) -> None:
+    """Failure path: a release of any other format is refused.
+
+    Args:
+        release (str): An invalid release.
+    """
+    with pytest.raises(argparse.ArgumentTypeError, match="Invalid release"):
+        loader.parse_release(release)

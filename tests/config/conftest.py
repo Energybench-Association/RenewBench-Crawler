@@ -63,7 +63,6 @@ def source_configs(tmp_path: Path) -> dict:
         },
         "publish": {
             "route": "s3",
-            "release": "v0.1.0",
             "url_public": "https://data.example.org",
             "lsdf": {
                 "dst_dir_data": str(Path(tmp_path, "lsdf", "data")),

@@ -86,6 +86,10 @@ For processing data from a source, use python scripts ending in `..._process.py`
 systems, bash scripts ending in `.sbatch`.
 
 Flags include:
+- `--release` (required): the release written and published, as
+  `v<major>.<minor>.<patch>`. It becomes the repositories' tag and the Collection's
+  suffix (`<source>-<tres>__<release>`). Initial full runs use `v0.1.0`; raise it to
+  publish new data, as a reused release writes nothing new.
 - `--no-publish`: Set if the data shouldn't be published and instead stored to a local
   folder (`<dst_dir_proc>/icechunk/`), meaning none of the publishing URLs or S3
   credentials are needed.
@@ -114,9 +118,6 @@ Required YAML configs are:
 
 - `route`: how the data is published, `lsdf` or `s3`, each with its own block below.
   Currently only the LSDF route can be used; the S3 route is the more direct one planned.
-- `release`: the version written and published, e.g. `v0.1.0`. It becomes the
-  repositories' tag and the Collection's suffix (`<source>-<tres>__<release>`). Raise
-  the release to publish new data.
 - `bucket`: the bucket the repositories are written to, on either route.
 - `url_public`: the permanent public data URL. Every published STAC asset's `href` is
   `{url_public}/{bucket}/{prefix}`, on either route. Only used when publishing: with
@@ -138,23 +139,21 @@ links have been signed for them. The run logs a reminder whenever it wrote new d
 #### Via Python scripts
 
 ```commandline
-python -m scripts.energy.<source>_process
+python -m scripts.energy.<source>_process --release v0.1.0
 ```
 
 Override config values via the commandline via:
 ```commandline
 # Publishing via the `lsdf` route
-python -m scripts.energy.<source>_process \
+python -m scripts.energy.<source>_process --release v0.2.0 \
   -o paths.dst_dir_raw=/my/raw/path/ \
   -o paths.dst_dir_proc=/my/proc/path/ \
-  -o release=v0.2.0 \
   -o route=lsdf
 
 # Publishing via the `s3` route
-python -m scripts.energy.<source>_process \
+python -m scripts.energy.<source>_process --release v0.2.0 \
   -o paths.dst_dir_raw=/my/raw/path/ \
   -o paths.dst_dir_proc=/my/proc/path/ \
-  -o release=v0.2.0 \
   -o route=s3 \
   -o s3.url_endpoint=<s3_endpoint_url> \
   -o s3.url_stac_api=<stac_api_url>
@@ -168,16 +167,13 @@ For more information, use `--help`.
 #### Via the sbatch scripts
 
 ```commandline
-bash scripts/<type>/<source>_process_lsdf.sbatch
-```
-
-Override the variables at the top of the script by setting them beforehand:
-
-```commandline
 export <SOURCE>_API_KEY=my-key  # if required
 
-RELEASE=v0.2.0 bash scripts/<type>/<source>_process_lsdf.sbatch
+RELEASE=v0.1.0 bash scripts/<type>/<source>_process_lsdf.sbatch
 ```
+
+`RELEASE` is required (s. `--release` above). Override the other variables at the top
+of the script the same way, e.g. `RAW=/my/raw/path/ RELEASE=v0.2.0 bash ...`.
 
 ### Outputs
 
