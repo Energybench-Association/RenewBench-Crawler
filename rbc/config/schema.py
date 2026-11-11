@@ -356,22 +356,28 @@ class CoordinatesConfig(PathValidation, BaseModel):
 # ----------------------------------
 # Publishing schemas
 # ----------------------------------
-class PublishStorage(BaseModel):
-    """S3 storage the Icechunk repositories are written to.
+class PublishLsdf(BaseModel):
+    """The LSDF route: write to the mounted LSDF, the VM publishes from there.
 
     Attributes:
-        endpoint (str): S3 endpoint the processing writes to.
-        bucket (str): Bucket of the repositories.
-        s3_region (str): Region the S3 requests are signed for.
-        local_root (Path | None): Directory holding the bucket's directory on a shared
-            filesystem (e.g. the LSDF, mounted on a cluster). If set, repositories are
-            written there directly instead of over S3, and `endpoint` is not needed.
+        dst_dir_data (Path): Directory holding the bucket's directory.
+        dst_dir_inbox (Path): Folder the VM picks the STAC records up from.
     """
 
-    endpoint: str
-    bucket: str = "energybench"
-    s3_region: str = "us-east-1"
-    local_root: Path | None = None
+    dst_dir_data: Path
+    dst_dir_inbox: Path
+
+
+class PublishS3(BaseModel):
+    """The S3 route: write over S3, publish to the STAC API directly.
+
+    Attributes:
+        url_endpoint (str): S3 endpoint the repositories are written to.
+        url_stac_api (str): Root URL of the STAC API (with Transactions).
+    """
+
+    url_endpoint: str
+    url_stac_api: str
 
 
 class PublishChunks(BaseModel):
@@ -392,40 +398,42 @@ class PublishConfig(BaseModel):
 
     Attributes:
         source (Literal): Name of the config.
+        route (Literal["lsdf", "s3"]): How the data is published (s. `lsdf`, `s3`).
         release (str): The release to write and publish, e.g. "v0.1.0".
-        data_base_url (str): Permanent public data URL the STAC assets name.
-        storage (PublishStorage): Where the Icechunk repositories are written.
-        stac_api (str): Root URL of the STAC API the records are published to.
-        stac_inbox (Path | None): Folder the hosting platform picks the records up from
-            (e.g. on the LSDF), used instead of `stac_api` where the API can't be
-            reached, as from a cluster.
+        bucket (str): Bucket of the repositories, on either route.
+        url_public (str): Permanent public URL the STAC assets name, on either route
+            (only used when publishing: else they name the local repository).
+        lsdf (PublishLsdf): Settings of the LSDF route.
+        s3 (PublishS3): Settings of the S3 route.
         chunks (PublishChunks): Chunk shape of the generation arrays.
     """
 
     source: Literal["publish"] = "publish"
+    route: Literal["lsdf", "s3"]
     release: str
-    data_base_url: str
-    storage: PublishStorage
-    stac_api: str
-    stac_inbox: Path | None = None
+    bucket: str = "energybench"
+    url_public: str
+    lsdf: PublishLsdf
+    s3: PublishS3
     chunks: PublishChunks = PublishChunks()
 
-    def unset_urls(self) -> list[str]:
-        """Name the URLs still holding their placeholder, which publishing needs set.
+    def check_publishable(self) -> None:
+        """Check the URLs publishing on the chosen route needs hold real values.
 
-        Returns:
-            list[str]: e.g. ["data_base_url", "storage.endpoint"]; empty if all are set.
+        Raises:
+            ValueError: If any of them still holds its placeholder, naming them all.
         """
-        urls = {
-            "data_base_url": self.data_base_url,
-            # writing to a shared filesystem needs no S3 endpoint
-            "storage.endpoint": self.storage.endpoint
-            if self.storage.local_root is None
-            else "",
-            # handing the records over through a folder needs no STAC API
-            "stac_api": self.stac_api if self.stac_inbox is None else "",
-        }
-        return [name for name, url in urls.items() if url.startswith("YOUR-")]
+        urls = {"url_public": self.url_public}
+        if self.route == "s3":
+            urls |= {
+                "s3.url_endpoint": self.s3.url_endpoint,
+                "s3.url_stac_api": self.s3.url_stac_api,
+            }
+        if unset := [name for name, url in urls.items() if url.startswith("YOUR-")]:
+            raise ValueError(
+                f"Publishing needs real values for {unset} (pass them with -o "
+                f"key=value or a local config), or run with --no-publish."
+            )
 
 
 # ----------------------------------

@@ -128,30 +128,40 @@ def test_config_leaves_proc_dir_to_processing(
     assert not cfg.paths.dst_dir_proc.exists()
 
 
-def test_publish_config_names_unset_urls(source_configs: dict) -> None:
-    """Happy & failure path: the public config's placeholders are named, real URLs not.
+def test_publish_config_checks_the_route_urls(source_configs: dict) -> None:
+    """Happy & failure path: only the chosen route's placeholders block publishing.
 
     Args:
         source_configs (dict): Dictionary of all source configurations.
     """
     schema = SCHEMA_REGISTRY["publish"]
-    cfg = schema.model_validate(source_configs["publish"])
-    assert cfg.unset_urls() == []
+    schema.model_validate(source_configs["publish"]).check_publishable()
 
     placeholders = {
         **source_configs["publish"],
-        "data_base_url": "YOUR-DATA-BASE-URL",
-        "storage": {"endpoint": "YOUR-S3-ENDPOINT"},
+        "url_public": "YOUR-PUBLIC-URL",
+        "s3": {
+            "url_endpoint": "YOUR-S3-ENDPOINT-URL",
+            "url_stac_api": "YOUR-STAC-API-URL",
+        },
     }
-    cfg = schema.model_validate(placeholders)
-    assert cfg.unset_urls() == ["data_base_url", "storage.endpoint"]
+    with pytest.raises(
+        ValueError, match=r"'url_public', 's3\.url_endpoint', 's3\.url_stac_api'"
+    ):
+        schema.model_validate(placeholders).check_publishable()
 
-    # writing to a shared filesystem instead needs no S3 endpoint
-    placeholders["storage"] = {"endpoint": "YOUR-S3-ENDPOINT", "local_root": "/lsdf"}
-    cfg = schema.model_validate(placeholders)
-    assert cfg.unset_urls() == ["data_base_url"]
+    # the LSDF route needs none of the S3 route's URLs
+    with pytest.raises(ValueError, match=r"\['url_public'\]"):
+        schema.model_validate({**placeholders, "route": "lsdf"}).check_publishable()
 
-    # and handing the records over through a folder needs no STAC API
-    placeholders.update(stac_api="YOUR-STAC-API-URL", stac_inbox="/lsdf/inbox")
-    cfg = schema.model_validate(placeholders)
-    assert cfg.unset_urls() == ["data_base_url"]
+
+def test_publish_config_rejects_unknown_route(source_configs: dict) -> None:
+    """Failure path: a route other than "lsdf" or "s3" is refused on loading.
+
+    Args:
+        source_configs (dict): Dictionary of all source configurations.
+    """
+    with pytest.raises(ValidationError, match="route"):
+        SCHEMA_REGISTRY["publish"].model_validate(
+            {**source_configs["publish"], "route": "ftp"}
+        )

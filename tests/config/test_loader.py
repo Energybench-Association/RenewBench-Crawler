@@ -45,6 +45,7 @@ def test_load_config_with_overrides(
     overrides = {
         k: ({sub_k: "override" for sub_k in v} if isinstance(v, dict) else "override")
         for k, v in cfg_dict.items()
+        if k != "route"  # a Literal takes no free text (s. test_schema.py)
     }
 
     with patch("rbc.config.schema.Path.mkdir"):

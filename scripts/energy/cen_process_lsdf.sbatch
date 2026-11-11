@@ -1,10 +1,10 @@
 #!/bin/bash
 # Process CEN data on the FTP cluster and publish it to EnergyBench through the LSDF.
 #
-# The repository is written straight into the bucket on the LSDF (storage.local_root),
-# and the STAC records are handed over through the inbox (stac_inbox), which the VM
-# publishes from every ten minutes. Only the months in MONTHS are processed: their raw
-# files are linked into a run directory under WORK.
+# Publishes on the LSDF route: the repository is written straight into the bucket on
+# the LSDF (lsdf.dst_dir_data), and the STAC records are handed over through the inbox
+# (lsdf.dst_dir_inbox), which the VM publishes from every ten minutes. Only the months
+# in MONTHS are processed: their raw files are linked into a run directory under WORK.
 #
 # Usage, from the crawler checkout on a login node:
 #   export CEN_API_KEY=...            # never put it in this file
@@ -63,9 +63,9 @@ python -m scripts.energy.cen_process \
     -o paths.resources_dir="$RESOURCES" \
     -o access.api_key="$CEN_API_KEY" \
     -o release="$RELEASE" \
-    -o data_base_url=https://www.energybench.org/files \
-    -o storage.local_root="$ENERGYBENCH/data" \
-    -o stac_inbox="$ENERGYBENCH/inbox"
+    -o route=lsdf \
+    -o lsdf.dst_dir_data="$ENERGYBENCH/data" \
+    -o lsdf.dst_dir_inbox="$ENERGYBENCH/inbox"
 
 echo "== handed over; the VM publishes it within ten minutes:"
 ls -la "$ENERGYBENCH/inbox"

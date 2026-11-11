@@ -188,7 +188,8 @@ class CenProcessor:
                 `output_dir` and the STAC records only as JSON. Defaults to True.
 
         Raises:
-            ValueError: If publishing while a URL is still the config's placeholder.
+            ValueError: If publishing while a URL is still the config's placeholder (s.
+                `PublishConfig.check_publishable`).
         """
         self.input_dir = input_dir
         self.resources_dir = resources_dir
@@ -196,11 +197,8 @@ class CenProcessor:
         self.coordinates_dir = Path(output_dir, "coordinates")
         self.publish_cfg = publish_cfg
         self.publish = publish
-        if publish and (unset := publish_cfg.unset_urls()):
-            raise ValueError(
-                f"Publishing needs real values for {unset} (pass them with -o "
-                f"key=value or a local config), or run with --no-publish."
-            )
+        if publish:
+            publish_cfg.check_publishable()
 
         # FOR COORDINATE FINDING
         # load EGE coordinate information from CEN registry API endpoint
@@ -337,10 +335,10 @@ class CenProcessor:
         )
         validate(collection, items)
         write_stac(Path(self.output_dir, "stac"), collection, items)
-        if self.publish and self.publish_cfg.stac_inbox:
-            drop_stac(self.publish_cfg.stac_inbox, collection, items)
+        if self.publish and self.publish_cfg.route == "lsdf":
+            drop_stac(self.publish_cfg.lsdf.dst_dir_inbox, collection, items)
         elif self.publish:
-            publish_stac(self.publish_cfg.stac_api, collection, items)
+            publish_stac(self.publish_cfg.s3.url_stac_api, collection, items)
 
     # ------------------------------------------------------------------
     # MAIN HELPERS
@@ -805,16 +803,15 @@ class CenProcessor:
             StorageInfo: The repository's location.
         """
         if self.publish:
-            cfg = self.publish_cfg.storage
             return StorageInfo(
                 prefix=prefix,
-                bucket=cfg.bucket,
-                data_base_url=self.publish_cfg.data_base_url,
+                bucket=self.publish_cfg.bucket,
+                url_public=self.publish_cfg.url_public,
             )
         return StorageInfo(prefix=prefix, local_dir=Path(self.output_dir, "icechunk"))
 
     def _repository(self, storage: StorageInfo) -> ic.Repository:
-        """Open the repository a StorageInfo names.
+        """Open the repository a StorageInfo names, on the config's route if published.
 
         Args:
             storage (StorageInfo): The repository's location.
@@ -822,15 +819,16 @@ class CenProcessor:
         Returns:
             ic.Repository: The opened repository.
         """
-        cfg = self.publish_cfg.storage
-        # published straight to a shared filesystem: <local_root>/<bucket>/<prefix>
-        published_dir = Path(cfg.local_root, cfg.bucket) if cfg.local_root else None
+        cfg = self.publish_cfg
+        local_dir = storage.local_dir
+        # published on the LSDF route: <dst_dir_data>/<bucket>/<prefix>
+        if local_dir is None and cfg.route == "lsdf":
+            local_dir = Path(cfg.lsdf.dst_dir_data, cfg.bucket)
         return open_repository(
             storage.prefix,
-            local_dir=storage.local_dir or published_dir,
-            endpoint=cfg.endpoint,
+            local_dir=local_dir,
+            endpoint=cfg.s3.url_endpoint,
             bucket=cfg.bucket,
-            s3_region=cfg.s3_region,
         )
 
     def _join_registry(

@@ -14,7 +14,7 @@ import pytest
 import xarray as xr
 from shapely.geometry import Polygon
 
-from rbc.config.schema import PublishConfig
+from rbc.config.schema import PublishConfig, PublishLsdf, PublishS3
 from rbc.coordinates.pipelines import SharedResources
 from rbc.coordinates.resources.natural_earth import RegionRegistry
 from rbc.energy.cen import processor
@@ -27,10 +27,14 @@ from rbc.energy.cen.processor import (
 from rbc.energy.processing import combine_fuels, global_ids
 
 PUBLISH_CFG = PublishConfig(
+    route="s3",
     release="v0.1.0",
-    data_base_url="https://data.example.org",
-    storage={"endpoint": "https://s3.example.org"},
-    stac_api="https://stac.example.org",
+    url_public="https://data.example.org",
+    lsdf={"dst_dir_data": "/lsdf/data", "dst_dir_inbox": "/lsdf/inbox"},
+    s3={
+        "url_endpoint": "https://s3.example.org",
+        "url_stac_api": "https://stac.example.org",
+    },
 )
 # Stand-in polygons of a region and of the country
 REGION = Polygon([(-71, -38), (-70, -38), (-70, -37)])
@@ -630,19 +634,24 @@ def test_publishing_refuses_placeholder_urls(make_processor: Callable) -> None:
         make_processor (Callable): Factory for processors.
     """
     placeholders = PUBLISH_CFG.model_copy(
-        update={"data_base_url": "YOUR-DATA-BASE-URL", "stac_api": "YOUR-STAC-API-URL"}
+        update={
+            "url_public": "YOUR-PUBLIC-URL",
+            "s3": PUBLISH_CFG.s3.model_copy(
+                update={"url_stac_api": "YOUR-STAC-API-URL"}
+            ),
+        }
     )
-    with pytest.raises(ValueError, match="data_base_url.*stac_api"):
+    with pytest.raises(ValueError, match=r"url_public.*s3\.url_stac_api"):
         make_processor(publish_cfg=placeholders, publish=True)
     make_processor(publish_cfg=placeholders, publish=False)
 
 
-def test_publishing_from_a_cluster(make_processor: Callable, tmp_path: Path) -> None:
-    """Happy path: with `local_root` and `stac_inbox`, publishing needs no network.
+def test_publishing_on_the_lsdf_route(make_processor: Callable, tmp_path: Path) -> None:
+    """Happy path: the LSDF route publishes without any network access.
 
-    The repository is written straight to the shared filesystem, and the STAC records,
-    still naming the public data URL, are handed over through the inbox instead of the
-    STAC API. No S3 endpoint, credentials or API URL are involved.
+    The repository is written straight to the LSDF, and the STAC records, still naming
+    the public data URL, are handed over through the inbox instead of the STAC API. The
+    S3 route's placeholders don't matter.
 
     Args:
         make_processor (Callable): Factory for processors.
@@ -651,14 +660,13 @@ def test_publishing_from_a_cluster(make_processor: Callable, tmp_path: Path) -> 
     lsdf = Path(tmp_path, "lsdf")
     cfg = PUBLISH_CFG.model_copy(
         update={
-            "storage": PUBLISH_CFG.storage.model_copy(
-                update={
-                    "endpoint": "YOUR-S3-ENDPOINT",
-                    "local_root": Path(lsdf, "data"),
-                }
+            "route": "lsdf",
+            "lsdf": PublishLsdf(
+                dst_dir_data=Path(lsdf, "data"), dst_dir_inbox=Path(lsdf, "inbox")
             ),
-            "stac_api": "YOUR-STAC-API-URL",
-            "stac_inbox": Path(lsdf, "inbox"),
+            "s3": PublishS3(
+                url_endpoint="YOUR-S3-ENDPOINT-URL", url_stac_api="YOUR-STAC-API-URL"
+            ),
         }
     )
     _write_raw(Path(tmp_path, "raw", "cen", "1h"))

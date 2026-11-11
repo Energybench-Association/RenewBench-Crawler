@@ -158,7 +158,7 @@ def test_repo_prefix_and_storage_href(tmp_path: Path) -> None:
     assert prefix == "energy/cen/PT1H/repository"
     assert repo_prefix("entsoe", "15min") == "energy/entsoe/PT15M/repository"
     published = StorageInfo(
-        prefix=prefix, bucket="energybench", data_base_url="https://data.example.org/"
+        prefix=prefix, bucket="energybench", url_public="https://data.example.org/"
     )
     assert (
         published.href

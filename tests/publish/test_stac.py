@@ -31,7 +31,7 @@ TIMES = pd.date_range("2024-01-01 03:00", "2024-03-01 02:00", freq="h")
 STORAGE = StorageInfo(
     prefix="energy/op/PT1H/repository",
     bucket="energybench",
-    data_base_url="https://data.example.org",
+    url_public="https://data.example.org",
 )
 POINT = {"type": "Point", "coordinates": [-70.0, -33.0]}
 

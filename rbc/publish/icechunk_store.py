@@ -33,14 +33,14 @@ class StorageInfo:
     Attributes:
         prefix (str): Repository prefix in the bucket, e.g. "energy/cen/PT1H/repository".
         bucket (str | None): S3 bucket, None for a local repository.
-        data_base_url (str | None): Permanent public data URL, e.g.
+        url_public (str | None): Permanent public data URL, e.g.
             "https://data.energybench.org"; None for a local repository.
-        local_dir (Path | None): Directory of a local repository, None on S3.
+        local_dir (Path | None): Directory of a local repository, None if published.
     """
 
     prefix: str
     bucket: str | None = None
-    data_base_url: str | None = None
+    url_public: str | None = None
     local_dir: Path | None = None
 
     @property
@@ -53,7 +53,7 @@ class StorageInfo:
         """
         if self.local_dir is not None:
             return str(Path(self.local_dir, self.prefix))
-        return f"{str(self.data_base_url).rstrip('/')}/{self.bucket}/{self.prefix}"
+        return f"{str(self.url_public).rstrip('/')}/{self.bucket}/{self.prefix}"
 
 
 def resolution(tres: str) -> tuple[pd.Timedelta, str]:
@@ -95,7 +95,6 @@ def open_repository(
     local_dir: Path | None = None,
     endpoint: str | None = None,
     bucket: str | None = None,
-    s3_region: str = "us-east-1",
 ) -> ic.Repository:
     """Open (or create) a repository on S3, or in a local directory.
 
@@ -105,8 +104,6 @@ def open_repository(
             None, which stores it on S3.
         endpoint (str | None, optional): S3 endpoint to write to. Defaults to None.
         bucket (str | None, optional): S3 bucket. Defaults to None.
-        s3_region (str, optional): Region the S3 requests are signed for, as the storage
-            expects it. Defaults to "us-east-1".
 
     Returns:
         ic.Repository: The opened repository.
@@ -130,7 +127,6 @@ def open_repository(
         bucket=bucket,
         prefix=prefix,
         endpoint_url=endpoint,
-        region=s3_region,
         allow_http=endpoint.startswith("http://"),
         force_path_style=True,
         access_key_id=key,

@@ -1,18 +1,10 @@
-# Where processed data is published.
-# Publishing refuses to start while any URL is still a placeholder; --no-publish needs
-# none of them. S3 credentials are read from the S3_ACCESS_KEY and S3_SECRET_KEY
-# environment variables only.
-release: v0.1.0  # the Icechunk tag and Collection suffix: always v<major>.<minor>.<patch>
-# Permanent public data URL the STAC asset hrefs name (it redirects to the storage)
-data_base_url: YOUR-DATA-BASE-URL
-storage:
-  endpoint: YOUR-S3-ENDPOINT  # S3 endpoint the processing writes to
-  bucket: energybench
-  s3_region: us-east-1  # region
-  # On a cluster that mounts the storage (e.g. the LSDF), write the repositories straight
-  # to <local_root>/<bucket>/ instead of over S3; then no endpoint or S3 keys are needed.
-  # local_root: /path/to/the/directory/holding/the/bucket
-stac_api: YOUR-STAC-API-URL  # root of the STAC API (with Transactions)
-# Where the API can't be reached (e.g. from a cluster), hand the STAC records over
-# through a folder the platform watches instead; then stac_api is not needed.
-# stac_inbox: /path/to/the/inbox
+route: lsdf
+release: v0.1.0
+bucket: energybench
+url_public: https://www.energybench.org/files
+lsdf:
+  dst_dir_data: /lsdf/kit/scc/projects/renewbench/energybench/data
+  dst_dir_inbox: /lsdf/kit/scc/projects/renewbench/energybench/inbox
+s3:
+  url_endpoint: YOUR-S3-ENDPOINT-URL
+  url_stac_api: YOUR-STAC-API-URL
