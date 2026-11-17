@@ -3,8 +3,9 @@
 #
 # Publishes on the LSDF route: the repository is written straight into the bucket on
 # the LSDF (lsdf.dst_dir_data), and the STAC records are handed over through the inbox
-# (lsdf.dst_dir_inbox), which the VM publishes from every ten minutes. Only the months
-# in MONTHS are processed: their raw files are linked into a run directory under WORK.
+# (lsdf.dst_dir_inbox), which the VM publishes from every ten minutes. Only the time periods
+# in PERIODS (years or months, e.g. "2024 2025" or "2025-03") are processed: their raw
+# files are linked into a run directory under WORK.
 #
 # Usage, from the crawler checkout on a login node:
 #   export CEN_API_KEY=...            # never put it in this file
@@ -13,7 +14,7 @@
 # Run with bash, it creates logs/ and submits itself with its Slurm log there (Slurm
 # won't create the folder); the crawler's own detailed log is in
 # $WORK/processed/cen/logs/. Override any setting below the same way, e.g.
-# MONTHS="2024 2025" RELEASE=v0.1.0 bash ...
+# PERIODS="2024 2025" RELEASE=v0.1.0 bash ...
 
 #SBATCH --job-name=cen-lsdf
 #SBATCH --partition=intel-spr
@@ -38,7 +39,7 @@ SYSOP=cen
 LSDF="${LSDF:-/lsdf/kit/scc/projects/renewbench}"
 RAW="${RAW:-$LSDF/raw/energy/$SYSOP/1h}"
 RESOURCES="${RESOURCES:-$LSDF/coordinate_resources}"
-MONTHS="${MONTHS:-$(ls "$RAW" | cut -c1-4 | grep -E '^[0-9]{4}$' | grep -vx "$(date +%Y)" | sort -u | tr '\n' ' ')}"  # every year in RAW except the current one
+PERIODS="${PERIODS:-$(ls "$RAW" | cut -c1-4 | grep -E '^[0-9]{4}$' | grep -vx "$(date +%Y)" | sort -u | tr '\n' ' ')}"  # every year in RAW except the current one
 ENERGYBENCH="${ENERGYBENCH:-$LSDF/energybench}"   # the VM's /mnt/lsdf-data
 WORK="${WORK:-$LSDF/work/$SYSOP/run-$RELEASE}"       # run directory, links to the raw files, logs
 CRAWLER="${CRAWLER:-$PWD}"
@@ -46,11 +47,11 @@ CRAWLER="${CRAWLER:-$PWD}"
 # Group-writable, so the VM can read the data and move the release out of the inbox.
 umask 0002
 
-echo "== raw files for: $MONTHS"
+echo "== raw files for: $PERIODS"
 mkdir -p "$WORK/raw/$SYSOP/1h"
 find "$WORK/raw/$SYSOP/1h" -maxdepth 1 -type l -delete
-for month in $MONTHS; do
-    ln -s "$RAW/$month"-*.csv "$WORK/raw/$SYSOP/1h/"
+for period in $PERIODS; do
+    ln -s "$RAW/$period"-*.csv "$WORK/raw/$SYSOP/1h/"
 done
 find "$WORK/raw/$SYSOP/1h" -maxdepth 1 -type l | wc -l
 
