@@ -233,11 +233,11 @@ RenewBench-Crawler package.
 
 **Access**
 - Website: [CEN Website](https://www.coordinador.cl/reportes-y-estadisticas/#Estadisticas), generation data
-   [archive (= "old")](https://www.coordinador.cl/reportes-y-estadisticas/#Estadisticas) and
-   [current (= "new")](https://www.coordinador.cl/operacion/graficos/operacion-real/generacion-real/),
-   [API guide](https://www.coordinador.cl/wp-content/uploads/2019/01/Uso-Api-SIP-Sistema-Informacion-Publica-v1.1.pdf)
-   and [API site](https://portal.api.coordinador.cl/documentacion?service=sipubv2)
-- Requirements: "old" data needs no authentification, but all data available via API,
+  [archive (= "old")](https://www.coordinador.cl/reportes-y-estadisticas/#Estadisticas) and
+  [current (= "new")](https://www.coordinador.cl/operacion/graficos/operacion-real/generacion-real/),
+  [API guide](https://www.coordinador.cl/wp-content/uploads/2019/01/Uso-Api-SIP-Sistema-Informacion-Publica-v1.1.pdf)
+  and [API site](https://portal.api.coordinador.cl/documentacion?service=sipubv2)
+- Requirements: "old" data needs no authentication, but all data is available via API,
   which needs a personal API token
   1. Sign up to the [coordinador portal](https://portal.api.coordinador.cl/signup).
      - Select the "Información Pública (SIP)" plan
@@ -245,16 +245,17 @@ RenewBench-Crawler package.
      [the "Planes" tab](https://portal.api.coordinador.cl/planes), go to the field
      "Plan Consulta de Datos Información Pública (SIP)" and press the button "Suscribirse
      a Unidata(es) de Negocio". Confirm by pressing the red "Suscribirse" button. You
-     should now be part of the buisness unit.
+     should now be part of the business unit.
   3. In the "Planes" tab, the field "Plan Consulta de Datos Información Pública (SIP)" now
      has the new button "Suscribirse al plan" button. Click on it, fill out the
      required information - insert a name (`Nombre`) for your application/token and a
-     description (`Descripción`) detailling what it's for - and press the button "Crear
+     description (`Descripción`) detailing what it's for - and press the button "Crear
      Aplicación".
   4. The new window will show a field "Clave de usuario" with a long alphanumeric
      string. This is your API token!
 - Limitations: 60 queries per hour
-- License: academic, non-commercial use citing the source ([terms of use](https://www.coordinador.cl/terminos-y-condiciones/), §4)
+- License: academic, non-commercial use citing the source; commercial redistribution
+  needs CEN's authorization ([terms of use](https://www.coordinador.cl/terminos-y-condiciones/), §4)
 
 **Download & data structure**
 - Spatial resolution: per plant
@@ -285,7 +286,8 @@ RenewBench-Crawler package.
 
   `propietario` - name of the asset owner/company that owns the plant
 
-  `id_coordinado` - coordinated entity identifier (operator/legal entity registered with CEN)
+  `id_coordinado` - coordinated entity identifier (operator/legal entity registered with
+  CEN)
 
   `coordinado` - name of the coordinated entity/operator
 
@@ -294,49 +296,47 @@ RenewBench-Crawler package.
 
   `subtipo_tecnologia` - technology subtype (e.g. `Retiro`, `Inyección`, `Embalse`, etc)
 
-  `factor_ernc` - ERNC factor (indicates if the technology qualifies as Non-Conventional Renewable Energy)
+  `factor_ernc` - ERNC factor (indicates if the technology qualifies as Non-Conventional
+  Renewable Energy)
 
   `alcance` - scope classification (`global` or `partial`)
 
-  `valor_ernc` - ERNC compliance value or generation contribution qualified under renewable targets
+  `valor_ernc` - ERNC compliance value or generation contribution qualified under
+  renewable targets
 
-**STAC**
-
-- `measurement_type`: `'gross_output'`
-
-  According to the [API documentation v2.0](https://www.coordinador.cl/wp-content/uploads/2023/11/Uso_Api_SIP__Sistema_Informacion_Publica_-v2.0.pdf)
-  (p. 57, `generacion-real`): "La Generación Real del Sistema Eléctrico Nacional,
-  corresponde a la Potencia bruta real del sistema, medida en MW" (= the real *gross*
-  power). Its endpoints deliver raw data, "sin agregaciones ni transformaciones".
-- `entity_type`: `'facility'`
-
-  A `central` (`id_central`) is a physical plant. It may be reported in several operating
-  configurations (`id_opreal`, e.g. one per unit combination and fuel mode), which run at
-  the same time, so the processor sums them per plant and hour.
 - Time: each file is one local day (`America/Santiago`, incl. Chile's DST), and `hora` k
   (1-24) is its local clock hour k-1 (`fecha_hora` = date + (`hora`-1) mod 24 hours).
   Around DST changes, CEN reports:
   - clocks set back (Saturday 24:00 → 23:00): Saturday holds its first 23:00 (DST); the
     repeated 23:00 (standard time, e.g. 2023-04-02 03:00 UTC) is in **Sunday's** file as
-    `hora` 25, labelled Sunday 00:00 like `hora` 1.
-  - clocks set forward (Sunday 00:00 → 01:00): Sunday's `hora` 1, labelled 00:00, is a
+    `hora` 25, labeled Sunday 00:00 like `hora` 1.
+  - clocks set forward (Sunday 00:00 → 01:00): Sunday's `hora` 1, labeled 00:00, is a
     placeholder for the skipped hour. Its real hours are `hora` 2-24, following straight on
     from Saturday's last.
 
-- Licence: CEN's [terms of use](https://www.coordinador.cl/terminos-y-condiciones/) (§4)
-  allow downloading public information for personal or academic use and citing it with
-  the source clearly stated; commercial redistribution needs CEN's authorization. The
-  published Collections state this ("academic, non-commercial use").
+**STAC**
+
+- `measurement_type`: `'gross_output'`
+  - According to the [API documentation v2.0](https://www.coordinador.cl/wp-content/uploads/2023/11/Uso_Api_SIP__Sistema_Informacion_Publica_-v2.0.pdf)
+    (p. 57, `generacion-real`): "La Generación Real del Sistema Eléctrico Nacional,
+    corresponde a la Potencia bruta real del sistema, medida en MW" (= the real *gross*
+    power). Its endpoints deliver raw data, "sin agregaciones ni transformaciones".
+- `entity_type`: `'facility'`
+  - A `central` (`id_central`) is a physical plant. It may be reported in several
+    operating configurations (`id_opreal`, e.g. one per unit combination and fuel mode),
+    which run at the same time, so the processor sums them per plant and hour.
+- `license`: `'proprietary'`, linking CEN's terms of use (s. Access); the Collections'
+  description states "academic, non-commercial use".
 
 **Processing** (`python -m scripts.energy.cen_process`, s. [usage guide](guide_usage.md))
 
-- Access: an API token is required to access the CEN plant registry for location findint.
-- Coordinates: are taken from CEN's plant registry first. A plant, whose registry name
-  differs from CEN's `central`, or whose registry point lies outside its own registry
-  region is left to [coordinate finding](coordinate_finding.md).
-- IDs: The unique IDs for the Zarr file are generated as `cen-<id_central>`, or `cen-<central>` (lowercase, dashes) for a plant without one.
-- Values: some plants are comprised of multiple configurations - the plant output is the summ of these configurations.
-  Additionally, for battery storage, the charging process (`Retiro`), is considered negative.
+- Access: an API token is required to access the CEN plant registry for location finding.
+- Coordinates: taken from CEN's plant registry first. A plant whose registry name differs
+  from CEN's `central`, or whose registry point lies outside its own registry region, is
+  left to [coordinate finding](coordinate_finding.md).
+- IDs: `cen-<id_central>`, or `cen-<central>` (lowercase, dashes) for a plant without one.
+- Values: a plant reported in several configurations gets their sum (s. STAC
+  `entity_type`). A battery's charging (`Retiro`) counts as negative.
 - Time: converted to UTC as described above.
 - Vocabulary: `tipo_tecnologia`/`subtipo_tecnologia` and the registry's `estado` map to
   STAC's fuel types and statuses in [`rbc/energy/cen/mappings.py`](../rbc/energy/cen/mappings.py)
