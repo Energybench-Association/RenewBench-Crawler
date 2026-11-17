@@ -143,7 +143,8 @@ class GenerationStore:
     memory holds a single chunk row of all EGEs. Time steps without a value stay NaN.
 
     If the release's tag already exists, nothing is written: the values are still taken
-    in (for each EGE's time span), but the tag's snapshot is reused.
+    in (for each EGE's time span), but the tag's snapshot is reused. It must hold the
+    same EGEs and time axis.
 
     Attributes:
         repo (ic.Repository): The repository written to.
@@ -177,7 +178,8 @@ class GenerationStore:
             chunks (tuple[int, int]): Chunk shape (EGEs, time steps).
 
         Raises:
-            ValueError: If the EGE IDs repeat, or an existing tag holds other EGEs.
+            ValueError: If the EGE IDs repeat, or an existing tag holds other EGEs or
+                another time axis.
         """
         if len(set(entities)) != len(entities):
             raise ValueError("EGE IDs along 'entity_id' must be unique.")
@@ -204,7 +206,7 @@ class GenerationStore:
         self.reused = tag in set(repo.list_tags())  # nothing new is written
         if self.reused:
             self.snapshot = repo.lookup_tag(tag)
-            self._check_existing_entities()
+            self._check_existing_release()
             logger.warning(
                 f"Release '{tag}' already exists (snapshot {self.snapshot}): reusing "
                 f"it, no values are written. Raise the release to write new data."
@@ -379,17 +381,24 @@ class GenerationStore:
         """
         return np.full((len(self.entities), self._chunk_steps), np.nan, dtype="float32")
 
-    def _check_existing_entities(self) -> None:
-        """Check the existing tag holds exactly this release's EGEs.
+    def _check_existing_release(self) -> None:
+        """Check the existing tag holds exactly this run's EGEs and time values.
+
+        Ensures that a release with the same tag but different EGEs or covered time periods
+        (e.g. until 2025 vs until 2026) is caught.
 
         Raises:
-            ValueError: If the tag's EGEs differ from this run's.
+            ValueError: If the tag's EGEs or time axis differ from this run's.
         """
         session = self.repo.readonly_session(tag=self.tag)
-        stored = xr.open_zarr(session.store, consolidated=False)["entity_id"].values
-        if [str(e) for e in stored] != self.entities:
+        stored = xr.open_zarr(session.store, consolidated=False)
+        if [str(e) for e in stored["entity_id"].values] != self.entities:
             raise ValueError(
                 f"Release '{self.tag}' exists with other EGEs: raise the release."
+            )
+        if not pd.DatetimeIndex(stored["time"].values).equals(self.times):
+            raise ValueError(
+                f"Release '{self.tag}' exists with another time axis: raise the release."
             )
 
 

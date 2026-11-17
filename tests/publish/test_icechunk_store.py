@@ -33,20 +33,23 @@ def _hours(*hours: int) -> pd.Series:
     return pd.Series([START + pd.Timedelta(hours=h) for h in hours])
 
 
-def _store(tmp_path: Path, tag: str = "v0.1.0", entities=("a", "b")) -> GenerationStore:
+def _store(
+    tmp_path: Path, tag: str = "v0.1.0", entities=("a", "b"), end: pd.Timestamp = END
+) -> GenerationStore:
     """A store of two EGEs over 10 hours, in chunks of 4 hours.
 
     Args:
         tmp_path (Path): Pytest-provided temporary directory.
         tag (str, optional): The release. Defaults to "v0.1.0".
         entities (tuple, optional): The EGE IDs. Defaults to ("a", "b").
+        end (pd.Timestamp, optional): The time axis' end. Defaults to END.
 
     Returns:
         GenerationStore: The store.
     """
     repo = open_repository("energy/x/PT1H/repository", local_dir=tmp_path)
     return GenerationStore(
-        repo, tag, list(entities), START, END, step=pd.Timedelta("1h"), chunks=(1, 4)
+        repo, tag, list(entities), START, end, step=pd.Timedelta("1h"), chunks=(1, 4)
     )
 
 
@@ -150,6 +153,17 @@ def test_existing_release_with_other_eges_raises(tmp_path: Path) -> None:
     _store(tmp_path).finish("first")
     with pytest.raises(ValueError, match="other EGEs"):
         _store(tmp_path, entities=("a", "c"))
+
+
+def test_existing_release_with_another_time_axis_raises(tmp_path: Path) -> None:
+    """Failure path: reusing a release over another time span raises.
+
+    E.g. a test run of one year, then a full run under the same release: its records
+    would claim the years the tag doesn't hold.
+    """
+    _store(tmp_path).finish("first")
+    with pytest.raises(ValueError, match="another time axis"):
+        _store(tmp_path, end=END + pd.Timedelta(hours=5))
 
 
 def test_repo_prefix_and_storage_href(tmp_path: Path) -> None:
