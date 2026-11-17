@@ -45,7 +45,7 @@ from rbc.energy.processing import (
 )
 from rbc.energy.utils import load_df_from_file, write_df_to_csv
 from rbc.publish.icechunk_store import (
-    GenerationStore,
+    EnergyIcechunkWriter,
     StorageInfo,
     open_repository,
     repo_prefix,
@@ -275,7 +275,7 @@ class CenProcessor:
         storage = self._storage(repo_prefix(SOURCE, run.name))
         step, step_iso = resolution(run.name)  # the raw data dir's, e.g. "1h"
         days = [path.stem for path in run.files]
-        store = GenerationStore(
+        writer = EnergyIcechunkWriter(
             repo=self._repository(storage),
             tag=release,
             entities=entities,
@@ -305,12 +305,12 @@ class CenProcessor:
             )
 
             df_zarr, df_placeholders = self._prepare_for_zarr(df_eg, day=path.stem)
-            store.add(df_zarr["id"], df_zarr["timestamp"], df_zarr["value"])
+            writer.add(df_zarr["id"], df_zarr["timestamp"], df_zarr["value"])
             zarr_ids.update(df_zarr["id"].dropna())
             placeholders.append(df_placeholders)
 
-        snapshot = store.finish(message=f"{SOURCE} {release}: {days[0]} to {days[-1]}")
-        if self.publish and not store.reused:
+        snapshot = writer.finish(message=f"{SOURCE} {release}: {days[0]} to {days[-1]}")
+        if self.publish and not writer.reused:
             logger.warning(
                 f"Release '{release}' wrote new objects: readers reach them through "
                 f"{storage.href} only once new temporary links are signed for them."
@@ -325,7 +325,7 @@ class CenProcessor:
         df_stac = self._prepare_for_stac(df_ege, df_eg_unique)
         log_unjoined_ids(zarr_ids, df_stac["id"])
         items = build_items(
-            df_stac, store.spans(), CEN_DATASET, release, storage, snapshot, step_iso
+            df_stac, writer.spans(), CEN_DATASET, release, storage, snapshot, step_iso
         )
         collection = build_collection(
             CEN_DATASET,
@@ -333,8 +333,8 @@ class CenProcessor:
             items,
             storage,
             snapshot,
-            entities=store.entities,
-            times=store.times,
+            entities=writer.entities,
+            times=writer.times,
             step=step_iso,
         )
         validate(collection, items)

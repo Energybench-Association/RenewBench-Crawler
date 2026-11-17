@@ -10,7 +10,7 @@ import pytest
 import xarray as xr
 
 from rbc.publish.icechunk_store import (
-    GenerationStore,
+    EnergyIcechunkWriter,
     StorageInfo,
     open_repository,
     repo_prefix,
@@ -33,10 +33,10 @@ def _hours(*hours: int) -> pd.Series:
     return pd.Series([START + pd.Timedelta(hours=h) for h in hours])
 
 
-def _store(
+def _writer(
     tmp_path: Path, tag: str = "v0.1.0", entities=("a", "b"), end: pd.Timestamp = END
-) -> GenerationStore:
-    """A store of two EGEs over 10 hours, in chunks of 4 hours.
+) -> EnergyIcechunkWriter:
+    """A writer of two EGEs over 10 hours, in chunks of 4 hours.
 
     Args:
         tmp_path (Path): Pytest-provided temporary directory.
@@ -45,10 +45,10 @@ def _store(
         end (pd.Timestamp, optional): The time axis' end. Defaults to END.
 
     Returns:
-        GenerationStore: The store.
+        EnergyIcechunkWriter: The writer.
     """
     repo = open_repository("energy/x/PT1H/repository", local_dir=tmp_path)
-    return GenerationStore(
+    return EnergyIcechunkWriter(
         repo, tag, list(entities), START, end, step=pd.Timedelta("1h"), chunks=(1, 4)
     )
 
@@ -70,10 +70,10 @@ def _read(tmp_path: Path, tag: str = "v0.1.0") -> xr.Dataset:
 
 def test_values_land_on_their_ege_and_hour(tmp_path: Path) -> None:
     """Happy path: values across chunks are written, and unreported hours stay NaN."""
-    store = _store(tmp_path)
-    store.add(pd.Series(["a", "b"]), _hours(0, 1), pd.Series([1.0, 2.0]))
-    store.add(pd.Series(["a"]), _hours(9), pd.Series([3.0]))  # last, partial chunk
-    snapshot = store.finish("test")
+    writer = _writer(tmp_path)
+    writer.add(pd.Series(["a", "b"]), _hours(0, 1), pd.Series([1.0, 2.0]))
+    writer.add(pd.Series(["a"]), _hours(9), pd.Series([3.0]))  # last, partial chunk
+    snapshot = writer.finish("test")
 
     ds = _read(tmp_path)
     assert ds["values"].sel(entity_id="a").values[[0, 9]].tolist() == [1.0, 3.0]
@@ -87,12 +87,12 @@ def test_values_land_on_their_ege_and_hour(tmp_path: Path) -> None:
 
 def test_spans_are_each_eges_first_and_last_hour(tmp_path: Path) -> None:
     """Happy path: an EGE's span ends with its last hour; without values it has none."""
-    store = _store(tmp_path, entities=("a", "b", "c"))
-    store.add(
+    writer = _writer(tmp_path, entities=("a", "b", "c"))
+    writer.add(
         pd.Series(["a", "a", "b"]), _hours(2, 6, 3), pd.Series([1.0, 1.0, np.nan])
     )
 
-    spans = store.spans()
+    spans = writer.spans()
     assert spans.loc["a"].tolist() == [
         START + pd.Timedelta(hours=2),
         START + pd.Timedelta(hours=7),
@@ -118,29 +118,29 @@ def test_bad_values_raise(tmp_path: Path, ids: list, hours: list, match: str) ->
         match (str): The expected error.
     """
     with pytest.raises(ValueError, match=match):
-        _store(tmp_path).add(
+        _writer(tmp_path).add(
             pd.Series(ids), _hours(*hours), pd.Series([1.0] * len(ids))
         )
 
 
 def test_double_hour_across_calls_and_earlier_chunk_raise(tmp_path: Path) -> None:
     """Failure path: an hour given again later, or values going back a chunk, raise."""
-    store = _store(tmp_path)
-    store.add(pd.Series(["a"]), _hours(1), pd.Series([1.0]))
+    writer = _writer(tmp_path)
+    writer.add(pd.Series(["a"]), _hours(1), pd.Series([1.0]))
     with pytest.raises(ValueError, match="given twice"):
-        store.add(pd.Series(["a"]), _hours(1), pd.Series([1.0]))
-    store.add(pd.Series(["a"]), _hours(5), pd.Series([1.0]))
+        writer.add(pd.Series(["a"]), _hours(1), pd.Series([1.0]))
+    writer.add(pd.Series(["a"]), _hours(5), pd.Series([1.0]))
     with pytest.raises(ValueError, match="out of time order"):
-        store.add(pd.Series(["b"]), _hours(0), pd.Series([1.0]))
+        writer.add(pd.Series(["b"]), _hours(0), pd.Series([1.0]))
 
 
 def test_existing_release_is_reused(tmp_path: Path) -> None:
     """Happy path: a release whose tag exists keeps its snapshot, nothing is rewritten."""
-    first = _store(tmp_path)
+    first = _writer(tmp_path)
     first.add(pd.Series(["a"]), _hours(0), pd.Series([1.0]))
     snapshot = first.finish("first")
 
-    again = _store(tmp_path)
+    again = _writer(tmp_path)
     assert again.reused and not first.reused
     again.add(pd.Series(["a"]), _hours(0), pd.Series([99.0]))
     assert again.finish("again") == snapshot
@@ -150,9 +150,9 @@ def test_existing_release_is_reused(tmp_path: Path) -> None:
 
 def test_existing_release_with_other_eges_raises(tmp_path: Path) -> None:
     """Failure path: reusing a release that holds other EGEs raises."""
-    _store(tmp_path).finish("first")
+    _writer(tmp_path).finish("first")
     with pytest.raises(ValueError, match="other EGEs"):
-        _store(tmp_path, entities=("a", "c"))
+        _writer(tmp_path, entities=("a", "c"))
 
 
 def test_existing_release_with_another_time_axis_raises(tmp_path: Path) -> None:
@@ -161,9 +161,9 @@ def test_existing_release_with_another_time_axis_raises(tmp_path: Path) -> None:
     E.g. a test run of one year, then a full run under the same release: its records
     would claim the years the tag doesn't hold.
     """
-    _store(tmp_path).finish("first")
+    _writer(tmp_path).finish("first")
     with pytest.raises(ValueError, match="another time axis"):
-        _store(tmp_path, end=END + pd.Timedelta(hours=5))
+        _writer(tmp_path, end=END + pd.Timedelta(hours=5))
 
 
 def test_repo_prefix_and_storage_href(tmp_path: Path) -> None:
@@ -214,9 +214,9 @@ def test_resolution(tres: str, step: pd.Timedelta, iso: str) -> None:
 
 
 def test_15_minute_axis(tmp_path: Path) -> None:
-    """Happy path: a 15-minute store keeps every quarter hour; off-axis times raise."""
+    """Happy path: a 15-minute writer keeps every quarter hour; off-axis times raise."""
     repo = open_repository("energy/x/PT15M/repository", local_dir=tmp_path)
-    store = GenerationStore(
+    writer = EnergyIcechunkWriter(
         repo,
         "v0.1.0",
         ["a"],
@@ -226,18 +226,18 @@ def test_15_minute_axis(tmp_path: Path) -> None:
         chunks=(1, 4),
     )
     quarter = [START + pd.Timedelta(minutes=15 * i) for i in (0, 1, 5)]
-    store.add(pd.Series(["a"] * 3), pd.Series(quarter), pd.Series([1.0, 2.0, 3.0]))
-    store.finish("15 min")
+    writer.add(pd.Series(["a"] * 3), pd.Series(quarter), pd.Series([1.0, 2.0, 3.0]))
+    writer.finish("15 min")
 
     path = Path(tmp_path, "energy/x/PT15M/repository")
     ro = ic.Repository.open(ic.local_filesystem_storage(str(path)))
     ds = xr.open_zarr(ro.readonly_session(tag="v0.1.0").store, consolidated=False)
     assert ds.sizes["time"] == 8
     assert ds["values"].sel(entity_id="a").values[[0, 1, 5]].tolist() == [1.0, 2.0, 3.0]
-    assert store.spans().loc["a", "end"] == START + pd.Timedelta(minutes=90)
+    assert writer.spans().loc["a", "end"] == START + pd.Timedelta(minutes=90)
 
     with pytest.raises(ValueError, match="not on the release's"):
-        store.add(
+        writer.add(
             pd.Series(["a"]),
             pd.Series([START + pd.Timedelta(minutes=7)]),
             pd.Series([1.0]),

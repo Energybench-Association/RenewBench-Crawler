@@ -135,7 +135,7 @@ def open_repository(
     return ic.Repository.open_or_create(storage)
 
 
-class GenerationStore:
+class EnergyIcechunkWriter:
     """Writes one release of an operator's generation into its Icechunk repository.
 
     The values arrive in time order (one raw file after the other). They are buffered
