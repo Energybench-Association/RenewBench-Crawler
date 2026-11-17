@@ -4,7 +4,7 @@
 
 # RenewBench Crawlers and Data Processing
 
-[![](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/EnergyBench-Association/RenewBench-Crawler/main.svg)](https://results.pre-commit.ci/latest/github/EnergyBench-Association/RenewBench-Crawler/main)
@@ -18,7 +18,7 @@ dataset. This code is available in the RenewBench Crawlers `rcb` python package,
 configuration files and scripts to run the downloads.
 
 ## Installation
-We heavily recommend installing the `rcb`package in a dedicated `Python3.11+` virtual environment. You can
+We heavily recommend installing the `rcb`package in a dedicated `Python3.12+` virtual environment. You can
 install ``rcp`` directly from the GitHub repository via:
 ```bash
 pip install git+https://github.com/EnergyBench-Association/RenewBench-Crawler

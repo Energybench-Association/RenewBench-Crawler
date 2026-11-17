@@ -17,7 +17,7 @@ jobs:
     strategy:
       matrix:
         os: ["ubuntu-latest", "macos-latest", "windows-latest"]
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12"]
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -43,11 +43,11 @@ jobs:
           coverage xml
 
       - name: Save PR number
-        if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
+        if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
         run: echo ${{ github.event.number }} > pr_number.txt
 
       - name: Save coverage report and PR number
-        if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
+        if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
