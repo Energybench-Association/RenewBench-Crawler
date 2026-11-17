@@ -794,7 +794,7 @@ class CenProcessor:
         )
         if unknown:
             raise ValueError(f"CEN statuses without STAC status: {unknown}")
-        return from_name.fillna(from_registry)
+        return from_name.where(from_name.notna(), from_registry)  # where vs depr fillna
 
     def _storage(self, prefix: str) -> StorageInfo:
         """Return storage location - the published one if publishing, else locally.
