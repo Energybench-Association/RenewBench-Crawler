@@ -136,7 +136,10 @@ def test_items_carry_the_energy_fields_and_data_asset() -> None:
         ["2024-01-01T03:00:00Z", "2024-03-01T03:00:00Z"]
     ]
     assert coll["themes"] == [
-        {"scheme": stac.DOMAIN_SCHEME, "concepts": [{"id": "generation"}]},
+        {
+            "scheme": "https://energybench.org/domains",
+            "concepts": [{"id": "generation"}],
+        },
         {
             "scheme": "https://energybench.org/system-operators",
             "concepts": [{"id": "op", "title": "Grid Operator"}],

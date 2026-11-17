@@ -22,6 +22,7 @@ from rbc.publish.icechunk_store import StorageInfo
 
 JSON = dict[str, Any]  # a JSON object, e.g. a STAC Collection or Item
 
+# STAC-related global variables (incl. extension schemas)
 STAC_VERSION = "1.0.0"
 VERSION_EXT = "https://stac-extensions.github.io/version/v1.2.0/schema.json"
 ENERGY_EXT = (
@@ -31,9 +32,6 @@ THEMES_EXT = "https://stac-extensions.github.io/themes/v1.0.0/schema.json"
 ITEM_ASSETS_EXT = "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json"
 DATACUBE_EXT = "https://stac-extensions.github.io/datacube/v2.2.0/schema.json"
 SCIENTIFIC_EXT = "https://stac-extensions.github.io/scientific/v1.0.0/schema.json"
-DOMAIN_SCHEME = "https://energybench.org/domains"
-# Separator of a dataset's release Collections, e.g. "cen-pt1h__v0.1.0"
-RELEASE_SEP = "__"
 
 # The energy extension's Item properties, as columns of the STAC data (without "energy:")
 ENERGY_FIELDS = [
@@ -137,9 +135,9 @@ def collection_id(dataset: str, step: str, release: str) -> str:
         release (str): The release, e.g. "v0.1.0".
 
     Returns:
-        str: e.g. "cen-pt1h__v0.1.0".
+        str: The release collection ID, e.g. "cen-pt1h__v0.1.0".
     """
-    return f"{dataset}-{step.lower()}{RELEASE_SEP}{release}"
+    return f"{dataset}-{step.lower()}__{release}"
 
 
 # ------------------------------------------------------------------
@@ -267,7 +265,10 @@ def build_collection(
         "keywords": ["generation", release, *info.keywords],
         # the domain, then what the website's Browse filters offer (s. STAC contract)
         "themes": [
-            {"scheme": DOMAIN_SCHEME, "concepts": [{"id": "generation"}]},
+            {
+                "scheme": "https://energybench.org/domains",
+                "concepts": [{"id": "generation"}],
+            },
             {
                 "scheme": "https://energybench.org/system-operators",
                 "concepts": [{"id": info.dataset, "title": info.system_operator}],
