@@ -37,12 +37,11 @@ dependencies = [
     "numpy<2.5",  # limit to prevent warnings (pandas 2.x uses deprecated numpy functions)
     "openelectricity @ git+https://github.com/EnergyBench-Association/openelectricity-python.git@fix/async_get_facility_data",
     "openpyxl",
-    "osm_powerplants",
     "pandas>=2.2,<3",  # pandas 3 breaks several things
-    "powerplantmatching",
     "pyarrow",
     "pystac[validation]",
     "pydantic",
+    "pyproj",
     "pyyaml",
     "rapidfuzz",
     "requests",
