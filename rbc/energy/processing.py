@@ -115,6 +115,42 @@ def global_ids(sysop: str, keys: pd.Series) -> pd.Series:
     return keys.map(lookup)
 
 
+def log_unjoined_ids(zarr_ids: set[str], stac_ids: pd.Series) -> None:
+    """Log the EGE IDs only one of the Zarr and STAC data has, as both must have them all.
+
+    Args:
+        zarr_ids (set[str]): The distinct IDs in the Zarr data.
+        stac_ids (pd.Series): The IDs in the STAC data.
+    """
+    stac = set(stac_ids.dropna())
+    for unjoined, lacking in ((zarr_ids - stac, "STAC"), (stac - zarr_ids, "Zarr")):
+        if unjoined:
+            logger.error(
+                f"{len(unjoined)} EGE IDs have no {lacking} data, e.g. "
+                f"{sorted(unjoined)[:5]}"
+            )
+
+
+def to_layout(
+    df: pd.DataFrame, layout: list[str], renames: dict[str, str] | None = None
+) -> pd.DataFrame:
+    """Bring data into a layout's columns, dropping all others.
+
+    Args:
+        df (pd.DataFrame): The operator's data.
+        layout (list[str]): The layout's columns, in order (e.g. STAC_COLUMNS).
+        renames (dict[str, str], optional): Map of a column → layout column, for any not
+            named after the layout yet. Defaults to None.
+
+    Returns:
+        pd.DataFrame: The data in the layout's columns, empty where not provided.
+    """
+    return df.rename(columns=renames or {}).reindex(columns=layout)
+
+
+# ------------------------------------------------------------------
+# Zarr HELPERS
+# ------------------------------------------------------------------
 def to_utc(
     timestamps: pd.Series,
     tz: str,
@@ -178,42 +214,6 @@ def check_totals_kept(before: pd.Series, after: pd.Series, what: str) -> None:
             f"Totals changed for {int(changed.sum())} EGEs in {what}: "
             f"{diff.head(5).round(3).to_dict()}"
         )
-
-
-def log_unjoined_ids(zarr_ids: set[str], stac_ids: pd.Series) -> None:
-    """Log the EGE IDs only one of the Zarr and STAC data has, as both must have them all.
-
-    Args:
-        zarr_ids (set[str]): The distinct IDs in the Zarr data.
-        stac_ids (pd.Series): The IDs in the STAC data.
-    """
-    stac = set(stac_ids.dropna())
-    for unjoined, lacking in ((zarr_ids - stac, "STAC"), (stac - zarr_ids, "Zarr")):
-        if unjoined:
-            logger.error(
-                f"{len(unjoined)} EGE IDs have no {lacking} data, e.g. "
-                f"{sorted(unjoined)[:5]}"
-            )
-
-
-# ------------------------------------------------------------------
-# Zarr HELPERS
-# ------------------------------------------------------------------
-def to_layout(
-    df: pd.DataFrame, layout: list[str], renames: dict[str, str] | None = None
-) -> pd.DataFrame:
-    """Bring data into a layout's columns, dropping all others.
-
-    Args:
-        df (pd.DataFrame): The operator's data.
-        layout (list[str]): The layout's columns, in order (e.g. STAC_COLUMNS).
-        renames (dict[str, str], optional): Map of a column → layout column, for any not
-            named after the layout yet. Defaults to None.
-
-    Returns:
-        pd.DataFrame: The data in the layout's columns, empty where not provided.
-    """
-    return df.rename(columns=renames or {}).reindex(columns=layout)
 
 
 # ------------------------------------------------------------------
