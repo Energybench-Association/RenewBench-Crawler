@@ -13,10 +13,7 @@ import pandas as pd
 from loguru import logger
 
 from rbc.coordinates.mappings import OPERATOR_COLUMNS, OPERATOR_METADATA
-from rbc.energy.utils import DownloadTask, load_df_from_file
-
-TRES_PATTERN = DownloadTask._TRES_PATTERN  # temporal res dir names ("1h", "15min")
-DATE_PATTERN = DownloadTask._DATE_PATTERN  # data file stems ("2020-01-05")
+from rbc.energy.utils import DATE_PATTERN, TRES_PATTERN, load_df_from_file
 
 
 @dataclass(frozen=True, eq=False)  # eq=False: a dataframe can't be compared or hashed

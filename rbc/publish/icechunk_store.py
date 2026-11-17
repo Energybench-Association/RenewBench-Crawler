@@ -6,7 +6,6 @@ v3), in MW, on a regular UTC axis at the data's own temporal resolution (e.g. ho
 """
 
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,8 +16,8 @@ import pandas as pd
 import xarray as xr
 from loguru import logger
 
-# A raw data directory's temporal resolution, as DownloadTask names it (e.g. "15min")
-TRES_PATTERN = re.compile(r"(\d+)(min|h|d)")
+from rbc.energy.utils import TRES_PATTERN
+
 # Map: the resolution's unit → its ISO 8601 duration, e.g. "15min" → "PT15M"
 ISO_DURATIONS = {"min": "PT{}M", "h": "PT{}H", "d": "P{}D"}
 
