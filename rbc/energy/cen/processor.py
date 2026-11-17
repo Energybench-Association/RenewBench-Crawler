@@ -649,16 +649,15 @@ class CenProcessor:
 
         CEN reports a physical EGE ('central'). Sometimes, these are split into different
         operating configurations ('id_opreal') of units subdivided into fuel modes. E.g.
-            e.g. "TER KELAR" has 15 operating conditions such as
+            "TER KELAR" has 15 operating conditions such as
             "KELAR TG1 (GNL)", "KELAR TG1 (Diesel)", "KELAR TG1 + 0.5 TV (Gas Arg)",
             "KELAR TG1 + TG2 + TV (Gas Arg)", ... = 3 units (TG1, TG2, TV) mixed into >4 conf
         For this reason, the metadata is defined for all provided EGEs as aforementioned.
         Operator, fuels and capacity are the latest the generation data reports. An EGE
-        with several generating configurations has no row
-        holding its own capacity (each holds one unit and fuel mode's), so its capacity
-        is unknown; a battery's charging configuration doesn't count, as it is the same
-        unit. A square bracket term in CEN's name (e.g. "[NO_MOSTRAR]") is the EGE's true
-        status, else the registry's "estado".
+        with several generating configurations has no row holding its own capacity (each
+        holds one unit and fuel mode's), so its capacity is unknown; a battery's charging
+        configuration doesn't count, as it is the same unit. A square bracket term in CEN's
+        name (e.g. "[NO_MOSTRAR]") is the EGE's true status, else the registry's "estado".
 
         Args:
             df_ege (pd.DataFrame): The EGEs as coordinate finding returned them.

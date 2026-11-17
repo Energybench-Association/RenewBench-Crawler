@@ -33,7 +33,7 @@ class StorageInfo:
         prefix (str): Repository prefix in the bucket, e.g. "energy/cen/PT1H/repository".
         bucket (str | None): S3 bucket, None for a local repository.
         url_public (str | None): Permanent public data URL, e.g.
-            "https://data.energybench.org"; None for a local repository.
+            "https://www.energybench.org/files". None for a local repository.
         local_dir (Path | None): Directory of a local repository, None if published.
     """
 
@@ -47,8 +47,8 @@ class StorageInfo:
         """Give the repository's permanent URL (or its path, if local).
 
         Returns:
-            str: e.g. "https://data.energybench.org/energybench/energy/cen/PT1H/repository",
-                opened with `icechunk.http_storage(href)`.
+            str: The repo URL to be opened with `icechunk.http_storage(href)`, e.g.
+                "https://www.energybench.org/files/energybench/energy/cen/PT1H/repository".
         """
         if self.local_dir is not None:
             return str(Path(self.local_dir, self.prefix))
