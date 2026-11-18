@@ -696,6 +696,47 @@ def test_publishing_on_the_lsdf_route(make_processor: Callable, tmp_path: Path) 
     assert not Path(tmp_path, "processed", "cen", "icechunk").exists()
 
 
+def test_no_review_file_without_skipped_hours(
+    processed: tuple[Path, MagicMock],
+) -> None:
+    """Happy path: days without a clock change leave nothing for review.
+
+    Args:
+        processed (tuple[Path, MagicMock]): The output directory and the map builder.
+    """
+    assert not Path(processed[0], "review").exists()
+
+
+def test_skipped_hour_placeholders_kept_for_review(
+    make_processor: Callable, tmp_path: Path
+) -> None:
+    """Happy path: rows for hours the clocks skipped go to the review folder.
+
+    Args:
+        make_processor (Callable): Factory for processors.
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+    prepare = CenProcessor._prepare_for_zarr
+
+    def with_placeholder(
+        self: CenProcessor, df: pd.DataFrame, day: str
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        out, _ = prepare(self, df, day)
+        return out, df.head(1)  # one row per day, as if its hour had been skipped
+
+    _write_raw(Path(tmp_path, "raw", "cen", "1h"))  # 2024-01-01 and 2024-01-02
+    with (
+        patch.object(CenProcessor, "_prepare_for_zarr", with_placeholder),
+        patch.object(processor, "build_map"),
+        patch.object(processor, "validate", _skip),
+    ):
+        make_processor(region_reg=_region_reg({})).process_data()
+
+    review = Path(tmp_path, "processed", "cen", "review")
+    assert [f.name for f in review.iterdir()] == ["skipped_hour_placeholders_1h.csv"]
+    assert len(pd.read_csv(Path(review, "skipped_hour_placeholders_1h.csv"))) == 2
+
+
 def test_process_data_without_raw(make_processor: Callable, tmp_path: Path) -> None:
     """Failure path: with no raw data, processing stops instead of publishing nothing.
 

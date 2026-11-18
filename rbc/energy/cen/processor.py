@@ -324,10 +324,10 @@ class CenProcessor:
                 f"{storage.href} only once new temporary links are signed for them."
             )
         # kept for review: CEN's rows for hours the clocks skipped (no real hour)
-        write_df_to_csv(
-            pd.concat(placeholders, ignore_index=True),
-            Path(self.output_dir, f"skipped_hour_placeholders_{run.name}.csv"),
-        )
+        kept_out = pd.concat(placeholders, ignore_index=True)
+        if not kept_out.empty:
+            name = f"skipped_hour_placeholders_{run.name}.csv"
+            write_df_to_csv(kept_out, Path(self.output_dir, "review", name))
 
         # Step 3: STAC records, one Item per EGE
         df_stac = self._prepare_for_stac(df_ege, df_eg_unique)
