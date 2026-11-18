@@ -156,7 +156,7 @@ class RegionRegistry:
 
         # 1. filter to the country ("Amazonas" exists in BR, CO, PE and VE)
         gdf = self._get_admin1_df()
-        gdf = gdf[gdf["admin"].map(normalize_name) == normalize_name(country)]
+        gdf = gdf[gdf["admin"].map(normalize_name) == normalize_name(country)].copy()
         if gdf.empty:
             logger.warning(
                 f"No admin-1 regions found for '{country}'. Region check disabled."

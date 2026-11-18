@@ -73,7 +73,8 @@ def resolution(tres: str) -> tuple[pd.Timedelta, str]:
             f"'{tres}' isn't a temporal resolution such as '1h' or '15min'."
         )
     count, unit = match.groups()
-    return pd.Timedelta(tres), ISO_DURATIONS[unit].format(int(count))
+    step = pd.Timedelta(int(count), unit="D" if unit == "d" else unit)  # 'd' deprecated
+    return step, ISO_DURATIONS[unit].format(int(count))
 
 
 def repo_prefix(source: str, tres: str) -> str:

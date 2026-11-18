@@ -32,12 +32,12 @@ dependencies = [
     "eptr2",
     "folium",
     "geopandas",
-    "icechunk>=2.1,<3",  # Icechunk 2.x on-disk format
+    "icechunk>=2.1,<3",  # Icechunk 2.3.1 (latest; Nov 26)
     "loguru",
-    "numpy<2.5",  # limit to prevent warnings (pandas 2.x uses deprecated numpy functions)
+    "numpy",
     "openelectricity @ git+https://github.com/EnergyBench-Association/openelectricity-python.git@fix/async_get_facility_data",
     "openpyxl",
-    "pandas>=2.2,<3",  # pandas 3 breaks several things
+    "pandas>=2.2,<3.1",  # pandas 3.1 breaks the country-converter v1.3.2 (latest; Nov 26)
     "pyarrow",
     "pystac[validation]",
     "pydantic",

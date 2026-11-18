@@ -986,7 +986,11 @@ def test_stac_fuels_ignore_case_and_accents() -> None:
         }
     )
     out = CenProcessor._stac_fuels(df)
-    assert out.values.tolist() == [["a", "biomass", "chp"], ["b", "coal", None]]
+    assert out[["id", "fuel_type"]].values.tolist() == [["a", "biomass"], ["b", "coal"]]
+    assert out["fuel_subtype"].iloc[0] == "chp"
+    assert pd.isna(
+        out["fuel_subtype"].iloc[1]
+    )  # pandas 3 shows a missing string as NaN
 
 
 def test_unmapped_vocabulary_raises() -> None:
