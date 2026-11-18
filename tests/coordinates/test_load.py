@@ -215,6 +215,47 @@ def test_load_runs_builds_one_run_per_directory(cen_dir: Path) -> None:
     assert [f.name for f in runs[0].files] == ["2024-01-01.csv", "2024-01-02.csv"]
 
 
+@pytest.mark.parametrize(
+    "periods, expected",
+    [
+        (None, ["2024-01-01.csv", "2024-01-02.csv"]),
+        (["2024"], ["2024-01-01.csv", "2024-01-02.csv"]),
+        (["2024-01"], ["2024-01-01.csv", "2024-01-02.csv"]),
+        (["2024-01-02"], ["2024-01-02.csv"]),
+        (["2023", "2024-01-01"], ["2024-01-01.csv"]),
+    ],
+    ids=["all", "year", "month", "day", "several"],
+)
+def test_load_runs_keeps_the_periods_files(
+    cen_dir: Path, periods: list[str] | None, expected: list[str]
+) -> None:
+    """Happy path: only the raw files of the given years, months or days are loaded.
+
+    Args:
+        cen_dir (Path): The CEN "1h" directory.
+        periods (list[str] | None): The periods to load.
+        expected (list[str]): The files the run should hold.
+    """
+    runs = list(load_runs([cen_dir.parent], sysop="cen", periods=periods))
+
+    assert [f.name for f in runs[0].files] == expected
+
+
+@pytest.mark.parametrize("periods", [["2023"], ["2024-02"], ["2024-01-0"]])
+def test_load_runs_skips_a_directory_without_the_periods(
+    cen_dir: Path, periods: list[str]
+) -> None:
+    """Happy path: a directory with no files of the periods yields no run.
+
+    A period matches whole parts of a day only, so "2024-01-0" matches no file.
+
+    Args:
+        cen_dir (Path): The CEN "1h" directory.
+        periods (list[str]): Periods without any raw file.
+    """
+    assert list(load_runs([cen_dir.parent], sysop="cen", periods=periods)) == []
+
+
 def test_load_runs_ignores_other_operators(cen_dir: Path) -> None:
     """Happy path: only directories below the operator's own folder become its runs.
 

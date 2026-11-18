@@ -51,7 +51,9 @@ class Run:
         return f"{self.sysop}_{self.name}"
 
 
-def load_runs(input_paths: list[Path | str], sysop: str) -> Iterator[Run]:
+def load_runs(
+    input_paths: list[Path | str], sysop: str, periods: list[str] | None = None
+) -> Iterator[Run]:
     """Yield one run per raw CSV directory of the operator found below the given paths.
 
     EGE names missing from a directory's rows are recovered from its other temporal
@@ -61,6 +63,9 @@ def load_runs(input_paths: list[Path | str], sysop: str) -> Iterator[Run]:
     Args:
         input_paths (list[Path | str]): Paths to search for raw CSV directories.
         sysop (str): Name of the system operator, e.g. "entsoe".
+        periods (list[str] | None, optional): Years, months or days to keep the raw
+            files of, e.g. ["2024", "2025-03"]. A directory without any is skipped.
+            Defaults to None, i.e. all files.
 
     Yields:
         Run: The next directory's dataframe incl. other required Run parameters.
@@ -72,6 +77,16 @@ def load_runs(input_paths: list[Path | str], sysop: str) -> Iterator[Run]:
         try:
             name, zone = _get_run_name_and_zone(csv_dir)
             files = tuple(sorted(csv_dir.glob("*.csv")))
+            if periods:
+                # use only those files (named by month/day) that fall in any of the periods
+                files = tuple(
+                    f
+                    for f in files
+                    if any(f.stem == p or f.stem.startswith(f"{p}-") for p in periods)
+                )
+                if not files:
+                    logger.info(f"No raw files for {periods} in {csv_dir}. Skipping...")
+                    continue
             df = recover_names(_load_ege_rows(files, sysop), csv_dir, sysop, name)
         except Exception as e:
             logger.exception(

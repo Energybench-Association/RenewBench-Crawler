@@ -200,3 +200,26 @@ class TestParseRelease:
         """
         with pytest.raises(argparse.ArgumentTypeError, match="Invalid release"):
             loader.parse_release(release)
+
+
+class TestParsePeriod:
+    """Tests for the "parse_period" helper function."""
+
+    @pytest.mark.parametrize("period", ["2024", "2025-03", "2025-03-01"])
+    def test_parse_period(self, period: str) -> None:
+        """Happy path: a year, month or day is kept as is.
+
+        Args:
+            period (str): A valid period.
+        """
+        assert loader.parse_period(period) == period
+
+    @pytest.mark.parametrize("period", ["24", "2025-3", "2025-13", "2025/03", "", "x"])
+    def test_parse_period_invalid_input(self, period: str) -> None:
+        """Failure path: a period of any other format is refused.
+
+        Args:
+            period (str): An invalid period.
+        """
+        with pytest.raises(argparse.ArgumentTypeError, match="Invalid period"):
+            loader.parse_period(period)

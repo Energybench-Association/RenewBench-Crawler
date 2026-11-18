@@ -86,10 +86,13 @@ For processing data from a source, use python scripts ending in `..._process.py`
 systems, bash scripts ending in `.sbatch`.
 
 Flags include:
-- `--release` (required): the release written and published, as
+- `-r`/`--release` (required): the release written and published, as
   `v<major>.<minor>.<patch>`. It becomes the repositories' tag and the Collection's
   suffix (`<source>-<tres>__<release>`). Initial full runs use `v0.1.0`; raise it to
   publish new data, as a reused release writes nothing new.
+- `-p`/`--periods`: years or months of raw data to process, e.g. `-p 2024 2025-03`
+  (default: all raw files in `dst_dir_raw`). The time axis spans the first to the last
+  selected day, so periods with a gap between them leave it empty there.
 - `--no-publish`: Set if the data shouldn't be published and instead stored to a local
   folder (`<dst_dir_proc>/icechunk/`), meaning none of the publishing URLs or S3
   credentials are needed.
@@ -174,6 +177,8 @@ RELEASE=v0.1.0 bash scripts/<type>/<source>_process_lsdf.sbatch
 
 `RELEASE` is required (s. `--release` above). Override the other variables at the top
 of the script the same way, e.g. `RAW=/my/raw/path/ RELEASE=v0.2.0 bash ...`.
+`PERIODS` is passed on as `--periods` and defaults to every year in `RAW` except the
+current one.
 
 ### Outputs
 

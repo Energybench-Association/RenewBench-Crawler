@@ -163,6 +163,7 @@ class CenProcessor:
         release (str): The release to write and publish, e.g. "v0.1.0".
         publish_cfg (PublishConfig): Where the data is published.
         publish (bool): Whether to publish the release, or only write it locally.
+        periods (list[str] | None): Years or months of raw data to process (None: all).
         df_registry (pd.DataFrame): The dataframe of EGE info from CEN API registry.
         shared (SharedResources): The dataclass of shared resources for coordinate finding.
     """
@@ -176,6 +177,7 @@ class CenProcessor:
         release: str,
         publish_cfg: PublishConfig,
         publish: bool = True,
+        periods: list[str] | None = None,
     ):
         """Initialize the CEN raw data processor.
 
@@ -189,6 +191,8 @@ class CenProcessor:
             publish (bool, optional): Whether to publish the repository and the STAC
                 records (s. `publish_cfg`). If False, the repository is written into
                 `output_dir` and the STAC records only as JSON. Defaults to True.
+            periods (list[str] | None, optional): Years or months of raw data to
+                process, e.g. ["2024", "2025-03"]. Defaults to None, i.e. all raw files.
 
         Raises:
             ValueError: If publishing while a URL is still the config's placeholder (s.
@@ -201,6 +205,7 @@ class CenProcessor:
         self.release = release
         self.publish_cfg = publish_cfg
         self.publish = publish
+        self.periods = periods
         if publish:
             publish_cfg.check_publishable()
 
@@ -232,9 +237,12 @@ class CenProcessor:
         Any inconsistency (e.g. an hour lost in UTC conversion, an unmapped fuel type)
         raises and stops processing, rather than being skipped.
         """
-        runs = list(load_runs([self.input_dir], sysop=SOURCE))
+        runs = list(load_runs([self.input_dir], sysop=SOURCE, periods=self.periods))
         if not runs:
-            raise ValueError(f"No raw '{SOURCE}' data found in {self.input_dir}.")
+            for_periods = f" for {self.periods}" if self.periods else ""
+            raise ValueError(
+                f"No raw '{SOURCE}' data found in {self.input_dir}{for_periods}."
+            )
 
         for run in runs:
             logger.info(f"Processing run '{run.name}'")

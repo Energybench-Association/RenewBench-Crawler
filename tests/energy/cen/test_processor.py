@@ -83,6 +83,7 @@ def make_processor(
         region_reg: RegionRegistry | None = None,
         publish_cfg: PublishConfig = PUBLISH_CFG,
         publish: bool = False,
+        periods: list[str] | None = None,
     ) -> CenProcessor:
         shared = SharedResources(
             gem_loc=None,
@@ -107,6 +108,7 @@ def make_processor(
                 release=RELEASE,
                 publish_cfg=publish_cfg,
                 publish=publish,
+                periods=periods,
             )
 
     return _make
@@ -704,6 +706,20 @@ def test_process_data_without_raw(make_processor: Callable, tmp_path: Path) -> N
     Path(tmp_path, "raw", "cen").mkdir(parents=True)
     with pytest.raises(ValueError, match="No raw 'cen' data"):
         make_processor().process_data()
+
+
+def test_process_data_without_raw_for_the_periods(
+    make_processor: Callable, tmp_path: Path
+) -> None:
+    """Failure path: with no raw data for the periods, processing stops and names them.
+
+    Args:
+        make_processor (Callable): Factory for processors.
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+    _write_raw(Path(tmp_path, "raw", "cen", "1h"))  # 2024-01-01 and 2024-01-02
+    with pytest.raises(ValueError, match=r"No raw 'cen' data .* for \['2023'\]"):
+        make_processor(periods=["2023"]).process_data()
 
 
 # ----------------------------------

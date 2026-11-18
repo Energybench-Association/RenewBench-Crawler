@@ -10,7 +10,12 @@ from typing import cast
 
 from loguru import logger
 
-from rbc.config.loader import load_config, parse_key_value_pairs, parse_release
+from rbc.config.loader import (
+    load_config,
+    parse_key_value_pairs,
+    parse_period,
+    parse_release,
+)
 from rbc.config.schema import CoordinatesConfig, PublishConfig
 from rbc.energy.cen.processor import SOURCE, CenProcessor
 from rbc.utils import setup_logging
@@ -24,6 +29,7 @@ def parse_arguments() -> Namespace:
     """
     parser = ArgumentParser(prog="CEN data processing into Icechunk and STAC")
     parser.add_argument(
+        "-r",
         "--release",
         required=True,
         type=parse_release,
@@ -31,6 +37,16 @@ def parse_arguments() -> Namespace:
             "The release to write and publish, as v<major>.<minor>.<patch>. It tags the "
             "repositories and names the STAC Collection. Initial full runs use v0.1.0; "
             "raise it for new data, as a reused release writes nothing new."
+        ),
+    )
+    parser.add_argument(
+        "-p",
+        "--periods",
+        nargs="+",
+        type=parse_period,
+        help=(
+            "Years or months of raw data to process. Example: -p 2024 2025-03. "
+            "Default: all raw files. The time axis spans the first to the last day."
         ),
     )
     parser.add_argument(
@@ -81,6 +97,7 @@ def main() -> None:
         release=args.release,
         publish_cfg=publish_cfg,
         publish=args.publish,
+        periods=args.periods,
     )
     processor.process_data()
 

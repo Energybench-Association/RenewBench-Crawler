@@ -13,6 +13,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from rbc.config.schema import SCHEMA_REGISTRY
+from rbc.energy.utils import DATE_PATTERN
 
 ROOT_DIR: Path = Path(__file__).resolve().parents[2]
 CONFIGS_DIR: Path = Path(ROOT_DIR, "configs")
@@ -149,3 +150,22 @@ def parse_release(release: str) -> str:
             f"Invalid release '{release}', expected v<major>.<minor>.<patch>, e.g. v0.1.0"
         )
     return release
+
+
+def parse_period(period: str) -> str:
+    """Check a period has the format of a year, month or day, as raw files are named.
+
+    Args:
+        period (str): The period, e.g. "2024" or "2025-03".
+
+    Returns:
+        str: The period, unchanged.
+
+    Raises:
+        ArgumentTypeError: If the period isn't of that format.
+    """
+    if not DATE_PATTERN.match(period):
+        raise argparse.ArgumentTypeError(
+            f"Invalid period '{period}', expected YYYY, YYYY-MM or YYYY-MM-DD, e.g. 2025-03"
+        )
+    return period
