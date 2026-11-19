@@ -388,6 +388,58 @@ RenewBench-Crawler package.
 
   `val_geracao` - generation in MWmed (average MW over the time interval; equivalent to MWh for hourly data)
 
+- Time: the local clock (`America/Sao_Paulo`, incl. Brazil's DST until 2019; checked on
+  2000 and 2018). Around DST changes, ONS reports:
+  - clocks set forward (Sunday 00:00 → 01:00): the skipped 00:00 has no rows.
+  - clocks set back (Sunday 00:00 → Saturday 23:00): the repeated 23:00 has only **one**
+    row per plant for two real hours, and its values don't tell which hour it is.
+
+**STAC**
+
+- `measurement_type`: `'gross_output'`, except `'forecast'` for all Tipo III plants and
+  groups (`TIPO III`, `Pequenas Usinas (Tipo III)`) and `'unknown'` for the MMGD groups
+  (`Pequenas Usinas (MMGD)`: no ONS source says how it gets their values)
+  - The dataset contains ONS's "geração verificada" (verified generation), hourly per plant.
+    ONS's grid procedures define that term as gross active energy in MWh/h per plant as per
+    [Submódulo 6.5](https://proxyportais.ons.org.br/ons.portalempregado.proxy/garapi/api/processo/retornarpdf?url=/sites/soumaisons/portalgar/ecmpdf/Subm%C3%B3dulo%206.5-PR_2025.06.pdf)
+    (rev. 2025.06, 1.1.2 (a): "montante de geração de energia ativa bruta, em MWh/h,
+    verificada, por usina"). The glossary of ONS's [monthly wind bulletins](https://www.ons.org.br/AcervoDigitalDocumentosEPublicacoes/Boletim%20Mensal%20de%20Gera%C3%A7%C3%A3o%20E%C3%B3lica%202021-01.pdf)
+    agrees (measured on the low-voltage side of the step-up transformers, i.e. at the
+    generator).
+  - `Tipo III`: Besides single plants, ONS reports plant groups (`cod_modalidadeoperacao`) -
+    `Conjunto de Usinas` (Tipo II-C plants grouped in ONS's operating adjustments),
+    `Pequenas Usinas (Tipo III)` (groups of small plants without a relationship to ONS)
+    and, in 2025 (not yet in 2020), `Pequenas Usinas (MMGD)` (micro and mini distributed
+    generation, i.e. small distributed PV, grouped per area).
+    According to the [dataset description](https://dados.ons.org.br/dataset/geracao-usina-2)
+    and the [data dictionary](https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/geracao_usina_2_ho/DicionarioDados_GeracaoPorUsina.pdf)
+    (p. 1), the small plant groups' values are generation **forecasts**:
+    "os dados são referentes a previsões de geração".
+- `entity_type`: `'facility'` for single plants and for plant groups located to one point
+  (one site), `'portfolio'` for plant groups without one (several sites).
+- `license`: `'CC-BY'`, as ONS's legal notice on the dataset page names it, without a
+  version (so not an SPDX ID).
+- `description`: states the changes made to ONS's data (s. Processing), as CC-BY asks.
+
+**Processing** (`python -m scripts.energy.ons_process`, s. [usage guide](guide_usage.md))
+
+- Coordinates: ONS has no plant registry, so all EGEs go through
+  [coordinate finding](coordinate_finding.md).
+- IDs: `ons-<id_ons>` (lowercase, dashes). `energy:entity_ids` holds `id_ons` (`ons`) and,
+  where ONS gives a valid one, ANEEL's `ceg` (`ceg`; several EGEs can share one, e.g.
+  Itaipu's 50 Hz and 60 Hz sides).
+- Values: `val_geracao` as reported (the hour's average in MW). Missing values stay
+  missing.
+- Time: converted to UTC as described above. The repeated hour's one row is left out
+  (both real hours missing) and kept in `<dst_dir_proc>/review/repeated_hour_rows_<tres>.csv`.
+- Vocabulary: `nom_tipousina`/`nom_tipocombustivel` and `cod_modalidadeoperacao` map to
+  STAC's fuel and entity types in [`rbc/energy/ons/mappings.py`](../rbc/energy/ons/mappings.py)
+  (`STAC_FUELS`, `STAC_HYBRID_FUELS`, `PLANT_MODES`, `GROUP_MODES`, `FORECAST_MODES`,
+  `UNKNOWN_MEASUREMENT_MODES`). `Outras Multi-Combustível` (thermal, fuels not stated)
+  becomes fuel type `'other'` with subtype `'thermal'`.
+  A combination or mode without a mapping stops processing, so new ones (e.g. ONS's
+  multi-fuel types and MMGD groups from 2025) are classified before they are published.
+
 </details>
 
 
