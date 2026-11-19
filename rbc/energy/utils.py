@@ -28,6 +28,10 @@ RETRY_DELAY = 5
 MAX_RATE_LIMIT_RETRIES = 6
 RATE_LIMIT_RETRY_DELAY = 15
 
+# Patterns for enforcing & matching task-specific formats (e.g. for raw data file naming)
+TRES_PATTERN = re.compile(r"^(\d+)(h|min|d)$")  # temporal res (e.g. "1h", "15min")
+DATE_PATTERN = re.compile(r"^\d{4}(-(0[1-9]|1[0-2])(-(0[1-9]|[12]\d|3[01]))?)?$")
+
 RETRY_ERRORS = (
     # requests / urllib3 (used by requests.get/head)
     requests.exceptions.Timeout,
@@ -86,8 +90,6 @@ class DownloadTask:
         dt (pd.Timestamp): Task datetime, set in __post_init__.
         year (int): Task year, set in __post_init__.
         month (int): Task month, set in __post_init__.
-        _DATE_PATTERN (re.Pattern): Pattern for enforcing "date" format.
-        _TRES_PATTERN (re.Pattern): Pattern for enforcing "temporal_resolution" format.
     """
 
     # attributes of the actual task
@@ -101,10 +103,6 @@ class DownloadTask:
     year: int = field(init=False, repr=False)
     month: int = field(init=False, repr=False)
 
-    # patterns for matching
-    _DATE_PATTERN = re.compile(r"^\d{4}(-(0[1-9]|1[0-2])(-(0[1-9]|[12]\d|3[01]))?)?$")
-    _TRES_PATTERN = re.compile(r"^\d+(?:h|min|d)$")
-
     def __post_init__(self) -> None:
         """Validates the date and temporal resolution formats.
 
@@ -112,12 +110,12 @@ class DownloadTask:
             ValueError: If provided date or temporal resolution are in the wrong format.
         """
         # perform validation checks (temporal resolution, date)
-        if not self._TRES_PATTERN.match(self.temporal_resolution):
+        if not TRES_PATTERN.match(self.temporal_resolution):
             raise ValueError(
                 f"Invalid temporal resolution: '{self.temporal_resolution}'"
             )
 
-        if not self._DATE_PATTERN.match(self.date):
+        if not DATE_PATTERN.match(self.date):
             raise ValueError(f"Invalid date / date format: '{self.date}'")
 
         try:
@@ -582,7 +580,10 @@ def load_df_from_file(
             doesn't exist, if invalid arguments (args) were provided for loading with pandas.
         RETRY_ERRORS: If the file is a URL that is inaccessible for some reason.
     """
-    suffix = file_type or Path(file_path).suffix
+    # get suffix as: the defined type OR one of the path suffixes, if it's a valid option
+    suffix: str = file_type or next(
+        (s for s in Path(file_path).suffixes if s in (".csv", ".xlsx")), ""
+    )
 
     try:
         if suffix == ".xlsx":

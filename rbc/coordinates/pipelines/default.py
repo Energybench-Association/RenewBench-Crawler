@@ -1,0 +1,134 @@
+"""Default location/coordinate finding pipeline."""
+
+from pathlib import Path
+
+import pandas as pd
+from loguru import logger
+
+from rbc.coordinates.load import Run
+from rbc.coordinates.mappings import SYSOP_NAME_COL
+from rbc.coordinates.pipelines._base import BasePipeline
+from rbc.coordinates.resources.gem import GEMLocator
+from rbc.coordinates.resources.natural_earth import RegionRegistry
+from rbc.coordinates.resources.osmpp import OSMPPLocator
+from rbc.coordinates.resources.overpass import OverpassLocator
+from rbc.coordinates.utils.values import strip_str
+
+
+class DefaultPipeline(BasePipeline):
+    """Default location/coordinate finding pipeline."""
+
+    STEPS: list[str] = [
+        "_step_name_match",
+        "_step_sibling_fallback_name",
+    ]
+
+    def __init__(
+        self,
+        run: Run,
+        output_dir: Path | None = None,
+        gem_loc: GEMLocator | None = None,
+        osmpp_loc: OSMPPLocator | None = None,
+        osm_loc: OverpassLocator | None = None,
+        region_reg: RegionRegistry | None = None,
+    ) -> None:
+        """Initializes the child class for the default pipeline.
+
+        Args:
+            run (Run): The operator's raw rows and what identifies them.
+            output_dir (Path, optional): Path to the directory where any output files may be
+                saved. Defaults to None.
+            gem_loc (GEMLocator, optional): Pre-built GEM locator to reuse. Defaults to
+                None, in which case GEM is disabled.
+            osmpp_loc (OSMPPLocator, optional): Pre-built global OSMPP locator to reuse as
+                the power plant database (ppdb). Defaults to None, in which case ppdb
+                contributes no candidates.
+            osm_loc (OverpassLocator, optional): Pre-built Overpass locator to reuse.
+                Defaults to None, in which case a new locator is built.
+            region_reg (RegionRegistry, optional): Pre-built region registry to reuse.
+                Defaults to None, in which case a new registry is built.
+        """
+        super().__init__(
+            run=run,
+            output_dir=output_dir,
+            gem_loc=gem_loc,
+            ppdb_loc=osmpp_loc,
+            osm_loc=osm_loc,
+            region_reg=region_reg,
+        )
+
+        rs = [r for r in [gem_loc, osmpp_loc, osm_loc, region_reg] if r is not None]
+        logger.info(
+            f"Running DefaultPipeline for '{self.sysop}' ({self.country}) using "
+            "the resources:\n" + ", ".join(type(r).__name__ for r in rs) + "\n-----"
+            "----------------------------------------------------------------------------"
+        )
+
+    # ------------------------------------------------------------------
+    # PIPELINE STEPS (for DefaultPipeline only)
+    # ------------------------------------------------------------------
+    def _step_sibling_fallback_name(self, df: pd.DataFrame) -> pd.DataFrame:
+        """FALLBACK STEP --- Use name matching of siblings as fallback option.
+
+        NOTE: THIS IS OBSOLETE IN ITS CURRENT FORM BECAUSE FUZZY NAME MATCHING HAS IMPROVED!
+        The ege_group_key is derived from exact "discriminator" matches. If a match was
+        found for one EGE via fuzzy name matching, then a sibling (one with the exact same
+        "discriminator" tokens) will have 100% been matched in name matching before...
+        So this does nothing at the moment...
+
+        Args:
+            df (pd.DataFrame): The working dataframe.
+
+        Returns:
+            df (pd.DataFrame): The updated working dataframe (now with sibling name matches).
+        """
+        return self._sibling_fallback_core(df, self._derive_ege_group_key_name(df))
+
+    # ------------------------------------------------------------------
+    # HELPER STEPS (for DefaultPipeline only)
+    # ------------------------------------------------------------------
+    def _derive_ege_group_key_name(self, df: pd.DataFrame) -> pd.Series:
+        """Find name-based sibling-unit grouping key for SysOps with no EIC codes.
+
+        Reduces each unit's name to its discriminative tokens, so e.g. "Plant X Unit 1" and
+        "Plant X Unit 2" group together.
+        Known, accepted limitation: two genuinely different EGEs that reduce to the
+        same base name group incorrectly, absent a unique per-EGE ID to fall back on.
+
+        todo: we may have other kinds of unique IDs aside from EIC/WeicCodes; not sure if
+         these can be used to form groups though!
+
+        Args:
+            df (pd.DataFrame): The working dataframe.
+
+        Returns:
+            pd.Series: The derived EGE group key name.
+        """
+
+        def _base_key(name: object) -> str | None:
+            """Derive the base key from the EGE name by reducing to its discriminative tokens.
+
+            Example: "Mauá 3" / "Mauá Bloco 4" / "Mauá Bloco 5A" -> "maua"
+
+            Args:
+                name (str | None): The EGE name.
+
+            Returns:
+                str | None: The base key if it can be found, otherwise None.
+            """
+            clean_name = strip_str(name)
+            if clean_name is None:
+                return None
+
+            wt = self.tok.weighted_tokenize(clean_name)
+            full_tokens = [
+                tok
+                for tok, ttype in zip(wt.tokens, wt.types)
+                if ttype == "discriminator"
+            ]
+            base = " ".join(full_tokens).strip()
+            return base or None
+
+        return df[SYSOP_NAME_COL].map(
+            lambda v: f"name_base:{k}" if (k := _base_key(v)) else None
+        )

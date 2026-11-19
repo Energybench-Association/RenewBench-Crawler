@@ -53,6 +53,7 @@ class TestLoadConfig:
                 else "override"
             )
             for k, v in cfg_dict.items()
+            if k != "route"  # a Literal takes no free text (s. test_schema.py)
         }
 
         with patch("rbc.config.schema.Path.mkdir"):
@@ -176,3 +177,49 @@ class TestParseKeyValuePairs:
         """
         with pytest.raises(argparse.ArgumentTypeError, match=msg):
             loader.parse_key_value_pairs(invalid_input)
+
+
+class TestParseRelease:
+    """Tests for the "parse_release" helper function."""
+
+    @pytest.mark.parametrize("release", ["v0.1.0", "v1.12.3"])
+    def test_parse_release(self, release: str) -> None:
+        """Happy path: a release of the format v<major>.<minor>.<patch> is kept as is.
+
+        Args:
+            release (str): A valid release.
+        """
+        assert loader.parse_release(release) == release
+
+    @pytest.mark.parametrize("release", ["0.1.0", "v0.1", "v0.1.0-rc1", "V0.1.0", ""])
+    def test_parse_release_invalid_input(self, release: str) -> None:
+        """Failure path: a release of any other format is refused.
+
+        Args:
+            release (str): An invalid release.
+        """
+        with pytest.raises(argparse.ArgumentTypeError, match="Invalid release"):
+            loader.parse_release(release)
+
+
+class TestParsePeriod:
+    """Tests for the "parse_period" helper function."""
+
+    @pytest.mark.parametrize("period", ["2024", "2025-03", "2025-03-01"])
+    def test_parse_period(self, period: str) -> None:
+        """Happy path: a year, month or day is kept as is.
+
+        Args:
+            period (str): A valid period.
+        """
+        assert loader.parse_period(period) == period
+
+    @pytest.mark.parametrize("period", ["24", "2025-3", "2025-13", "2025/03", "", "x"])
+    def test_parse_period_invalid_input(self, period: str) -> None:
+        """Failure path: a period of any other format is refused.
+
+        Args:
+            period (str): An invalid period.
+        """
+        with pytest.raises(argparse.ArgumentTypeError, match="Invalid period"):
+            loader.parse_period(period)

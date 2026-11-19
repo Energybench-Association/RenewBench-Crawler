@@ -1,0 +1,249 @@
+# tests/coordinates/pipelines/test_default.py
+"""Tests for DefaultPipeline's declarative pipeline steps."""
+
+from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
+
+import pandas as pd
+import pytest
+
+from rbc.coordinates.load import Run
+from rbc.coordinates.pipelines.default import DefaultPipeline
+from rbc.coordinates.resources.gem import GEMLocator
+from rbc.coordinates.resources.osmpp import OSMPPLocator
+from rbc.coordinates.resources.overpass import OverpassLocator
+
+
+# ----------------------------------
+# Fixtures
+# ----------------------------------
+@pytest.fixture
+def eia_df() -> pd.DataFrame:
+    """A small synthetic set of eia-shaped dataframe of raw rows.
+
+    Returns:
+        pd.DataFrame: Two EIA rows with distinct codes and names.
+    """
+    return pd.DataFrame(
+        [
+            {
+                "respondent-name": "Riverside Plant Unit 1",
+                "respondent": "R1",
+                "fueltype": "NG",
+            },
+            {
+                "respondent-name": "Riverside Plant Unit 2",
+                "respondent": "R2",
+                "fueltype": "NG",
+            },
+        ]
+    )
+
+
+@pytest.fixture
+def eia_pipeline(
+    eia_df: pd.DataFrame, tmp_path: Path, make_run: Callable[..., Run]
+) -> DefaultPipeline:
+    """Returns a real DefaultPipeline for "eia", backed entirely by fake locators.
+
+    Args:
+        eia_df (pd.DataFrame): Synthetic eia-shaped raw rows.
+        tmp_path (Path): Pytest-provided temporary directory, used for output_dir.
+        make_run (Callable[..., Run]): Factory for runs (s. conftest).
+
+    Returns:
+        DefaultPipeline: Default pipeline class instance for "eia" operator.
+    """
+    pipeline = DefaultPipeline(
+        run=make_run("eia", eia_df),
+        output_dir=Path(tmp_path, "out"),
+        gem_loc=cast(
+            GEMLocator,
+            SimpleNamespace(
+                df=pd.DataFrame(
+                    [
+                        {
+                            "plant_name": "Riverside Plant",
+                            "other_names": "",
+                            "Country": "United States",
+                            "Fueltype": "Natural Gas",
+                            "lat": 40.0,
+                            "lon": -90.0,
+                            "gem_unit_id": "gem-us-1",
+                        }
+                    ]
+                )
+            ),
+        ),
+        osmpp_loc=cast(
+            OSMPPLocator,
+            SimpleNamespace(
+                df=pd.DataFrame(
+                    columns=["Name", "Country", "Fueltype", "lat", "lon", "id"]
+                ),
+            ),
+        ),
+        osm_loc=cast(
+            OverpassLocator,
+            SimpleNamespace(
+                get_country_df=lambda country_code: pd.DataFrame(
+                    [
+                        {
+                            "Name": "Unrelated OSM Plant",
+                            "Fueltype": "Coal",
+                            "lat": 10.0,
+                            "lon": 10.0,
+                            "OSM_ID": "osm-x",
+                            "OSM_Type": "way",
+                            "OSM_URL": "",
+                        }
+                    ]
+                )
+            ),
+        ),
+    )
+    return pipeline
+
+
+# ----------------------------------
+# Tests
+# ----------------------------------
+class TestDefaultPipelineRunPipeline:
+    """Tests for DefaultPipeline's run_pipeline method."""
+
+    def test_run_pipeline_end_to_end(self, eia_pipeline: DefaultPipeline) -> None:
+        """Happy path: the full default pipeline runs end-to-end without error.
+
+        No real eia test data is available locally to verify actual match
+        quality -- this proves the wiring holds together (dedupe -> fuzzy
+        match against GEM+OSM -> fuel validation -> sibling fallback ->
+        finalize) using synthetic data, entirely offline.
+
+        Args:
+            eia_pipeline (DefaultPipeline): Default pipeline class instance for "eia".
+        """
+        df = eia_pipeline.run_pipeline()
+        assert len(df) == 2
+        for col in ("lat", "lon", "match_method"):
+            assert col in df.columns
+
+        # no row should be attributed to a ppdb.* source.
+        assert not df["match_method"].astype(str).str.startswith("ppdb").any()
+
+
+class TestDefaultPipelineSteps:
+    """Tests for DefaultPipeline's step methods."""
+
+    def test_dedupe_uses_code_col(self, eia_pipeline: DefaultPipeline) -> None:
+        """Happy path: dedupe uses code_col when the operator has one (e.g. eia).
+
+        Args:
+            eia_pipeline (DefaultPipeline): Default pipeline class instance for "eia".
+        """
+        df = eia_pipeline._step_dedupe(pd.DataFrame())
+        assert len(df) == 2  # both rows have distinct respondent codes
+        assert list(df.columns) == ["respondent-name", "respondent", "fueltype"]
+
+    def test_dedupe_fallback_to_name(self, eia_pipeline: DefaultPipeline) -> None:
+        """Failure path: with no code_col, dedupe falls back to name_col.
+
+        Args:
+            eia_pipeline (DefaultPipeline): Default pipeline class instance for "eia".
+                code_col is overridden to None here.
+        """
+        eia_pipeline.code_col = None
+        df = eia_pipeline._step_dedupe(pd.DataFrame())
+        assert len(df) == 2  # both rows have distinct respondent-name values too
+        assert set(df["respondent-name"]) == {
+            "Riverside Plant Unit 1",
+            "Riverside Plant Unit 2",
+        }
+
+
+class TestDefaultPipelineHelpers:
+    """Tests for DefaultPipeline's helper methods."""
+
+    def test_derive_ege_group_key_name(self, eia_pipeline: DefaultPipeline) -> None:
+        """Happy path: units sharing a base name get the same group key, others don't.
+
+        Args:
+            eia_pipeline (DefaultPipeline): Default pipeline class instance for "eia".
+        """
+        df = pd.DataFrame(
+            {
+                "sysop.name": [
+                    "Riverside Plant Unit 1",
+                    "Riverside Plant Unit 2",
+                    "Downtown Station",
+                ]
+            }
+        )
+        keys = eia_pipeline._derive_ege_group_key_name(df)
+        assert keys.iloc[0] == keys.iloc[1]  # same base name -> same key
+        assert keys.iloc[2] != keys.iloc[0]  # unrelated plant -> different key
+        assert keys.iloc[0] is not None and str(keys.iloc[0]).startswith("name_base:")
+
+    @pytest.mark.parametrize("name", ["Unit 1", "Plant Q1"])
+    def test_derive_ege_group_key_name_all_generic_is_none(
+        self, eia_pipeline: DefaultPipeline, name: str
+    ) -> None:
+        """Failure path: a name with no discriminative tokens has no base key.
+
+        Args:
+            eia_pipeline (DefaultPipeline): Default pipeline class instance for "eia".
+            name (str): A name without any discriminative tokens in it.
+        """
+        df = pd.DataFrame({"sysop.name": [name]})
+        keys = eia_pipeline._derive_ege_group_key_name(df)
+        assert keys.iloc[0] is None
+
+    def test_sibling_fallback_core(self, eia_pipeline: DefaultPipeline) -> None:
+        """Happy path: Shared sibling-fallback works for Default independent of key strategy.
+
+        Args:
+            eia_pipeline (DefaultPipeline): Default pipeline class instance for "eia".
+        """
+        df = pd.DataFrame(
+            {
+                "sysop.name": ["Matched Unit", "Needs Sibling Unit"],
+                "ppdb.lat": [40.0, None],
+                "ppdb.lon": [-90.0, None],
+                "ppdb.match_method": ["ppdb_name_fuzzy", None],
+                "ppdb.name": ["Donor Power Station", None],
+                "ppdb.id": ["ppdb-1", None],
+                "ppdb.fueltype": ["hydro", None],
+                "ppdb.geometry": ["POINT (-90 40)", None],  # a per-locator extra column
+                "ppdb.match_score": [98.5, None],
+                "official.lat": [None, None],
+                "official.lon": [None, None],
+                "official.match_method": [None, None],
+                "gem.lat": [None, None],
+                "gem.lon": [None, None],
+                "gem.match_method": [None, None],
+                "osm.lat": [None, None],
+                "osm.lon": [None, None],
+                "osm.match_method": [None, None],
+            }
+        )
+        ege_group_key = pd.Series(["group:x", "group:x"])
+        result = eia_pipeline._sibling_fallback_core(df, ege_group_key)
+
+        # sibling inherits all donor's into correct locator's columns (except score)
+        assert result.loc[1, "ppdb.lat"] == 40.0
+        assert result.loc[1, "ppdb.lon"] == -90.0
+        assert result.loc[1, "ppdb.name"] == "Donor Power Station"
+        assert result.loc[1, "ppdb.id"] == "ppdb-1"
+        assert result.loc[1, "ppdb.fueltype"] == "hydro"  # so it can be fuel-validated
+        assert result.loc[1, "ppdb.geometry"] == "POINT (-90 40)"  # extras come too
+        assert pd.isna(result.loc[1, "ppdb.match_score"])
+
+        # inheritance is marked and donor is recorded
+        assert result.loc[1, "ppdb.match_method"] == "ppdb_sibling"
+        assert result.loc[1, "sibling_of"] == "Matched Unit"
+
+        # donor stays as is
+        assert result.loc[0, "ppdb.match_method"] == "ppdb_name_fuzzy"
+        assert result.loc[0, "ppdb.match_score"] == 98.5
+        assert pd.isna(result.loc[0, "sibling_of"])

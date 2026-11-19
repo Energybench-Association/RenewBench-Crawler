@@ -1,0 +1,188 @@
+"""Public surface of the coordinate-finding pipelines subpackage.
+
+Exposes the pipeline classes (BasePipeline and its concrete subclasses),
+`make_pipeline` to build the right pipeline instance for a given directory,
+and `build_shared_resources` to build the expensive, run-scoped resources
+(locators and registries) that get reused across every directory in one
+`perform_coordinate_finding` run.
+"""
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from rbc.coordinates.load import Run
+from rbc.coordinates.mappings import OPERATOR_METADATA
+from rbc.coordinates.pipelines._base import BasePipeline
+from rbc.coordinates.pipelines.default import DefaultPipeline
+from rbc.coordinates.pipelines.entsoe import EntsoePipeline
+from rbc.coordinates.resources.eic import EICCodeRegistry
+from rbc.coordinates.resources.gem import GEMLocator
+from rbc.coordinates.resources.natural_earth import RegionRegistry
+from rbc.coordinates.resources.osmpp import OSMPPLocator
+from rbc.coordinates.resources.overpass import OverpassLocator
+from rbc.coordinates.resources.ppm import PPMLocator
+
+__all__ = [
+    "BasePipeline",
+    "DefaultPipeline",
+    "EntsoePipeline",
+    "SharedResources",
+    "build_shared_resources",
+    "make_pipeline",
+]
+
+
+def make_pipeline(
+    run: Run,
+    output_dir: Path | None = None,
+    gem_loc: GEMLocator | None = None,
+    ppdb_loc: PPMLocator | OSMPPLocator | None = None,
+    osm_loc: OverpassLocator | None = None,
+    region_reg: RegionRegistry | None = None,
+    eic_reg: EICCodeRegistry | None = None,
+) -> BasePipeline:
+    """Build the right pipeline instance (BasePipeline subclass) for the run's operator.
+
+    Via OPERATOR_METADATA[run.sysop]["pipeline"], resolves which concrete pipeline
+    class to build. `eic_reg` is only ever forwarded to EntsoePipeline --
+    every other pipeline's constructor doesn't accept it at all.
+
+    Args:
+        run (Run): The operator's raw rows and what identifies them.
+        output_dir (Path, optional): Path to the directory where any output files may be
+            saved. Defaults to None.
+        gem_loc (GEMLocator, optional): Pre-built GEM locator to reuse. Defaults to
+            None, in which case GEM is disabled.
+        ppdb_loc (PPMLocator, optional): Pre-built PPM locator to reuse. Defaults to
+            None, in which case the resolved pipeline builds its own default.
+        osm_loc (OverpassLocator, optional): Pre-built OSM Overpass locator to reuse.
+            Defaults to None, in which case the resolved pipeline builds its own default.
+        region_reg (RegionRegistry, optional): Pre-built region registry to reuse.
+            Defaults to None, in which case the resolved pipeline builds its own.
+        eic_reg (EICCodeRegistry, optional): Pre-built EIC directory locator
+            to reuse. Only relevant for the entsoe pipeline; ignored otherwise.
+
+    Returns:
+        BasePipeline: The concrete pipeline instance for the run's operator.
+
+    Raises:
+        KeyError: If the run's operator is not a known one.
+        TypeError: If `ppdb_loc` is an instance of the wrong locator class for the
+            resolved pipeline (e.g. an `OSMPPLocator` passed in for an entsoe zone).
+    """
+    sysop = run.sysop
+    pipeline_name = OPERATOR_METADATA[sysop].get("pipeline", "default")
+
+    if pipeline_name == "entsoe":
+        if ppdb_loc is not None and not isinstance(ppdb_loc, PPMLocator):
+            raise TypeError(
+                f"'{sysop}' uses the entsoe pipeline, which requires a PPMLocator "
+                f"for ppdb_loc, got {type(ppdb_loc).__name__}."
+            )
+        return EntsoePipeline(
+            run=run,
+            output_dir=output_dir,
+            gem_loc=gem_loc,
+            ppm_loc=ppdb_loc,
+            osm_loc=osm_loc,
+            region_reg=region_reg,
+            eic_reg=eic_reg,
+        )
+
+    if ppdb_loc is not None and not isinstance(ppdb_loc, OSMPPLocator):
+        raise TypeError(
+            f"'{sysop}' uses the default pipeline, which requires an OSMPPLocator "
+            f"for ppdb_loc, got {type(ppdb_loc).__name__}."
+        )
+    return DefaultPipeline(
+        run=run,
+        output_dir=output_dir,
+        gem_loc=gem_loc,
+        osmpp_loc=ppdb_loc,
+        osm_loc=osm_loc,
+        region_reg=region_reg,
+    )
+
+
+@dataclass
+class SharedResources:
+    """Expensive resources built once per run and reused across all its directories.
+
+    Attributes:
+        gem_loc (GEMLocator | None): GEM locator (local or fallback tracker files).
+        ppdb_loc (PPMLocator | OSMPPLocator | None): Power plant database locator.
+        osm_loc (OverpassLocator | None): OSM Overpass API locator.
+        region_reg (RegionRegistry | None): Natural Earth admin-1 region lookup.
+        eic_reg (EICCodeRegistry | None): ENTSO-E EIC directory (entsoe pipeline only).
+    """
+
+    gem_loc: GEMLocator | None
+    ppdb_loc: PPMLocator | OSMPPLocator | None
+    osm_loc: OverpassLocator | None
+    region_reg: RegionRegistry | None
+    eic_reg: EICCodeRegistry | None
+
+
+def build_shared_resources(
+    sysop: str,
+    resources_dir: Path | None,
+    update: bool = False,
+) -> SharedResources:
+    """Build the expensive (network/CSV/parquet-backed) resources shared by one run.
+
+    Callers processing multiple directories for the same sysop in one run (e.g.
+    multiple ENTSO-E bidding zones) should build these once and pass them into
+    `make_pipeline` for every directory, rather than paying the construction cost
+    (network/CSV/parquet reads) per directory. Each resource keeps its local files in
+    its own subfolder of `resources_dir` (`gem/`, `ppm/`, `osmpp/`, `eic/`, `overpass/`,
+    `natural_earth/`) so they are reused across runs.
+
+    Args:
+        sysop (str): Name of the energy system operator, e.g. "entsoe", for getting pipeline.
+        resources_dir (Path | None): Directory of the resources shared by all energy
+            sources. Manually downloaded GEM tracker xlsx files are expected in its
+            `gem/` subfolder (trackers missing there fall back to the files in PPM's
+            cloud storage). If None, no local files are read or written.
+        update (bool, optional): Download fresh copies of every resource (and re-query
+            Overpass once per country), overwriting the local files. Corresponds to the
+            ``--update`` / ``-u`` CLI flag. Defaults to False.
+
+    Returns:
+        SharedResources: The resources to reuse across every directory processed
+            in this run.
+    """
+
+    def subdir(name: str) -> Path | None:
+        """Resolve one resource's subfolder of `resources_dir`, if there is one.
+
+        Args:
+            name (str): Name of the resource's subfolder, e.g. "gem".
+
+        Returns:
+            Path | None: The subfolder, or None if no `resources_dir` was given.
+        """
+        return Path(resources_dir, name) if resources_dir else None
+
+    gem_loc: GEMLocator = GEMLocator(gem_dir=subdir("gem"), update=update)
+    ppdb_loc: PPMLocator | OSMPPLocator
+    eic_reg: EICCodeRegistry | None
+
+    # locators defined by the pipeline
+    pipeline_name = OPERATOR_METADATA[sysop].get("pipeline", "default")
+    if pipeline_name == "entsoe":
+        ppdb_loc = PPMLocator(cache_dir=subdir("ppm"), update=update)
+        eic_reg = EICCodeRegistry(cache_dir=subdir("eic"), update=update)
+    else:
+        ppdb_loc = OSMPPLocator(cache_dir=subdir("osmpp"), update=update)
+        eic_reg = None
+
+    osm_loc = OverpassLocator(cache_dir=subdir("overpass"), update=update)
+    region_reg = RegionRegistry(cache_dir=subdir("natural_earth"), update=update)
+
+    return SharedResources(
+        gem_loc=gem_loc,
+        ppdb_loc=ppdb_loc,
+        osm_loc=osm_loc,
+        region_reg=region_reg,
+        eic_reg=eic_reg,
+    )

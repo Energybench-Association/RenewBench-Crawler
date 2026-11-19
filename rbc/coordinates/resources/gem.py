@@ -1,0 +1,617 @@
+"""Coordinate finding for EGEs using Global Energy Monitor (GEM) trackers.
+
+Source: Global Energy Monitor (https://globalenergymonitor.org/download-data)
+
+GEM publishes 8 separate xlsx "tracker" files (Coal, Oil & Gas, Wind, Solar, Hydro,
+Nuclear, Bioenergy, Geothermal), each covering one fuel/technology category globally.
+The newest files can be manually downloaded (registration required). If these are not
+provided via ``gem_dir`` (local directory), fallback cloud-stored files from PPM's PyPSA
+team are used. As of mid-2026, they use early 2025 file versions, so somewhat outdated.
+
+Several trackers (notably Oil & Gas) already contain parsed ENTSO-E EIC codes in their
+"Other IDs" columns, which gives EntsoePipeline exact matches without any fuzzy logic.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import re
+from functools import cached_property
+from pathlib import Path
+
+import pandas as pd
+import requests
+import yaml
+from loguru import logger
+
+from rbc.coordinates.match_schema import GEM_SCHEMA, MatchCandidate
+from rbc.coordinates.utils.country import normalize_locator_countries
+from rbc.coordinates.utils.resources import fetch_resource
+from rbc.coordinates.utils.values import strip_str
+
+# ------------------------------------------------------------------------
+# Global parameters (mappings)
+# ------------------------------------------------------------------------
+# Per-XLSX map: file attributes (file name, sheet name, fuel data location) → specs for file
+# "fuel_default" is EITHER a tracker's constant type OR None for a per-row "fuel" column
+TRACKER_SPECS: dict[str, dict[str, str | None]] = {
+    "coal": {
+        "file_name": "Global-Coal-Plant-Tracker-*.xlsx",
+        "sheet": "Units",
+        "fuel_default": "coal",
+    },
+    "oil_gas": {
+        "file_name": "Global-Oil-and-Gas-Plant-Tracker-*.xlsx",
+        "sheet": "Gas & Oil Units",
+        "fuel_default": None,  # uses per-row 'Fuel' column
+    },
+    "wind": {
+        "file_name": "Global-Wind-Power-Tracker-*.xlsx",
+        "sheet": "Data",
+        "fuel_default": "wind",
+    },
+    "solar": {
+        "file_name": "Global-Solar-Power-Tracker-*.xlsx",
+        "sheet": "Utility-Scale (1 MW+)",
+        "fuel_default": "solar",
+    },
+    "hydro": {
+        "file_name": "Global-Hydropower-Tracker-*.xlsx",
+        "sheet": "Data",
+        "fuel_default": "hydro",
+    },
+    "nuclear": {
+        "file_name": "Global-Nuclear-Power-Tracker-*.xlsx",
+        "sheet": "Data",
+        "fuel_default": "nuclear",
+    },
+    "bioenergy": {
+        "file_name": "Global-Bioenergy-Power-Tracker-*.xlsx",
+        "sheet": "Data",
+        "fuel_default": None,  # uses per-row 'Fuel' column
+    },
+    "geothermal": {
+        "file_name": "Geothermal-Power-Tracker-*.xlsx",
+        "sheet": "Data",
+        "fuel_default": "thermal",
+    },
+}
+
+# Per-XLSX map: column name → canonical column names.
+# Only columns that differ from canonical are listed, rest as is. Handled by _first_present().
+COLUMN_ALIASES: dict[str, dict[str, list[str]]] = {
+    "coal": {
+        "plant_name": ["Plant name"],
+        "unit_name": ["Unit name"],
+        "gem_unit_id": ["GEM unit/phase ID"],
+        "other_ids_unit": [],
+        "other_ids_location": [],
+    },
+    "oil_gas": {
+        "plant_name": ["Plant name"],
+        "unit_name": ["Unit name"],
+        "gem_unit_id": ["GEM unit ID"],
+        "other_ids_unit": ["Other IDs (unit)"],
+        "other_ids_location": ["Other IDs (location)"],
+        "fuel": ["Fuel"],
+    },
+    "wind": {
+        "plant_name": ["Project Name"],
+        "unit_name": ["Phase Name"],
+        "gem_unit_id": ["GEM phase ID"],
+        "other_ids_unit": ["Other IDs (unit/phase)"],
+        "other_ids_location": ["Other IDs (location)"],
+    },
+    "solar": {
+        "plant_name": ["Project Name"],
+        "unit_name": ["Phase Name"],
+        "gem_unit_id": ["GEM phase ID"],
+        "other_ids_unit": ["Other IDs (unit/phase)"],
+        "other_ids_location": ["Other IDs (location)"],
+    },
+    "hydro": {
+        "plant_name": ["Project Name"],
+        "unit_name": [],  # no unit-level name in this tracker
+        "gem_unit_id": ["GEM unit ID"],
+        "other_ids_unit": [],
+        "other_ids_location": [],
+    },
+    "nuclear": {
+        "plant_name": ["Project Name"],
+        "unit_name": ["Unit Name"],
+        "gem_unit_id": ["GEM unit ID"],
+        "other_ids_unit": [],
+        "other_ids_location": [],
+    },
+    "bioenergy": {
+        "plant_name": ["Project Name"],
+        "unit_name": ["Unit Name"],
+        "gem_unit_id": ["GEM phase ID"],
+        "other_ids_unit": [],
+        "other_ids_location": ["Other IDs (location)"],
+        "fuel": ["Fuel"],
+    },
+    "geothermal": {
+        "plant_name": ["Project Name"],
+        "unit_name": ["Unit Name"],
+        "gem_unit_id": ["GEM unit ID"],
+        "other_ids_unit": ["Other IDs (unit/phase)"],
+        "other_ids_location": ["Other IDs (location)"],
+    },
+}
+
+# Fallback: Public GEM files source for fallback if manual weren't downloaded
+FALLBACK_CONFIG_URL = (
+    "https://raw.githubusercontent.com/PyPSA/powerplantmatching/master/powerplantmatching/"
+    "package_data/config.yaml"
+)
+
+# Global map: GEM column name → (dtype, source). If source = None: use per-tracker col alias.
+GEM_COLUMNS = GEM_SCHEMA.columns
+GEM_COLUMN_ALTERNATIVES: dict[str, tuple[str, list[str] | None]] = {
+    GEM_SCHEMA.name_col: ("str", None),
+    "unit_name": ("str", None),
+    GEM_SCHEMA.id_col: ("str", None),
+    "other_ids_unit": ("str", None),  # raw "Other IDs", for ENTSO-E code extraction
+    "other_ids_location": ("str", None),
+    "gem_location_id": ("str", ["GEM location ID"]),
+    # hydro uses "Country/Area 1"/"Area 2" → default to 1 to prevent silent row dropping
+    GEM_SCHEMA.country_col: ("str", ["Country/Area", "Country/Area 1"]),
+    GEM_SCHEMA.other_names_col: ("str", ["Other Name(s)", "Other name(s)"]),
+    GEM_SCHEMA.status_col: ("str", ["Status"]),
+    GEM_SCHEMA.url_col: ("str", ["Wiki URL"]),
+    "Capacity": ("num", ["Capacity (MW)", "Unit Capacity (MW)"]),
+    "lat": ("num", ["Latitude"]),
+    "lon": ("num", ["Longitude"]),
+}
+
+# Pattern to extract ENTSO-E EIC codes out of GEM's "Other IDs (...)" multi-value strings
+ENTSOE_ID_PATTERN = re.compile(r"ENTSO-E:\s*([^\s,]+)")
+
+
+# ------------------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------------------
+def _first_present(df: pd.DataFrame, candidates: list[str]) -> pd.Series:
+    """Return the first candidate column that exists in ``df``, else an all-NaN series.
+
+    Args:
+        df (pd.DataFrame): DataFrame to be parsed for candidate columns.
+        candidates (list[str]): List of candidate columns.
+
+    Returns:
+        pd.Series: Series of the first candidate column in `df`, if one exists.
+    """
+    for col in candidates:
+        if col in df.columns:
+            return df[col]
+
+    return pd.Series([None] * len(df), index=df.index)
+
+
+def _first_present_str(df: pd.DataFrame, candidates: list[str]) -> pd.Series:
+    """Like ``_first_present`` function, but transforms the result to nullable string dtype.
+
+    Several GEM data mix numeric and string values in the same column (e.g. unit names like
+    `1`, `2` alongside `"Unit 1"`), which breaks parquet serialization if not normalized.
+
+    Args:
+        df (pd.DataFrame): DataFrame to be parsed for candidate columns.
+        candidates (list[str]): List of candidate columns.
+
+    Returns:
+        pd.Series: Series of the first candidate column in ``df`` as strings, if one exists.
+    """
+    series = _first_present(df, candidates)
+    return series.astype("string")
+
+
+def _strip_own_country_from_names(names: pd.Series, countries: pd.Series) -> pd.Series:
+    """Remove GEM's "(<country>)" addition from its EGE names.
+
+    GEM adds the country to the name (as a suffix or mid-name) wherever the EGE's name isn't
+    unique in the data (e.g. "San Isidro power station (Chile)", "Royal (Spain) wind farm").
+    This becomes a full-weight discriminator and may cause a mismatch in fuzzy name matching
+    (e.g. target "PMGD TER CHILE" scores 100 against "San Isidro power station (Chile)").
+    Candidates are already filtered by the "Country" column so this is only a hindrance.
+
+    The function checks the name and removes the row's OWN country in "(...)" if it exists.
+    Any other words in brackets stay (e.g. "Mitchell Steam Generating Plant (Georgia)" is
+    in the US state Georgia, "Satara (Panama) wind farm" is in India, "Collinsville (Shine
+    Energy) power station" is just additional information).
+
+    Args:
+        names (pd.Series): Column of GEM EGE names to clean.
+        countries (pd.Series): Column of each row's own country.
+
+    Returns:
+        pd.Series: The names, with their own "(<country>)" and the gap it leaves removed.
+    """
+    cleaned = [
+        re.sub(r"\s+", " ", name.replace(f"({country})", "")).strip()
+        if isinstance(name, str) and isinstance(country, str) and f"({country})" in name
+        else name
+        for name, country in zip(names, countries)
+    ]
+    return pd.Series(cleaned, index=names.index, dtype=names.dtype)
+
+
+# ------------------------------------------------------------------------
+# Main class
+# ------------------------------------------------------------------------
+class GEMLocator:
+    """Coordinate locator using Global Energy Monitor (GEM) power plant trackers.
+
+    GEM publishes 8 xlsx tracker files that can either be manually downloaded (requires
+    registration) from https://globalenergymonitor.org/download-data or downloaded from
+    the PPM creators' cloud storage (they remotely stored the files). This locator
+    reads all found trackers, normalizes them into a single DataFrame, and caches the
+    combined result as a parquet file for fast reuse.
+
+    Attributes:
+        gem_dir (Path): Directory containing the downloaded GEM xlsx tracker files.
+        cache_dir (Path | None): Directory used for the combined parquet cache.
+        fallback_dir (Path | None): Subfolder of `gem_dir` holding the tracker files
+            downloaded from PPM's cloud storage, so later runs find them locally.
+        update (bool): Whether to re-download fallback trackers and rebuild the cache.
+        df (pd.DataFrame): Dataframe of combined, normalized GEM data from available trackers.
+            Has the columns:
+            [
+                'plant_name', 'unit_name', 'other_names',
+                'gem_unit_id', 'other_ids_unit', 'gem_location_id', 'other_ids_location',
+                'Fueltype', 'Status', 'Capacity', 'Country', 'lat', 'lon',
+                'wiki_url', 'tracker'
+            ]
+    """
+
+    def __init__(
+        self,
+        gem_dir: Path | None = None,
+        cache_dir: Path | None = None,
+        update: bool = False,
+    ) -> None:
+        """Initialize GEMLocator.
+
+        Args:
+            gem_dir (Path): Directory containing the downloaded GEM tracker xlsx files.
+                Defaults to None, in which case PPM's cloud-stored GEM files are the fallback.
+            cache_dir (Path, optional): Directory for the combined parquet cache.
+                Defaults to None, in which case `gem_dir` is used to store the parquet.
+            update (bool, optional): Re-download the fallback trackers and rebuild the
+                combined cache. Defaults to False.
+
+        Raises:
+            ValueError: If loaded GEM dataframe does not contain required columns.
+        """
+        self.gem_dir = Path(gem_dir) if gem_dir else None
+        self.cache_dir = Path(cache_dir) if cache_dir else self.gem_dir
+        self.cache_path = (
+            Path(self.cache_dir, "gem_combined.parquet") if self.cache_dir else None
+        )
+        self.fallback_dir = Path(self.gem_dir, "fallback") if self.gem_dir else None
+        self.update = update
+
+        self.df: pd.DataFrame = pd.DataFrame()
+        self._load()
+        if not self.df.empty:
+            if not set(GEM_COLUMNS).issubset(self.df.columns):
+                raise ValueError(
+                    f"Loaded GEM dataframe does not contain required columns: "
+                    f"{GEM_COLUMNS}. Existing columns are: {list(self.df.columns)}."
+                )
+
+            # clean up names in GEM dataframe
+            for col in (GEM_SCHEMA.name_col, GEM_SCHEMA.other_names_col):
+                self.df[col] = _strip_own_country_from_names(
+                    self.df[col], self.df[GEM_SCHEMA.country_col]
+                )
+
+        logger.info(f"GEMLocator initialized: {len(self.df)} entries")
+
+    # ------------------------------------------------------------------
+    # Internal helpers for initialization
+    # ------------------------------------------------------------------
+    def _load(self) -> None:
+        """Load the combined GEM dataset, using the parquet cache when still fresh."""
+        local_trackers = self._find_local_trackers()
+
+        # Prep: check file dates
+        newest_xlsx_mtime = max(
+            (p.stat().st_mtime for p in local_trackers.values()), default=0
+        )
+        cache_file = (
+            self.cache_path if self.cache_path and self.cache_path.is_file() else None
+        )
+
+        # 1. use cached parquet file (if it exists and tracker xlsx files aren't newer)
+        if (
+            cache_file
+            and not self.update
+            and cache_file.stat().st_mtime >= newest_xlsx_mtime
+        ):
+            logger.info(
+                f"GEMLocator: Loading combined GEM data from cache '{cache_file}' "
+                f"({len(local_trackers)} local tracker xlsx file(s) found, none newer)."
+            )
+            self.df = pd.read_parquet(cache_file)
+            return
+
+        if cache_file:  # log why the existing cache is not being used
+            reason = (
+                "'-u' was given" if self.update else "a newer tracker xlsx file exists"
+            )
+            logger.info(f"GEMLocator: Rebuilding cache '{cache_file}' ({reason}).")
+
+        # 2. use tracker xlsx files to build the df (parquet)
+        tracker_files = self._download_missing_trackers(local_trackers)
+        if tracker_files:
+            logger.info(
+                f"GEMLocator: Parsing {len(tracker_files)} of "
+                f"{len(TRACKER_SPECS)} GEM tracker xlsx file(s)..."
+            )
+            self.df = self._normalize_xlsx_into_df(tracker_files)
+
+        # 3. handle what happens if no tracker files exist or none could be parsed
+        if self.df.empty:
+            logger.warning(
+                f"GEMLocator: No GEM data could be built from '{self.gem_dir}' or the "
+                "fallback (PPM's cloud storage)."
+            )
+            if cache_file:  # unusable trackers must not disable GEM entirely
+                logger.warning(f"GEMLocator: Falling back to cache '{cache_file}'.")
+                self.df = pd.read_parquet(cache_file)
+            else:
+                logger.warning("GEMLocator: GEM matching will be unavailable.")
+            return
+
+        # 4. store the built df to a parquet for future use
+        if self.cache_dir and self.cache_path:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            self.df.to_parquet(self.cache_path, index=False)
+            self.df.to_csv(self.cache_path.with_suffix(".csv"), index=False)
+            logger.info(f"GEMLocator: Combined data stored to '{self.cache_path}'")
+        else:
+            logger.info("GEMLocator: Data not stored since no cache_dir was provided!")
+
+    def _find_local_trackers(self) -> dict[str, Path]:
+        """Find each tracker's xlsx file that is already on disk, without any network.
+
+        Resolved per tracker, so a manually downloaded Coal tracker and a fallback Wind
+        tracker can be used in the same run. Manually downloaded files in `gem_dir` win
+        over the fallback files stored in its `fallback/` subfolder, and on ties
+        (several versions of one tracker) the newest file wins.
+
+        On an `-u` run the `fallback/` folder is skipped, so every tracker without a
+        manually downloaded file is fetched fresh (s. `_download_missing_trackers`).
+
+        Returns:
+            dict[str, Path]: Local xlsx path per tracker key that has one.
+        """
+        folders = (self.gem_dir,) if self.update else (self.gem_dir, self.fallback_dir)
+
+        local: dict[str, Path] = {}
+        from_fallback: list[str] = []
+        for tracker, spec in TRACKER_SPECS.items():
+            file = str(spec.get("file_name"))
+
+            for folder in folders:
+                if folder is None:
+                    continue
+
+                matches = sorted(
+                    folder.glob(file), key=lambda p: p.stat().st_mtime, reverse=True
+                )
+                if matches:
+                    local[tracker] = matches[0]
+                    if folder == self.fallback_dir:
+                        from_fallback.append(tracker)
+                    break
+
+        if from_fallback:
+            logger.info(
+                f"GEMLocator: Using an earlier run's fallback copy for "
+                f"{len(from_fallback)} tracker(s): {', '.join(from_fallback)}."
+            )
+        return local
+
+    def _download_missing_trackers(
+        self, local_trackers: dict[str, Path]
+    ) -> dict[str, Path | str]:
+        """Get any missing trackers from PPM's cloud storage.
+
+        With a `gem_dir`, a missing tracker is downloaded into its `fallback/` folder, so
+        later runs find it locally; without one, the URL is handed on to be read directly.
+
+        Args:
+            local_trackers (dict[str, Path]): Tracker files already stored, as returned
+                by `_find_local_trackers`.
+
+        Returns:
+            dict[str, Path | str]: Every resolved tracker key → local path or URL.
+        """
+        resolved: dict[str, Path | str] = dict(local_trackers)
+        fetched: list[str] = []
+
+        for tracker, spec in TRACKER_SPECS.items():
+            if tracker in resolved:
+                continue
+
+            file = str(spec.get("file_name"))
+            url = next(
+                (u for u in self._fallback_xlsx_urls if fnmatch.fnmatch(u, f"*{file}")),
+                None,
+            )
+            if url is None:
+                continue
+
+            # if no gem_dir -> read the URL directly
+            if self.fallback_dir is None:
+                resolved[tracker] = url
+                fetched.append(tracker)
+                continue
+
+            cache_path = Path(self.fallback_dir, url.rsplit("/", 1)[-1])
+            local = fetch_resource(url, cache_path, self.update)
+            if local is not None:
+                resolved[tracker] = local
+                fetched.append(tracker)
+
+        # GEM's own website always have all 8 trackers, PPM's cloud copies are outdated
+        if fetched:
+            logger.warning(
+                f"GEMLocator: No manually downloaded file for {len(fetched)} "
+                f"tracker(s) ({', '.join(fetched)}) — taking PPM's cloud copies, which "
+                f"are outdated compared to GEM's current release. If you want the "
+                f"newest versions, download all {len(TRACKER_SPECS)} trackers from "
+                f"https://globalenergymonitor.org/download-data into '{self.gem_dir}'."
+            )
+
+        missing = [t for t in TRACKER_SPECS if t not in resolved]
+        if missing:
+            logger.warning(
+                f"GEMLocator: No file at all for {len(missing)} tracker(s) "
+                f"({', '.join(missing)}) — their EGEs cannot be matched."
+            )
+
+        return resolved
+
+    @staticmethod
+    def _normalize_xlsx_into_df(tracker_files: dict[str, Path | str]) -> pd.DataFrame:
+        """Read & normalize every resolved tracker file into one combined DataFrame.
+
+        Args:
+            tracker_files (dict[str, Path | str]): Mapping from GEM key to its xlsx path URL.
+
+        Returns:
+            pd.DataFrame: DataFrame of loaded, normalized and combined GEM tracker xlsx files.
+        """
+        normalized_dfs: list[pd.DataFrame] = []
+
+        for tracker, path in tracker_files.items():
+            spec = TRACKER_SPECS[tracker]
+            aliases = COLUMN_ALIASES[tracker]
+            try:
+                df_raw = pd.read_excel(path, sheet_name=str(spec["sheet"]))
+            except Exception as e:
+                logger.warning(f"GEMLocator: failed to read '{path}': {e}")
+                continue
+
+            df_norm = pd.DataFrame(index=df_raw.index)
+
+            # Normalize each columns' values (find true column equivalents via mappings)
+            # 1. All except "tracker" and "Fueltype"
+            for col, (dtype, alt) in GEM_COLUMN_ALTERNATIVES.items():
+                candidates = alt if alt is not None else aliases.get(col, [])
+                if dtype == "num":
+                    df_norm[col] = pd.to_numeric(
+                        _first_present(df_raw, candidates), errors="coerce"
+                    )
+                else:  # dtype == "str"
+                    df_norm[col] = _first_present_str(df_raw, candidates)
+
+            # 2. Specific handling of "tracker" and "Fueltype"
+            df_norm["tracker"] = tracker
+
+            # Fueltype: per-row 'fuel' column when available, else tracker default
+            fuel = _first_present_str(df_raw, aliases.get("fuel", []))
+            df_norm["Fueltype"] = fuel if fuel.notna().any() else spec["fuel_default"]
+
+            normalized_dfs.append(df_norm)
+
+        if not normalized_dfs:
+            return pd.DataFrame()
+
+        df = pd.concat(normalized_dfs, ignore_index=True)  # combine dataframes
+        df = normalize_locator_countries(df)  # normalize the country values
+        return df
+
+    # ------------------------------------------------------------------
+    # Cached properties (calculated once and re-used)
+    # ------------------------------------------------------------------
+    @cached_property
+    def _fallback_xlsx_urls(self) -> list:
+        """Get the potential fallback tracker URLs as a list of XLSXs in PPM's config file.
+
+        The creators of PPM (PyPSA) stored a version of all 8 GEM trackers in their cloud
+        to circumvent the forced download problem. The URLs of these XLSXs files are saved
+        in the PPM package's config. This defines ALL XLSX URLs in config (including others).
+
+        Returns:
+            list: List of all XLSX URLs in the PPM config file or an empty list if none exist.
+        """
+        try:
+            response = requests.get(
+                FALLBACK_CONFIG_URL, allow_redirects=True, timeout=60
+            )
+            response.raise_for_status()
+
+            content = response.content.decode("utf-8")  # bytes to string
+            config = yaml.safe_load(content)
+            return [
+                v2
+                for k1, v1 in config.items()
+                if isinstance(v1, dict)
+                for k2, v2 in v1.items()
+                if k2 == "url" and "xlsx" in v2
+            ]
+
+        except (requests.RequestException, yaml.YAMLError) as e:
+            logger.warning(
+                f"GEMLocator: failed to get fallback XLSX URLs from PPM: {e}"
+            )
+
+        return []
+
+    @cached_property
+    def _entsoe_id_index(self) -> dict[str, int]:
+        """Pre-compute an ENTSO-E EIC code lookup (row-position index) once.
+
+        Avoids full df scan which ``match_by_entsoe_id`` would otherwise need on every call.
+
+        Returns:
+            dict[str, int]: EIC code lookup dict.
+        """
+        index: dict[str, int] = {}
+
+        if len(self.df) == 0:
+            return index
+
+        unit_ids = self.df.get("other_ids_unit", pd.Series(dtype=object))
+        location_ids = self.df.get("other_ids_location", pd.Series(dtype=object))
+        for pos, (unit_val, location_val) in enumerate(zip(unit_ids, location_ids)):
+            for val in (unit_val, location_val):
+                if isinstance(val, str):
+                    for eic in ENTSOE_ID_PATTERN.findall(val):
+                        index.setdefault(eic, pos)
+
+        return index
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def match_by_entsoe_id(self, entsoe_id: str | None) -> MatchCandidate | None:
+        """Find an EGE by its ENTSO-E EIC code and return the row as a MatchCandidate.
+
+        Extracts ENTSO-E codes from GEM's "Other IDs (unit)" / "Other IDs (location)"
+        columns via a pre-built EIC -> row-position index (see ``_entsoe_id_index``).
+
+        Args:
+            entsoe_id (str | None): ENTSO-E EIC code to search for.
+
+        Returns:
+            MatchCandidate | None: Matched row as a MatchCandidate if one was found,
+                has coordinates and a name, else None.
+        """
+        target = strip_str(entsoe_id)
+        if len(self.df) == 0 or target is None:
+            return None
+
+        pos = self._entsoe_id_index.get(target)
+        if pos is None:
+            return None
+
+        row = self.df.iloc[pos]
+        if pd.isna(row.get("lat")) or pd.isna(row.get("lon")):
+            return None  # match found but no coordinates — not useful
+
+        return MatchCandidate.primary_from_row(row, schema=GEM_SCHEMA)

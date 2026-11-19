@@ -1,0 +1,9 @@
+route: lsdf
+bucket: energybench
+url_public: https://www.energybench.org/files
+lsdf:
+  dst_dir_data: /lsdf/kit/scc/projects/renewbench/energybench/data
+  dst_dir_inbox: /lsdf/kit/scc/projects/renewbench/energybench/inbox
+s3:
+  url_endpoint: YOUR-S3-ENDPOINT-URL
+  url_stac_api: YOUR-STAC-API-URL

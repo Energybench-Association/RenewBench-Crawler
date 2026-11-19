@@ -1,0 +1,562 @@
+"""Centralized name matching utilities for coordinate finding.
+
+This module provides a unified, lookup-based approach to fuzzy name matching
+across multiple power plant data sources, namely ppdb (PPM/OSMPP), GEM, OSM.
+
+Key Features:
+- Systematic generation of name variants for both input and candidate names
+- Pre-computed search index for efficient lookups
+- Hard country filtering to prevent cross-country false positives
+- Fuel type guardrails for validation
+- Source priority: GEM > ppdb (PPM/OSMPP) > OSM
+- Caching for performance
+"""
+
+from functools import cached_property
+
+import pandas as pd
+from loguru import logger
+
+from rbc.coordinates.match_schema import (
+    LOCATOR_RELIABILITY,
+    LOCATOR_SCHEMAS,
+    LocatorSchema,
+    MatchCandidate,
+    MatchResult,
+)
+from rbc.coordinates.resources.natural_earth import RegionRegistry
+from rbc.coordinates.utils.country import normalize_operator_country_name
+from rbc.coordinates.utils.fuel import classify_fueltype_match
+from rbc.coordinates.utils.tokenizer import (
+    NameTokenizer,
+    get_weighted_token_score,
+    split_camelcase,
+    split_glued_generic_tokens,
+    strip_square_brackets,
+)
+from rbc.coordinates.utils.values import is_missing, normalize_name
+
+# Defining match that can win: the candidate, its score, the approach that found it (for
+# `matched_via`) and the two tie-break weights (s. `NameMatcher._rank_candidate`).
+WinningMatch = tuple[MatchCandidate, float, str, float, float]
+
+# Operator-dependent styles for name matching & tokenization
+STYLE_POLICY: dict[str, dict[str, float]] = {
+    "real": {  # real names of places: exact matching required (strict(er) thresholds)
+        "fuzz_ratio_threshold": 100.0,  # fuzzy ratio only passes with identical tokens
+        "threshold": 95.0,
+        "weighted_threshold": 85.0,  # stricter threshold
+    },
+    "code": {  # names are codes/abbr: matching via partial tokens (lenient thresholds)
+        "fuzz_ratio_threshold": 60.0,  # tokens with some similarity pass
+        # 60.0 is the highest floor that keeps correct abbreviation matches ("cra"/"craiova"),
+        # 50.0 admits weak pairs (e.g "West Offaly"/"Rhode" (IE), "Retezat"/"Bretea" (RO))
+        "threshold": 75.0,
+        "weighted_threshold": 65.0,  # more lenient threshold
+    },
+}
+
+
+class NameMatcher:
+    """Lookup-based fuzzy name matcher for multiple (coordinate) locator data sources.
+
+    This class consolidates all name-based matching logic into a single, reusable component.
+    It builds a searchable lookup index that maps normalized names to candidate EGEs, enabling
+    efficient many-to-many matching with systematic variant generation.
+
+    Definitions:
+    - target(s): sys-op EGE(s) to find coordinates for.
+    - candidate(s): EGE(s) from coordinate/locator data sources that may match.
+
+    Features:
+    - Generates all plausible name variants for both input and candidates
+    - Hard country filtering to prevent cross-country false positives
+    - Fuel type guardrails for validation
+    - Source priority: GEM > ppdb (PPM/OSMPP) > OSM
+    - Caching for repeated matches
+
+    Example:
+        >>> matcher = NameMatcher(
+        ...     country="Germany", tok=tok, gem_df=gem_loc.df, ppdb_df=ppm_loc.df,
+        ...     osm_df=osm_df, region_reg=region_reg, style_policy="code"
+        ... )
+        >>> result = matcher.match("Enguri Unit 5",target_fueltype="hydro")
+        >>> if result.matched:
+        ...     candidate = result.candidate
+        ...     print(f"Found: {candidate.name} at ({candidate.lat}, {candidate.lon})")
+    """
+
+    def __init__(
+        self,
+        country: str,
+        tok: NameTokenizer,
+        gem_df: pd.DataFrame | None = None,
+        ppdb_df: pd.DataFrame | None = None,
+        osm_df: pd.DataFrame | None = None,
+        region_reg: RegionRegistry | None = None,
+        style_policy: str = "real",
+    ) -> None:
+        """Initialize the name matcher.
+
+        Args:
+            country (str): Target country name for hard filtering (prevents cross-country
+                matches).
+            tok (NameTokenizer): Tokenizer carrying the operator's name/fuel vocabulary.
+            gem_df (pd.DataFrame | None): GEM's candidate rows. Defaults to None, in
+                which case GEM contributes no candidates.
+            ppdb_df (pd.DataFrame | None): Candidate rows of the power plant database
+                (PPM or OSMPP). Defaults to None.
+            osm_df (pd.DataFrame | None): OSM's candidate rows, already sliced to the
+                country (Overpass is queried per country). Defaults to None.
+            region_reg (RegionRegistry | None): Region registry to check a candidate's
+                coordinate against the target's region with. Defaults to None, in which
+                case the region check is skipped.
+            style_policy (str): The style used by the operator in target EGE naming, defining
+                how to handle matching. Options are "real" or "code". Defaults to "code".
+        """
+        self.target_country = country
+        self.norm_target_country = normalize_operator_country_name(country)
+
+        # Tokenizer (carries the operator's vocabulary, s. BasePipeline.__init__)
+        self.tok: NameTokenizer = tok
+
+        # Candidate rows per locator, keyed as that locator's LocatorSchema names it
+        self.candidate_dfs: dict[str, pd.DataFrame | None] = {
+            "gem": gem_df,
+            "ppdb": ppdb_df,
+            "osm": osm_df,
+        }
+
+        # Region lookup (reads its data lazily, on the first target that names a region)
+        self.region_reg: RegionRegistry | None = region_reg
+
+        # Operator-dependent naming convention style
+        style = STYLE_POLICY.get(style_policy, STYLE_POLICY["code"])
+        self.fuzz_ratio_threshold = style["fuzz_ratio_threshold"]
+        self.threshold = style["threshold"]  # min score to accept an exact-lookup match
+        self.weighted_threshold = style["weighted_threshold"]  # ...a weighted-tok match
+
+        # Cache for target name variants and alternatives (e.g. from EIC enrichment)
+        self._target_variants: dict[str, list[str]] = {}  # name -> [variants]
+        self._target_alternatives: dict[str, list[str]] = {}  # name -> [alternatives]
+
+    # ---------------------------------------------------------------------------
+    # Public API
+    # ---------------------------------------------------------------------------
+    def add_target_alternatives(self, name: str, alt_names: list[str]) -> None:
+        """Add alternative names for a target EGE's name (e.g. from EIC registry).
+
+        Args:
+            name (str): The original/primary target's name.
+            alt_names (list[str]): List of alternative names to try for this target's name.
+        """
+        if name not in self._target_alternatives:
+            self._target_alternatives[name] = []
+
+        self._target_alternatives[name].extend(alt_names)
+
+    def match(
+        self,
+        target_name: str,
+        target_fueltype: str | None = None,
+        target_region: str | None = None,
+    ) -> MatchResult:
+        """Find the best match for a target EGE name across all candidate data sources.
+
+        Uses a combined approach:
+        1. Tries exact matches via candidate_index lookup (fast)
+        2. Falls back to weighted-token scoring (s. tokenizer.py) against all valid candidates
+
+        Args:
+            target_name (str): The target name to match.
+            target_fueltype (str | None): Target fuel type for validation. Defaults to None.
+            target_region (str | None): Target region for validation. Defaults to None.
+
+        Returns:
+            MatchResult with matched candidate or None if no match found.
+        """
+        if is_missing(target_name):
+            return MatchResult(
+                matched=False,
+                candidate=None,
+                score=0.0,
+                target_variants=[],
+                target_wt_strings=[],
+                top_matches=[],
+            )
+
+        # --- Preparation: Define and build all required parameters
+        candidate_index = self._candidate_index
+        target_variants = self._generate_target_variants(target_name)
+        target_wts = [self.tok.weighted_tokenize(v) for v in target_variants]
+        target_wts = [wt for wt in target_wts if wt is not None]
+
+        # Match collections consisting of [candidate, score] and, for the two that can
+        # produce the winner, a full `WinningMatch` (s. its definition above)
+        all_matches: list[tuple[MatchCandidate, float]] = []
+        winning_matches: list[WinningMatch] = []  # exact/compat
+        fallback_matches: list[WinningMatch] = []  # unknown/family
+
+        # --- Approach 1: Exact matches via candidate_index lookup (fast path)
+        for variant in target_variants:
+            if variant in candidate_index:
+                for cand in candidate_index[variant]:
+                    score, debug_score = 100.0, 100.0
+
+                    is_f_match, f_bonus = _compare_fuel(target_fueltype, cand.fueltype)
+                    score = score + f_bonus if is_f_match else 0.0
+                    debug_score += f_bonus
+
+                    is_r_match, r_bonus = _compare_region(
+                        self.region_reg,
+                        self.target_country,
+                        target_region,
+                        (cand.lat, cand.lon),
+                    )
+                    score = score + r_bonus if is_r_match else 0.0
+                    debug_score += r_bonus
+
+                    all_matches.append((cand, debug_score))
+                    if score >= self.threshold:
+                        missed, remaining = 0.0, 0.0  # candidate's name IS matched var!
+                        if f_bonus > 0.0:
+                            winning_matches.append(
+                                (cand, score, "name_exact", missed, remaining)
+                            )
+                        else:
+                            fallback_matches.append(
+                                (cand, score, "name_exact", missed, remaining)
+                            )
+
+            # if a variant has been matched, stop 'descending' down the list
+            if winning_matches:
+                break
+
+        # --- Approach 2: Weighted-token scoring against all candidates.
+        # Each target token is matched against its best-fitting candidate token and weighted:
+        # A descriptive match (e.g. "auvere") counts far more than a generic one (e.g. "g1").
+        if not winning_matches:
+            all_candidates = []  # get all candidates for matching
+            for candidates in candidate_index.values():
+                all_candidates.extend(candidates)
+
+            for target_wt in target_wts:
+                if not target_wt.tokens:
+                    continue
+
+                for cand in all_candidates:
+                    candidate_wt = self.tok.weighted_tokenize(cand.norm_name)
+
+                    scores = get_weighted_token_score(
+                        target_wt,
+                        candidate_wt,
+                        fuzz_ratio_floor=self.fuzz_ratio_threshold,
+                    )
+                    true_score, debug_score = scores.score, scores.debug_score
+                    is_f_match, f_bonus = _compare_fuel(target_fueltype, cand.fueltype)
+                    true_score = true_score + f_bonus if is_f_match else 0.0
+                    debug_score += f_bonus
+
+                    is_r_match, r_bonus = _compare_region(
+                        self.region_reg,
+                        self.target_country,
+                        target_region,
+                        (cand.lat, cand.lon),
+                    )
+                    true_score = true_score + r_bonus if is_r_match else 0.0
+                    debug_score += r_bonus
+
+                    all_matches.append((cand, debug_score))
+                    if true_score >= self.weighted_threshold:
+                        missed, remaining = (
+                            scores.missed_weight,
+                            scores.remaining_weight,
+                        )
+                        if f_bonus > 0.0:
+                            winning_matches.append(
+                                (cand, true_score, "name_fuzzy", missed, remaining)
+                            )
+                        else:
+                            fallback_matches.append(
+                                (cand, true_score, "name_fuzzy", missed, remaining)
+                            )
+
+                # if a variant has been matched, stop descending
+                if winning_matches:
+                    break
+
+        # --- Postprocess: Define all identified matches
+        # 1. Sort matches: by score, then by how much of the candidate's name is NOT in the
+        # target (less is better), then by locator reliability
+        winning_matches.sort(key=self._rank_candidate, reverse=True)
+        fallback_matches.sort(key=self._rank_candidate, reverse=True)
+        # all: only by score (highest first)
+        all_matches.sort(key=lambda x: x[1], reverse=True)
+
+        # 2. find the best score per EGE from all variants (one per unique normalized name)
+        best_per_ege: dict[tuple[str, str], tuple[MatchCandidate, float]] = {}
+        for cand, score in all_matches:
+            prev = best_per_ege.get(cand.ege_key)
+            if prev is None or score > prev[1]:
+                best_per_ege[cand.ege_key] = (cand, score)
+
+        # 3. Get top matches as top-10 of all that score above the relevant threshold
+        all_matches = sorted(best_per_ege.values(), key=lambda x: x[1], reverse=True)
+        top_matches = [
+            (cand, score)
+            for cand, score in all_matches[:5]
+            if score > 5.0  # don't include 0.0 scores with +5 fuel bonus
+        ]
+
+        # 4. Get matched candidate with the best score
+        best_via: str | None = None
+        if winning_matches:
+            best_candidate, best_score, best_via, _, _ = winning_matches[0]
+        elif fallback_matches:
+            best_candidate, best_score, best_via, _, _ = fallback_matches[0]
+        elif top_matches:  # best effort for review only, so `matched` stays False
+            best_candidate, best_score = top_matches[0]
+        else:
+            best_candidate, best_score = None, 0.0
+
+        return MatchResult(
+            matched=bool(winning_matches or fallback_matches),
+            candidate=best_candidate,
+            score=best_score,
+            target_variants=target_variants,
+            target_wt_strings=[wt.as_str() for wt in target_wts],
+            top_matches=top_matches,
+            matched_via=best_via,
+        )
+
+    # ---------------------------------------------------------------------------
+    # Cached properties (calculated once and re-used)
+    # ---------------------------------------------------------------------------
+    @cached_property
+    def _candidate_index(self) -> dict[str, list[MatchCandidate]]:
+        """Build the searchable candidate index/lookup cache (norm_name -> [MatchCandidates]).
+
+        Creates a mapping of each unique normalized candidate name to the list of candidates
+        that share said name from all coordinate sources, stored as MatchCandidate objects.
+        As a ``@cached_property``, ``_candidate_index`` is built once and reused after.
+
+        Returns:
+            index (dict): Candidate index/lookup dict.
+        """
+        index: dict[str, list[MatchCandidate]] = {}
+
+        # Collect candidates from all available locators via their schemas
+        candidates: list[MatchCandidate] = []
+
+        for schema in LOCATOR_SCHEMAS:  # in order of locator reliability!
+            candidates.extend(self._build_candidates(schema))
+
+        # Add candidates to index by normalized name
+        for candidate in candidates:
+            index.setdefault(candidate.norm_name, []).append(candidate)
+
+        logger.info(
+            f"NameMatcher: Built candidate lookup for '{self.target_country}' with "
+            f"{len(candidates)} candidate variants that have {len(index)} unique names."
+        )
+        return index
+
+    # ---------------------------------------------------------------------------
+    # Helper methods
+    # ---------------------------------------------------------------------------
+    def _build_candidates(self, schema: LocatorSchema) -> list[MatchCandidate]:
+        """Build candidates from a locator, mapping its columns via its LocatorSchema.
+
+        Returns valid candidates by including only those that:
+        - pass the country filter (if a country & the locator's country col are given)
+        - have location coordinates (lat/lon)
+
+        Args:
+            schema (LocatorSchema): Column mapping of the locator to build from.
+
+        Returns:
+            list[MatchCandidate]: A list of valid candidates as MatchCandidate objects.
+        """
+        df = self.candidate_dfs.get(schema.locator)
+        if df is None or len(df) == 0:
+            return []
+
+        df = df.copy()
+
+        # Filter by country if given and the locator has a country column (OSM has none)
+        if self.target_country and schema.country_col:
+            df = df[
+                df[schema.country_col].astype(str).str.lower()
+                == str(self.norm_target_country).lower()
+            ]
+
+        # Filter to only rows with coordinates
+        df = df.dropna(subset=[schema.lat_col, schema.lon_col])
+
+        if len(df) == 0:
+            return []
+
+        candidates = []
+        for _, row in df.iterrows():
+            candidates.extend(MatchCandidate.from_row(row, schema, self.tok))
+
+        return candidates
+
+    def _generate_target_variants(self, name: str) -> list[str]:
+        """Generate all plausible variants of a target EGE's name for matching.
+
+        Generates ordered list, with most specific variants first. ``match()`` iterates
+        through this list and stops as soon as a winner is found, so the order is important.
+
+        1. Alternative names (e.g. from EIC enrichment) --- authoritative variant(s)
+        2. CamelCase-split --- adds structure, more specific than raw name
+        3. Raw name
+        4. Normalized --- lowercase, no diacritics/special char ("ENGURUNIT_5" -> "engurunit)
+        5. Glue-split --- separates glued generic unit words ("ENGURIUNIT_5" -> "enguri
+           unit 5"), which would otherwise stay one unmatchable token
+        6. Square-brackets-stripped --- drops an operator's status info in square brackets
+           ("TER VENTANAS [No_Mostrar]" -> "ter ventanas").
+
+        Methods 4.-6. also include token-expanded variants, where abbreviations are turned
+        into full names. Method 5. is also applied to the normalized camelcase variant.
+        Up to method 6.: no information is dropped, every name part survives into
+        ``get_weighted_token_score``, which decides what counts.
+        Method 6.: only variant that drops information, specifically status information that
+        the tokenizer has no chance of identifying as such (s. ``strip_square_brackets``).
+        This variant comes last to give the full name every chance first.
+
+        Args:
+            name: The base target name to generate variants for.
+
+        Returns:
+            result (list): List of unique name variants.
+        """
+        if name in self._target_variants:
+            return self._target_variants[name]
+
+        if is_missing(name):
+            self._target_variants[name] = []
+            return []  # skip empty names
+
+        # Define variants as ordered list, with most specific first
+        variants: list[str] = []
+
+        def add(v: str | None) -> None:
+            """Add a variant to the target EGE's variant list if it isn't already present.
+
+            Args:
+                v (str | None): The variant to add to the list.
+            """
+            if v and v not in variants:
+                variants.append(v)
+
+        # 1. Alternative names
+        for alt_name in self._target_alternatives.get(name, []):
+            add(alt_name)
+            add(normalize_name(alt_name))
+
+        # 2. camelCase-split
+        camelcase = split_camelcase(raw=name)
+        add(camelcase)
+        normalized_cc = normalize_name(camelcase)
+        add(normalized_cc)
+
+        # 3. Raw name & 4. Normalized name --- baseline
+        add(name)
+        normalized = normalize_name(name)
+        add(normalized)
+        add(" ".join(self.tok.tokenize(normalized)))  # tokenized variant
+
+        # 5. Name with glued generic unit words split into separate tokens
+        split_glued = split_glued_generic_tokens(normalized=normalized)
+        add(split_glued)
+        add(" ".join(self.tok.tokenize(split_glued)))  # tokenized variant
+
+        split_glued_cc = split_glued_generic_tokens(normalized=normalized_cc)
+        add(split_glued_cc)
+        add(" ".join(self.tok.tokenize(split_glued_cc)))  # tokenized variant
+
+        # 6. Name without the operator's status markers in square brackets
+        unmarked = normalize_name(strip_square_brackets(raw=name))
+        add(unmarked)
+        add(" ".join(self.tok.tokenize(unmarked)))  # tokenized variant
+
+        # Store to cache and return
+        logger.debug(f"Target variants for {name}:\t{' | '.join(variants)}.")
+        self._target_variants[name] = variants
+        return variants
+
+    @staticmethod
+    def _rank_candidate(entry: WinningMatch) -> tuple[float, float, float, int]:
+        """Rank one winning match for sorting (descending, so higher is better).
+
+        Scores from ``get_weighted_token_score`` can be tied, as they weigh the target's
+        tokens only. Its two weights break that: `missed` first, for a candidate saying too
+        little, then `remaining`, for one saying too much (less is better for both, and
+        neither subsumes the other). Locator reliability only breaks ties where the name
+        evidence cannot. All floats are already rounded.
+
+        Args:
+            entry (WinningMatch): One (candidate, score, matched_via, missed, remaining).
+
+        Returns:
+            tuple[float, float, float, int]: Score, negated missed and remaining weights,
+                locator reliability.
+        """
+        cand, score, _, missed, remaining = entry
+        return score, -missed, -remaining, LOCATOR_RELIABILITY.get(cand.locator, 0)
+
+
+def _compare_fuel(target_fuel: str | None, cand_fuel: str | None) -> tuple[bool, float]:
+    """Whether the fuel types are classified as a match, and the bonus a positive match earns.
+
+    Get fuel type match level with the classify_fueltype_match helper, define handling
+    based on the classification str.
+
+    Args:
+        target_fuel (str | None): The target's fuel type
+        cand_fuel (str | None): The candidate's fuel type
+
+    Returns:
+        tuple[bool, float]: Whether the fuel types match, and the score bonus to add.
+    """
+    level = classify_fueltype_match(target_fuel, cand_fuel)
+    if level == "mismatch":
+        return False, 0.0
+    elif level in ("unknown", "family"):
+        return True, 0.0
+
+    return True, 5.0  # bonus for "exact" or "compatible"
+
+
+def _compare_region(
+    region_reg: RegionRegistry | None,
+    country: str,
+    target_region: str | None,
+    cand_coord: tuple[float, float],
+) -> tuple[bool, float]:
+    """Whether the candidate coordinate lies within the target region or not.
+
+    Args:
+        region_reg (RegionRegistry | None): Region lookup to classify the coordinate
+            with. If None, no region is known, so nothing is vetoed.
+        country (str): The target / candidate country name.
+        target_region (str | None): The target region.
+        cand_coord (tuple[float, float]): The candidate coordinate (lat, lon).
+
+    Returns:
+        tuple[bool, float]: Whether it's in the region, and the score bonus to add.
+    """
+    if region_reg is None:  # no registry, so the check cannot rule anything out
+        return True, 0.0
+
+    level = region_reg.classify_match(country, target_region, cand_coord)
+    if level == "unknown":  # the most common case! Most have no region info...
+        return True, 0.0
+
+    if level == "mismatch":
+        return False, 0.0
+    elif level == "within_bounds":
+        return True, 0.0
+
+    return True, 5.0  # bonus for "within_borders"

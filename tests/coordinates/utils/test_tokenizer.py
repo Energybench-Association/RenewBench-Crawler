@@ -1,0 +1,860 @@
+# tests/coordinates/utils/test_tokenizer.py
+"""Tests for the source-agnostic name tokenizer/weighting used by NameMatcher."""
+
+import pytest
+
+from rbc.coordinates.utils.tokenizer import (
+    DEMOTE_WEIGHT,
+    DESIGNATOR_WEIGHT,
+    EXCLUDE_WEIGHT,
+    FULL_WEIGHT,
+    NameTokenizer,
+    get_weighted_token_score,
+    normalize_name,
+    split_camelcase,
+    split_glued_generic_tokens,
+    strip_square_brackets,
+)
+
+# Synthetic vocabulary, deliberately NOT imported from rbc.energy.<operator>.mappings:
+# these tests pin the tokenizer's mechanics, not the operators' evolving word lists.
+TEST_VOCAB: dict[str, str] = {
+    "elektrijaam": "power plant",  # multi-word value, both words already generic
+    "ej": "power plant",  # value re-using another vocabulary key
+    "pumpspeicherkraftwerk": "pumped hydro",  # value word that is NOT a generic token
+    "Kraftværk": "power plant",  # accented + capitalized key
+    "Barragem da Usina": "dam",  # multi-word key -> unreachable by design
+}
+
+
+# ----------------------------------
+# Fixtures
+# ----------------------------------
+@pytest.fixture
+def tok_plain() -> NameTokenizer:
+    """Returns a tokenizer with no operator/country vocabulary.
+
+    Returns:
+        NameTokenizer: Tokenizer built with generic token sets only.
+    """
+    return NameTokenizer()
+
+
+@pytest.fixture
+def tok_vocab() -> NameTokenizer:
+    """Returns a tokenizer carrying TEST_VOCAB on top of the generic token sets.
+
+    Returns:
+        NameTokenizer: Tokenizer built with a name_mapping.
+    """
+    return NameTokenizer(name_mapping=TEST_VOCAB)
+
+
+# ----------------------------------
+# Tests - module-level string helpers
+# ----------------------------------
+class TestSplitHelpers:
+    """Tests for split_camelcase and split_glued_generic_tokens."""
+
+    @pytest.mark.parametrize(
+        "raw, expected_output",
+        [
+            ("ChePortileDeFier", "Che Portile De Fier"),
+            ("CetCraiova2_CRAI2_CA", "Cet Craiova2_CRAI2_CA"),
+            ("CteTurceni_TURC3_CA", "Cte Turceni_TURC3_CA"),
+            ("McDonald", "Mc Donald"),
+        ],
+    )
+    def test_splits(self, raw: str, expected_output: str) -> None:
+        """Happy path: camelCase words are separated at each lower -> upper transition.
+
+        Args:
+            raw (str): Raw operator name to split.
+            expected_output (str): Expected split name.
+        """
+        assert split_camelcase(raw) == expected_output
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["CET_MINT5_CA", "ROVI6", "usina hidreletrica balbina", "", None],
+        ids=["all_upper", "all_upper_digit", "all_lower", "empty", "none"],
+    )
+    def test_no_mixed_case_returns_empty(self, raw: str | None) -> None:
+        """Failure path: A name without mixed case yields '', i.e. no variant to add.
+
+        Args:
+            raw (str | None): Raw name with no lower/upper mix.
+        """
+        assert split_camelcase(raw) == ""
+
+    @pytest.mark.parametrize(
+        "raw", ["Isalnita_ISAL8_CA", "Usina Hidrelétrica Balbina", "Auvere EJ"]
+    )
+    def test_mixed_case_without_transition_returns_empty(self, raw: str) -> None:
+        """Failure path: Mixed case but no lower->upper transition also yields ''.
+
+        Args:
+            raw (str): Raw name whose case never transitions lower->upper.
+        """
+        assert split_camelcase(raw) == ""
+
+    @pytest.mark.parametrize(
+        "raw, expected_output",
+        [
+            ("ENGURIUNIT_5", "enguri unit 5"),
+            ("HPPEnguriUnit 3", "hppenguri unit 3"),
+            ("energoblok 1", "energo blok 1"),
+            ("SLOEUNIT10", "sloe unit 10"),
+            ("Fynsvaerket bioblok 2", "fynsvaerket bio blok 2"),
+        ],
+    )
+    def test_split_glued(self, raw: str, expected_output: str) -> None:
+        """Happy path: stem, generic word and unit number all survive the split.
+
+        The unit number is deliberately kept: dropping it would collapse "ENGURIUNIT_1"
+        through "ENGURIUNIT_5" onto one identical variant.
+
+        Args:
+            raw (str): Raw name carrying a glued generic unit word.
+            expected_output (str): Expected split name.
+        """
+        assert split_glued_generic_tokens(normalize_name(raw)) == expected_output
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["Riverside", "Svelgen", "Dormagen", "Groningen", "cogeneration", "", None],
+        ids=["no_generic", "no_place", "de_place", "nl_place", "word", "empty", "none"],
+    )
+    def test_short_generics_and_no_match_return_empty(self, raw: str | None) -> None:
+        """Failure path: <=3-char generics ("gen", "g") are excluded from the split.
+
+        These are ordinary word endings, so splitting on them would mutilate the name
+        ("cogeneration" -> "co generation", "Svelgen" -> "svel gen"). An unchanged name
+        yields '', i.e. no variant to add.
+
+        Args:
+            raw (str | None): Raw name with no splittable glued generic token.
+        """
+        assert split_glued_generic_tokens(normalize_name(raw)) == ""
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["United", "Conjuncta", "Groupama", "Unitech", "Blockheizkraftwerk"],
+        ids=["short_residual", "lead_conj", "lead_group", "lead_unit", "lead_block"],
+    )
+    def test_leading_generic_and_short_residual_not_split(self, raw: str) -> None:
+        """Failure path: the generic must trail the token and leave > 3 chars behind.
+
+        A leading generic is nearly always part of a real name, and a 1-2 char residual
+        means the "generic" was really a word ending ("United" -> "unit" + "ed").
+
+        Args:
+            raw (str): Real name starting with (or barely exceeding) a generic token.
+        """
+        assert split_glued_generic_tokens(normalize_name(raw)) == ""
+
+
+class TestStripHelpers:
+    """Tests for strip_square_brackets."""
+
+    @pytest.mark.parametrize(
+        "raw, expected_output",
+        [
+            ("TER VENTANAS [No_Mostrar]", "TER VENTANAS"),
+            ("TER BOCAMINA [NO_MOSTRAR]", "TER BOCAMINA"),
+            ("HP LA CONFIANZA  [En_Revision]", "HP LA CONFIANZA"),
+            ("PFV LOMA LOS COLORADOS [EN_REVISION]", "PFV LOMA LOS COLORADOS"),
+            ("[NO_MOSTRAR] TER RENCA", "TER RENCA"),
+            ("TER A [X] B [Y]", "TER A B"),
+        ],
+        ids=["suffix", "upper", "double_space", "multi_word", "prefix", "two_markers"],
+    )
+    def test_markers_are_removed(self, raw: str, expected_output: str) -> None:
+        """Happy path: the marker and the gap it leaves both go, wherever it sits.
+
+        Args:
+            raw (str): Raw operator name carrying a bookkeeping marker.
+            expected_output (str): Expected name without the marker.
+        """
+        assert strip_square_brackets(raw) == expected_output
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "PMGD PFV DON JORGE (EX PERALILLO)",
+            "Red Dragon (Unit 4)",
+            "San Isidro power station (Chile)",
+            "PMGD HP EL MANZANO (MELIPEUCO)",
+        ],
+    )
+    def test_round_brackets_are_kept(self, raw: str) -> None:
+        """Failure path: round brackets hold former/alternative names and real detail.
+
+        Removing those would drop a name part the locators may match on, so only square
+        brackets count as bookkeeping.
+
+        Args:
+            raw (str): Real name with round brackets that must survive untouched.
+        """
+        assert strip_square_brackets(raw) == ""
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["TER PETROPOWER", "Ventanas power station", "", None],
+        ids=["no_marker", "candidate_name", "empty", "none"],
+    )
+    def test_nothing_to_strip_returns_empty(self, raw: str | None) -> None:
+        """Failure path: a name without a marker yields '', i.e. no variant to add.
+
+        Args:
+            raw (str | None): Raw name with no bookkeeping marker.
+        """
+        assert strip_square_brackets(raw) == ""
+
+    def test_a_name_that_is_only_a_marker_yields_nothing(self) -> None:
+        """Failure path: stripping everything yields '', not a name matching anything.
+
+        An empty variant added to the list would tokenize to no tokens, which
+        `get_weighted_token_score` scores as 0 - but it must never become a variant that
+        an unrelated candidate could win against.
+        """
+        assert strip_square_brackets("[NO_MOSTRAR]") == ""
+
+
+class TestGetWeightedTokenScore:
+    """Tests for get_weighted_token_score.
+
+    The function returns (true_score, debug_score): identical unless a veto fired, in
+    which case true_score is 0.0 while debug_score still reports how close the candidate
+    came -- which is what keeps vetoed rows readable in the review CSV.
+    """
+
+    def test_high_score(self, tok_vocab: NameTokenizer) -> None:
+        """Happy path: Matching a name's tokens against itself scores 100.
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+        """
+        tokens = tok_vocab.weighted_tokenize("Auvere EJ- G1")
+        assert get_weighted_token_score(tokens, tokens) == (100.0, 100.0, 0.0, 0.0)
+
+    def test_high_score_when_partial_with_high_weight(
+        self, tok_vocab: NameTokenizer
+    ) -> None:
+        """Happy path: A strong token match dominates the weighted score.
+
+        A strong-matching discriminative token plus one non-matching low-weight token should
+        still score high, since the low-weight token is suppressed by its small contribution.
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+        """
+        target = tok_vocab.weighted_tokenize("Auvere G1")
+        candidate = tok_vocab.weighted_tokenize("Auvere G7")
+        true_score, *_ = get_weighted_token_score(target, candidate)
+        assert true_score > 80.0
+
+    def test_low_score_when_partial_with_low_weight(
+        self, tok_vocab: NameTokenizer
+    ) -> None:
+        """Happy path: A shared generic token alone must not drive up the score.
+
+        Two unrelated plants sharing only a low-weight generic descriptor must NOT
+        score high -- this is the whole point of the weighting.
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+        """
+        target = tok_vocab.weighted_tokenize("Auvere Elektrijaam")
+        candidate = tok_vocab.weighted_tokenize("Balti Elektrijaam")
+        true_score, *_ = get_weighted_token_score(target, candidate)
+        assert true_score < 50.0
+
+    def test_zero_score_when_empty_inputs(self, tok_plain: NameTokenizer) -> None:
+        """Failure path: An empty token set on either side scores 0, not an error.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+        """
+        empty = tok_plain.weighted_tokenize("")
+        non_empty = tok_plain.weighted_tokenize("Auvere")
+        assert get_weighted_token_score(empty, non_empty) == (0.0, 0.0, 0.0, 0.0)
+        assert get_weighted_token_score(non_empty, empty) == (0.0, 0.0, 0.0, 0.0)
+
+    def test_zero_score_when_only_excluded_tokens(
+        self, tok_plain: NameTokenizer
+    ) -> None:
+        """Failure path: A name made only of excluded tokens carries no evidence at all.
+
+        EXCLUDE_WEIGHT is 0.0, so such a name has a total weight of 0 and must score 0
+        rather than dividing by zero or scoring on generic overlap alone.
+        """
+        target = tok_plain.weighted_tokenize("Unit Block")
+        assert sum(target.weights) == 0.0
+        assert get_weighted_token_score(target, target) == (0.0, 0.0, 0.0, 0.0)
+
+    def test_no_discriminative_token_is_vetoed(self, tok_plain: NameTokenizer) -> None:
+        """Failure path: A name of only generic words cannot be matched, however well it fits.
+
+        "hydro power plant" agrees perfectly with any plant of that type, so a high
+        similarity says nothing about identity.
+
+        Both scores are 0.0 here, unlike the other veto: this one short-circuits before
+        scoring, since no candidate could rescue a target that names nothing. The review
+        CSV therefore shows no runners-up for such a target -- read target.weighted_tokens
+        instead, which shows the absent discriminator directly.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+        """
+        target = tok_plain.weighted_tokenize("hydro power plant")
+        candidate = tok_plain.weighted_tokenize("random hydro power plant")
+
+        assert get_weighted_token_score(target, candidate) == (0.0, 0.0, 0.0, 0.0)
+
+    def test_unmatched_discriminative_token_is_vetoed(
+        self, tok_plain: NameTokenizer
+    ) -> None:
+        """Failure path: Generic agreement cannot carry a name whose real token is absent.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+        """
+        target = tok_plain.weighted_tokenize("Auvere power plant")
+        candidate = tok_plain.weighted_tokenize("Balti power plant")
+
+        scores = get_weighted_token_score(target, candidate)
+        true_score, debug_score = scores.score, scores.debug_score
+        assert true_score == 0.0
+        assert debug_score > 0.0
+
+    def test_unmatched_generic_token_does_not_dilute(
+        self, tok_plain: NameTokenizer
+    ) -> None:
+        """Happy path: Boilerplate the candidate lacks must not cost a matched name.
+
+        A candidate missing "power station" says nothing about whether it is the same
+        plant, so those tokens drop out of the denominator rather than dragging the score.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+        """
+        target = tok_plain.weighted_tokenize("Auvere power station")
+        candidate = tok_plain.weighted_tokenize("Auvere")
+
+        true_score, *_ = get_weighted_token_score(target, candidate)
+        assert true_score == 100.0
+
+    def test_unmatched_designator_does_dilute(self, tok_plain: NameTokenizer) -> None:
+        """Happy path: A unit number the candidate contradicts DOES cost the score.
+
+        Unlike boilerplate, a differing unit designator is evidence: "Maua 3" is not
+        "Maua 6". It only counts when the candidate has a designator of its own, so a
+        plant-level candidate (no unit number at all) is not penalized for lacking one.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+        """
+        target = tok_plain.weighted_tokenize("Auvere 6")
+        wrong_unit = tok_plain.weighted_tokenize("Auvere 3")
+        plant_level = tok_plain.weighted_tokenize("Auvere")
+
+        assert get_weighted_token_score(target, wrong_unit).score < 100.0
+        assert get_weighted_token_score(target, plant_level).score == 100.0
+
+    @pytest.mark.parametrize(
+        "floor, expect_match",
+        [(50.0, True), (100.0, False)],
+        ids=["lenient_code_style", "strict_real_style"],
+    )
+    def test_fuzz_ratio_floor_switches_strictness(
+        self, tok_plain: NameTokenizer, floor: float, expect_match: bool
+    ) -> None:
+        """Happy path: The floor is what makes "real" and "code" operators behave differently.
+
+        "aracati"/"maracai" are different places that rapidfuzz rates 85.7 -- accepted for
+        code-style names full of abbreviations, refused where names are real words.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+            floor (float): Minimum rapidfuzz ratio for a token pair to count.
+            expect_match (bool): Whether the pair should score above zero at that floor.
+        """
+        target = tok_plain.weighted_tokenize("aracati")
+        candidate = tok_plain.weighted_tokenize("maracai")
+
+        true_score, *_ = get_weighted_token_score(target, candidate, floor)
+        assert (true_score > 0.0) is expect_match
+
+    def test_score_is_rounded(self, tok_plain: NameTokenizer) -> None:
+        """Happy path: A conceptually whole score comes back whole, not one ULP off.
+
+        The score is a weighted average over differing token weights, so e.g. 110.0/1.1
+        evaluates to 99.99999999999999. Unrounded, two candidates that should tie differ in
+        the last bits, and the sort settles on that instead of reading any tie-break
+        (s. `NameMatcher._rank_candidate`).
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+        """
+        # one discriminator + one generic, both matched: (100 + 0.1*100) / (1 + 0.1)
+        target = tok_plain.weighted_tokenize("Auvere power")
+        assert (110.0 / 1.1) != 100.0  # the raw division this performs
+
+        true_score, *_ = get_weighted_token_score(target, target, 100.0)
+        assert true_score == 100.0
+
+
+class TestRemainingCandidateWeight:
+    """Tests for get_weighted_token_score's third return value (the tie-break)."""
+
+    def test_fully_accounted_candidate_has_no_remainder(
+        self, tok_plain: NameTokenizer
+    ) -> None:
+        """Happy path: A candidate the target covers entirely leaves 0.0 behind.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+        """
+        tokens = tok_plain.weighted_tokenize("Auvere power plant")
+
+        assert get_weighted_token_score(tokens, tokens, 100.0).remaining_weight == 0.0
+
+    @pytest.mark.parametrize(
+        "candidate_name, expected_remainder",
+        [
+            ("Auvere power plant", 0.0),
+            ("Auvere power plant station", DEMOTE_WEIGHT),
+            ("Balti Auvere power plant", FULL_WEIGHT),
+            ("Balti Auvere power plant station", FULL_WEIGHT + DEMOTE_WEIGHT),
+        ],
+        ids=["nothing_left", "generic_left", "discriminator_left", "both_left"],
+    )
+    def test_remainder_is_weighted_not_counted(
+        self, tok_plain: NameTokenizer, candidate_name: str, expected_remainder: float
+    ) -> None:
+        """Happy path: Leftover tokens cost their own weight, not one count each.
+
+        An extra place name is damning, an extra generic word nearly free -- so this is
+        "less leftover meaning wins", not "fewer leftover words wins". Counting instead
+        would prefer a bare "Mauá" over "Mauá 6 power plant".
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+            candidate_name (str): Candidate carrying the leftover token(s).
+            expected_remainder (float): Summed weight the candidate should leave behind.
+        """
+        target = tok_plain.weighted_tokenize("Auvere power plant")
+        candidate = tok_plain.weighted_tokenize(candidate_name)
+
+        remainder = get_weighted_token_score(target, candidate, 100.0).remaining_weight
+        assert remainder == pytest.approx(expected_remainder)
+
+    def test_a_target_token_accounts_for_only_one_candidate_token(
+        self, tok_plain: NameTokenizer
+    ) -> None:
+        """Failure path: A spent target token cannot excuse a second candidate token.
+
+        "timepoint" rates 74 against "moneypoint" -- enough to pass a lenient floor. If
+        "moneypoint" could account for both candidate tokens, "Moneypoint Timepoint" would
+        leave nothing behind and beat GEM's "Moneypoint power station" (two generic words),
+        which is what happened to three Moneypoint units in an ENTSO-E run.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+        """
+        target = tok_plain.weighted_tokenize("Moneypoint")
+        twin = tok_plain.weighted_tokenize("Moneypoint Timepoint")
+        generics = tok_plain.weighted_tokenize("Moneypoint power station")
+
+        # "timepoint" passes the floor on its own, so only the claim rule keeps it counted
+        assert get_weighted_token_score(target, twin, 60.0).score == 100.0
+        assert (
+            get_weighted_token_score(target, twin, 60.0).remaining_weight == FULL_WEIGHT
+        )
+        assert get_weighted_token_score(
+            target, generics, 60.0
+        ).remaining_weight == pytest.approx(2 * DEMOTE_WEIGHT)
+
+    @pytest.mark.parametrize(
+        "target_name, candidate_name",
+        [("", "Auvere"), ("Auvere", ""), ("Unit Block", "Unit Block")],
+        ids=["empty_target", "empty_candidate", "zero_weight_target"],
+    )
+    def test_no_remainder_without_a_score(
+        self, tok_plain: NameTokenizer, target_name: str, candidate_name: str
+    ) -> None:
+        """Failure path: The paths that short-circuit the score report no remainder either.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+            target_name (str): Name to tokenize as the target.
+            candidate_name (str): Name to tokenize as the candidate.
+        """
+        target = tok_plain.weighted_tokenize(target_name)
+        candidate = tok_plain.weighted_tokenize(candidate_name)
+
+        assert get_weighted_token_score(target, candidate, 100.0) == (
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+
+
+class TestMissedIdentityWeight:
+    """Tests for get_weighted_token_score's `missed_weight` (the first tie-break)."""
+
+    def test_a_missed_generic_token_costs_nothing(
+        self, tok_plain: NameTokenizer
+    ) -> None:
+        """Happy path: a candidate not naming a generic word is no worse for it.
+
+        A candidate saying nothing about "power" or "plant" tells us nothing about whether
+        it is the same EGE, which is why the score already drops unmatched generic target
+        tokens from its denominator.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+        """
+        target = tok_plain.weighted_tokenize("Auvere power plant")
+        candidate = tok_plain.weighted_tokenize("Auvere")
+
+        assert get_weighted_token_score(target, candidate, 100.0).missed_weight == 0.0
+
+    @pytest.mark.parametrize(
+        "target_name, expected_missed",
+        [
+            ("Auvere power plant", 0.0),
+            ("Auvere 6 power plant", DESIGNATOR_WEIGHT),
+            ("Balti Auvere power plant", FULL_WEIGHT),
+            ("Balti Auvere 6 power plant", FULL_WEIGHT + DESIGNATOR_WEIGHT),
+        ],
+        ids=["nothing_missed", "designator", "discriminator", "both"],
+    )
+    def test_only_identity_bearing_tokens_are_missed(
+        self, tok_plain: NameTokenizer, target_name: str, expected_missed: float
+    ) -> None:
+        """Happy path: a missed discriminator or designator costs its own weight.
+
+        These carry the EGE's identity, so a candidate silent on one is a worse fit -- CEN
+        matched "PMGD PFV LA ESPERANZA II" to "PFV Esperanza", 913 km from the plant whose
+        name has both the "la" and the "ii".
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+            target_name (str): Target carrying the token(s) the candidate cannot cover.
+            expected_missed (float): Weight the candidate should be charged.
+        """
+        candidate = tok_plain.weighted_tokenize("Auvere power plant")
+        target = tok_plain.weighted_tokenize(target_name)
+
+        missed = get_weighted_token_score(target, candidate, 100.0).missed_weight
+        assert missed == pytest.approx(expected_missed)
+
+
+# ----------------------------------
+# Tests - NameTokenizer vocabulary construction
+# ----------------------------------
+class TestNameTokenizerVocabulary:
+    """Tests for how NameTokenizer builds its exclude/demote lookups."""
+
+    def test_name_mapping_is_optional(self, tok_plain: NameTokenizer) -> None:
+        """Happy path: Without a name_mapping only the generic token sets apply.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+        """
+        assert "elektrijaam" not in tok_plain._demote_vocabulary
+        assert "power" in tok_plain._demote_words  # from GENERIC_ENERGY_TOKENS
+
+    def test_vocabulary_keys_are_normalized(self, tok_vocab: NameTokenizer) -> None:
+        """Happy path: Keys are normalized on build, so entries stay reachable.
+
+        Lookups happen against already-normalized tokens, so a key written in its natural
+        spelling ("Kraftværk") is only findable because __init__ normalizes it too.
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+        """
+        assert "kraftvaerk" in tok_vocab._demote_vocabulary
+        assert "Kraftværk" not in tok_vocab._demote_vocabulary
+        assert tok_vocab.tokenize("Skærbæk Kraftværk") == [
+            "skaerbaek",
+            "power",
+            "plant",
+        ]
+
+    def test_demote_words_are_built_from_values_not_keys(
+        self, tok_vocab: NameTokenizer
+    ) -> None:
+        """Regression pin: Expansion *outputs* must be demoted, not the keys they came from.
+
+        tokenize() replaces a key with its value, so weighting the key would never fire.
+        The word-level closure over the values is what stops boilerplate emitted by an
+        expansion ("pumped", "power", "plant") from counting as a discriminative name.
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+        """
+        assert "pumped" in tok_vocab._demote_words  # only ever appears inside a value
+        assert "pumpspeicherkraftwerk" not in tok_vocab._demote_words  # the key itself
+
+    def test_multi_word_keys_are_unreachable(self, tok_vocab: NameTokenizer) -> None:
+        """Failure path: A key containing a space can never match a token.
+
+        Lookup happens per whitespace-split token, so multi-word keys are dead config.
+        Pinned so the constraint is visible rather than silently swallowed.
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+        """
+        assert "barragem da usina" in tok_vocab._demote_vocabulary
+        assert "dam" not in tok_vocab.tokenize("Barragem da Usina Tucuruí")
+
+    def test_caches_are_not_shared_between_instances(self) -> None:
+        """Failure path: Each tokenizer owns its cache, so per-init state cannot leak."""
+        first, second = NameTokenizer(TEST_VOCAB), NameTokenizer(TEST_VOCAB)
+        first.weighted_tokenize("Auvere EJ")
+        assert second._weighted_cache == {}
+
+
+# ----------------------------------
+# Tests - NameTokenizer.tokenize
+# ----------------------------------
+class TestNameTokenizerTokenize:
+    """Tests for NameTokenizer.tokenize."""
+
+    def test_split_and_expand_vocab_keys(self, tok_vocab: NameTokenizer) -> None:
+        """Happy path: Exact vocabulary keys expand to their (multi-word) meaning.
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+        """
+        assert tok_vocab.tokenize("Auvere EJ- G1") == [
+            "auvere",
+            "power",
+            "plant",
+            "g1",
+        ]
+
+    @pytest.mark.parametrize("name", ["unit", "block", "generator"])
+    def test_excluded_tokens_are_kept_whole(
+        self, tok_plain: NameTokenizer, name: str
+    ) -> None:
+        """Regression pin: An excluded token stays one token instead of one per character.
+
+        `list.extend` on a str iterates its characters, so "unit" once came back as
+        ['u', 'n', 'i', 't'].
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+            name (str): Name that is itself a single excluded token.
+        """
+        assert tok_plain.tokenize(name) == [name]
+
+    def test_strip_glued(self, tok_plain: NameTokenizer) -> None:
+        """Happy path: A glued unit word is stripped off a non-vocabulary token.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+        """
+        assert tok_plain.tokenize("hppriverunit") == ["hppriver"]
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Solaris", "Windsor", "Gaspar", "Plantation"],
+    )
+    def test_strip_glued_no_energy_toks(
+        self, tok_vocab: NameTokenizer, name: str
+    ) -> None:
+        """Regression pin: Only unit designators may be stripped from inside a token.
+
+        _strip_glued uses GENERIC_UNIT_TOKENS alone, not GENERIC_ENERGY_TOKENS (e.g. "solar")
+        Otherwise, place names could be mutilated (e.g. "Solaris" -> "is".)
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+            name (str): Real name containing a generic energy word as a substring.
+        """
+        assert tok_vocab.tokenize(name) == [name.lower()]
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Svelgen", "Dormagen", "Groningen", "generation", "cogen", "hydrogen"],
+        ids=["no_place", "de_place", "nl_place", "word", "compound", "fuel"],
+    )
+    def test_strip_glued_no_short_toks(
+        self, tok_plain: NameTokenizer, name: str
+    ) -> None:
+        """Regression pin: Vocabulary words of <= 3 chars may not be stripped from a token.
+
+        "gen" and "g" are GENERIC_UNIT_TOKENS, but also ordinary word and place name endings.
+        If used, place names could be mutilated ("Svelgen" -> "Svel"). Affects 4300 GEM names.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+            name (str): Real name starting or ending in a short generic unit token.
+        """
+        assert tok_plain.tokenize(name) == [name.lower()]
+
+    @pytest.mark.parametrize(
+        "name",
+        ["United", "Unity", "Conjuncta", "Groupama", "Blockheizkraftwerk"],
+        ids=["unit_ed", "unit_y", "conj", "group", "block"],
+    )
+    def test_strip_glued_not_from_start(
+        self, tok_plain: NameTokenizer, name: str
+    ) -> None:
+        """Regression pin: A generic unit word may only be stripped off a token's END.
+
+        A leading GENERIC_UNIT_TOKENS is nearly always the start of a real name, so stripping
+        makes it nonsensical ("United" -> "ed"). Affects 115 GEM tokens, only one of which is
+        an actual compound ("blockheizkraftwerk" -> added to entsoe mappings).
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+            name (str): Real name beginning with a generic unit word.
+        """
+        assert tok_plain.tokenize(name) == [name.lower()]
+
+    @pytest.mark.parametrize(
+        "name", ["cogenerator", "cunit"], ids=["generator_co", "unit_c"]
+    )
+    def test_strip_glued_rest_is_usable(
+        self, tok_plain: NameTokenizer, name: str
+    ) -> None:
+        """Regression pin: A strip leaving fewer than 3 characters behind is refused.
+
+        A 1-2 character remainder means the "generic" was part of a full name, not glued on,
+        and the remainder has no meaning. This prevents it being kept as a discriminative tok.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+            name (str): Real name whose generic suffix would leave too little behind.
+        """
+        assert tok_plain.tokenize(name) == [name.lower()]
+
+    @pytest.mark.parametrize(
+        "name, expected_output",
+        [
+            ("hppriverunit", ["hppriver"]),
+            ("inbetriebnahmeblock", ["inbetriebnahme"]),
+            ("progroup", ["pro"]),
+        ],
+        ids=["unit", "block", "group"],
+    )
+    def test_glue_stripping_still_strips_valid_suffixes(
+        self, tok_plain: NameTokenizer, name: str, expected_output: list[str]
+    ) -> None:
+        """Happy path: A trailing generic leaving >= 3 chars behind is still stripped.
+
+        Counterpart to the two pins above, so that neither can be satisfied by disabling
+        glue-stripping altogether.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+            name (str): Name with a genuinely glued trailing generic unit word.
+            expected_output (list[str]): Expected tokens.
+        """
+        assert tok_plain.tokenize(name) == expected_output
+
+    @pytest.mark.parametrize(
+        "name",
+        ["riverside", "auvere", "unit"],
+        ids=["no_overlap", "only_short_words_match", "is_vocab_word_itself"],
+    )
+    def test_no_split(self, tok_plain: NameTokenizer, name: str) -> None:
+        """Happy path: No split/stripping if nothing matches or a special case applies.
+
+        1. The name has no overlap with the vocabulary.
+        2. Only short words match (nothing >= 3 letters) -> no accidental stripping!
+        3. The name itself is a whole vocabulary word.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+            name (str): The name that is both input and output of tokenization.
+        """
+        assert tok_plain.tokenize(name) == [name]
+
+    @pytest.mark.parametrize("name", [None, "   ", ""])
+    def test_no_tokens_when_empty(self, tok_plain: NameTokenizer, name: str) -> None:
+        """Failure path: Missing/blank names tokenize to an empty list, not an error.
+
+        Args:
+            tok_plain (NameTokenizer): Tokenizer without a name_mapping.
+            name (str): Missing/blank name to provide as input.
+        """
+        assert tok_plain.tokenize(name) == []
+
+
+# ----------------------------------
+# Tests - NameTokenizer weighting
+# ----------------------------------
+class TestNameTokenizerWeights:
+    """Tests for NameTokenizer token weighting."""
+
+    @pytest.mark.parametrize(
+        "name, token, expected_output",
+        [
+            ("Auvere", "auvere", FULL_WEIGHT),  # discriminative place name
+            ("Sloe Power Station", "power", DEMOTE_WEIGHT),  # generic energy token
+            ("Auvere EJ", "plant", DEMOTE_WEIGHT),  # emitted by an expansion
+            ("Pumpspeicherkraftwerk X", "pumped", DEMOTE_WEIGHT),  # value-only word
+            ("Auvere G1", "g1", DESIGNATOR_WEIGHT),  # letter+digit unit designator
+            ("Maua Bloco 6", "6", DESIGNATOR_WEIGHT),  # bare unit number
+            ("Maua Bloco 5A", "5a", DESIGNATOR_WEIGHT),  # digit+letter unit designator
+            ("Santana III", "iii", DESIGNATOR_WEIGHT),  # roman unit numeral
+            ("Sloe unit 20", "unit", EXCLUDE_WEIGHT),  # generic unit token
+        ],
+    )
+    def test_get_weight(
+        self, tok_vocab: NameTokenizer, name: str, token: str, expected_output: float
+    ) -> None:
+        """Happy path: Each weight tier is assigned to the right kind of token.
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+            name (str): Name to tokenize and weight.
+            token (str): Token expected in the result.
+            expected_output (float): Expected weight of that token.
+        """
+        wt = tok_vocab.weighted_tokenize(name)
+        assert dict(zip(wt.tokens, wt.weights))[token] == expected_output
+
+    def test_real_token_outweighs_generic_ones(self, tok_vocab: NameTokenizer) -> None:
+        """Happy path: One real name outweighs any number of generic tokens around it.
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+        """
+        target_wt = tok_vocab.weighted_tokenize("Auvere EJ")
+        cand_wt = tok_vocab.weighted_tokenize("auvere")
+        true_score, *_ = get_weighted_token_score(target_wt, cand_wt)
+        assert true_score > 80.0
+
+
+# ----------------------------------
+# Tests - NameTokenizer cache
+# ----------------------------------
+class TestNameTokenizerCache:
+    """Tests for NameTokenizer's weighted-token cache."""
+
+    def test_cache_returns_repeatedly(self, tok_vocab: NameTokenizer) -> None:
+        """Happy path: The cache (read-through) returns the same object each time.
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+        """
+        first = tok_vocab.weighted_tokenize("Auvere EJ")
+        assert tok_vocab.weighted_tokenize("Auvere EJ") is first
+
+    def test_cache_key_is_normalized_name(self, tok_vocab: NameTokenizer) -> None:
+        """Happy path: Different spellings resolving to one normalization share an entry.
+
+        Args:
+            tok_vocab (NameTokenizer): Tokenizer carrying TEST_VOCAB.
+        """
+        first = tok_vocab.weighted_tokenize("Auvere EJ")
+        assert tok_vocab.weighted_tokenize("  auvere   ej  ") is first
+        assert list(tok_vocab._weighted_cache) == ["auvere ej"]

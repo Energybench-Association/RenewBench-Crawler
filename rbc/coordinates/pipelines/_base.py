@@ -1,0 +1,867 @@
+"""Shared base for per-operator coordinate-finding pipelines.
+
+Defines BasePipeline, which owns everything identical across pipelines:
+- constructor/operator-metadata resolution,
+- the run_pipeline() step runner, and
+- the "_step_*"/helper methods shared by all pipelines
+  (load & dedupe, fuel-type mapping, fuzzy matching, fuel-type validation, finalize).
+
+Concrete pipelines (see other modules in `pipelines`) inherit this and add their own
+pipeline-specific "_step_*" methods & a STEPS list declaring the order to run them in.
+
+This class shouldn't be instantiated directly -- its __init__ raises TypeError if you try.
+"""
+
+from functools import reduce
+from pathlib import Path
+from pprint import pformat
+from typing import Any, cast
+
+import country_converter as coco
+import pandas as pd
+from loguru import logger
+
+from rbc.coordinates.load import Run
+from rbc.coordinates.mappings import (
+    OFFICIAL_LOCATOR,
+    OPERATOR_COLUMNS,
+    OPERATOR_METADATA,
+    SYSOP_FUEL_COL,
+    SYSOP_FUEL_SUB_COL,
+    SYSOP_NAME_COL,
+    SYSOP_REGION_COL,
+)
+from rbc.coordinates.match_schema import LOCATOR_RELIABILITY, MatchCandidate
+from rbc.coordinates.matcher import NameMatcher
+from rbc.coordinates.resources.gem import GEMLocator
+from rbc.coordinates.resources.natural_earth import RegionRegistry
+from rbc.coordinates.resources.osmpp import OSMPPLocator
+from rbc.coordinates.resources.overpass import OverpassLocator
+from rbc.coordinates.resources.ppm import PPMLocator
+from rbc.coordinates.utils.fuel import classify_fueltype_match
+from rbc.coordinates.utils.tokenizer import NameTokenizer
+from rbc.coordinates.utils.values import is_missing, normalize_name, strip_str
+from rbc.energy.entsoe.mappings import ACTIVE_ZONES_METADATA
+from rbc.energy.utils import MissingDataError
+
+# the operator's own coordinates take precedence over every matched locator's
+SORTED_LOCATORS = [
+    OFFICIAL_LOCATOR,
+    *sorted(
+        LOCATOR_RELIABILITY, key=lambda loc: LOCATOR_RELIABILITY[loc], reverse=True
+    ),
+]
+
+
+class BasePipeline:
+    """Shared location/coordinate finding pipeline steps for a single operator directory.
+
+    NOTE:   Abbreviations are used to describe which "energy-generating entity" (EGE),
+            or more colloquially: "power plant", is being handled. These are defined
+            by the source they come from.
+
+    - EGEs from the energy generation data sources      = EGEs to find coordinates for
+        - System operators (entsoe, aemo, ...):         sysop
+    - EGEs from the coordinate-finding sources:         = EGEs we have coordinates of
+        - OpenStreetMap Overpass Turbo API:             osm
+        - "Global Energy Monitor" files:                gem
+        - power plant databases in Github packages:     ppdb
+            - "powerplantmatching" (only Europe):           ppm
+            - "osm-powerplants" (global):                   osmpp
+
+    Not to be instantiated directly --- use subclasses (e.g. EntsoePipeline, DefaultPipeline).
+    """
+
+    STEPS: list[str] = []
+
+    def __init__(
+        self,
+        run: Run,
+        output_dir: Path | None,
+        gem_loc: GEMLocator | None,
+        ppdb_loc: PPMLocator | OSMPPLocator | None,
+        osm_loc: OverpassLocator | None = None,
+        region_reg: RegionRegistry | None = None,
+    ) -> None:
+        """Initialize BasePipeline class.
+
+        Args:
+            run (Run): The operator's raw rows and what identifies them (s. `load_runs`). The
+                rows are deduped to one per EGE by the first step, so a caller can hand
+                over its generation data as it is.
+            output_dir (Path, optional): Path to the directory where any output files may be
+                saved. If None, output files are not saved.
+            gem_loc (GEMLocator, optional): Pre-built GEM locator to reuse. If None,
+                GEM is disabled.
+            ppdb_loc (PPMLocator | OSMPPLocator optional): Pre-built locator to reuse the
+                European PPM CSV or global OSMPP CSV. If None, CSV-based location is disabled.
+            osm_loc (OverpassLocator, optional): Pre-built Overpass locator to reuse
+                (loads each country only once per run). If None, OSM contributes no
+                candidates.
+            region_reg (RegionRegistry, optional): Pre-built region registry to reuse
+                (reads the admin-1 data only once per run). If None, the region
+                validation step is skipped.
+
+        Raises:
+            TypeError: If this class is instantiated instead of using a subclass.
+            ValueError: If the operator is unknown, its metadata is unusable, or a
+                multi-country operator's run has no (or an unknown) zone.
+        """
+        if type(self) is BasePipeline:
+            raise TypeError(
+                "BasePipeline must be subclassed, not instantiated directly!"
+            )
+
+        # validation runs after every matching step, so it also covers inherited matches
+        self.ALL_STEPS: list[str] = [
+            "_step_dedupe",
+            "_step_prepare_matching",
+            *self.STEPS,
+            "_step_validate_fueltype",
+            "_step_validate_region",
+            "_step_finalize",
+        ]
+
+        self.run = run
+        self.sysop = run.sysop
+
+        self.output_dir = output_dir
+        if self.output_dir:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.sysop not in OPERATOR_METADATA:
+            raise ValueError(f"No metadata defined for operator '{self.sysop}'!")
+        meta = OPERATOR_METADATA[self.sysop]
+
+        self.country = meta["country"]
+        self.name_col = meta["name_col"]
+        self.name_str_style = meta.get("name_str_style", "code")
+        raw_name_mapping = meta.get("name_mapping", {})
+        self.code_col = meta.get("code_col")
+        self.fuel_col = meta.get("fuel_col")
+        self.fuel_sub_col = meta.get("fuel_sub_col")
+        self.fuel_mapping = meta.get("fuel_mapping", {})
+        self.region_col = meta.get("region_col")
+
+        if self.name_col == "":
+            raise ValueError(
+                f"No 'name_col' name defined in OPERATOR_METADATA for "
+                f"'{[self.sysop]}':\n{meta}"
+            )
+
+        if self.fuel_col is None and self.fuel_sub_col is not None:
+            raise ValueError(
+                f"fuel_sub_col '{self.fuel_sub_col}' defined without a fuel_col in "
+                f"OPERATOR_METADATA for '{[self.sysop]}'! No sub allowed without a fuel!"
+            )
+
+        self.country_code: str | None = None
+        if self.country == "Europe":
+            zone_meta = ACTIVE_ZONES_METADATA.get(run.zone or "")
+            if zone_meta is None:
+                raise ValueError(
+                    f"'{self.sysop}' spans several countries, so it needs a known zone to "
+                    f"resolve one by - got '{run.zone}' (s. ACTIVE_ZONES_METADATA)."
+                )
+            self.country = str(zone_meta["country"])
+            self.country_code = str(zone_meta["alpha2"])
+            nested_mapping = cast(dict[str, dict[str, str]], raw_name_mapping)
+            self.name_mapping = nested_mapping.get(self.country_code, {})
+        else:
+            self.country_code = coco.convert(names=self.country, to="ISO2")
+            self.name_mapping = cast(dict[str, str], raw_name_mapping)
+
+        if self.country_code == "not found":
+            self.country_code = None
+            logger.warning(
+                f"No country code found for {self.country}! OSM matching not possible."
+            )
+
+        # Map: operator's original column headers → column headers for output storing
+        meta_dict: dict[str, Any] = dict(meta)  # convert for variable key access
+        self.sysop_cols: dict[str, str] = {
+            meta_dict[attr]: header
+            for attr, header in OPERATOR_COLUMNS.items()
+            if meta_dict.get(attr)
+        }
+
+        # Pre-build tokenizer for later use
+        self.tok: NameTokenizer = NameTokenizer(
+            name_mapping={
+                **self.fuel_mapping,
+                **self.name_mapping,  # takes precedence (overrides same fuel_mapping keys)
+            }
+        )
+
+        # Pre-build expensive-to-construct items: locators
+        self.gem_loc: GEMLocator | None = gem_loc
+        self.ppdb_loc: PPMLocator | OSMPPLocator | None = ppdb_loc
+        self.osm_loc: OverpassLocator | None = osm_loc
+        self.region_reg: RegionRegistry | None = region_reg
+
+        logger.debug(
+            f"{type(self).__name__} initialized for '{self.sysop}' ({self.country})\n"
+            f"{pformat(vars(self), indent=4, sort_dicts=False)}"
+        )
+
+        # For logging status updates:
+        self.unique_targets: int = 0  # total number of unique EGEs in operator df
+        self._matched_so_far: int = 0  # running count of EGEs matched so far
+
+    def run_pipeline(self) -> pd.DataFrame:
+        """Run this pipeline's ALL_STEPS end-to-end.
+
+        Threads one DataFrame through each step (`self.STEPS`, in order) in turn.
+
+        Returns:
+            pd.DataFrame: Enriched dataframe, one row per unique generation unit.
+        """
+        df = pd.DataFrame()
+        for step_name in self.ALL_STEPS:
+            df = getattr(self, step_name)(df)
+
+            # stop if the first step didn't return a populated df with which to continue work
+            if step_name == "_step_dedupe" and len(df) == 0:
+                break
+
+        return df
+
+    # ------------------------------------------------------------------
+    # DATAFRAME COLUMN SCHEMA (shared across steps)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _create_match_method_columns(df: pd.DataFrame) -> None:
+        """Create all columns generally required by the matching methods/algorithms.
+
+        This method ensures the required columns lat/lon/match_method for the matching
+        methods (e.g. fuzzy name via ppdb.*/gem.*/osm.*) are created to prevent KeyErrors.
+
+        Args:
+            df (pd.DataFrame): The working dataframe of SysOp (target EGE) data.
+        """
+        for loc in SORTED_LOCATORS:  # currently: "official", "gem", "ppdb", "osm"
+            for col in [f"{loc}.lat", f"{loc}.lon", f"{loc}.match_method"]:
+                if col not in df.columns:
+                    df[col] = None
+
+        if "sibling_of" not in df.columns:  # for inheritance info in sibling fallback
+            df["sibling_of"] = None
+
+    @staticmethod
+    def _matched_column(df: pd.DataFrame, column: str) -> pd.Series:
+        """Best column value from the most reliable locator that actually matched each row.
+
+        Only "<loc>.lat"/"<loc>.lon"/"<loc>.match_method" are guaranteed to exist, so other
+        columns are skipped if a <loc> never created it. ``column`` values are masked using
+        <loc> coords ("<loc>.lat" != None), so only rows with an actual match return values.
+
+        Args:
+            df (pd.DataFrame): The working dataFrame of SysOp (target EGE) data.
+            column (str): The column to find values for (e.g. 'lat', 'lon', 'fueltype', ...).
+
+        Returns:
+            pd.Series: Best-so-far matches for the specific column.
+        """
+        return reduce(
+            lambda a, b: a.combine_first(b),
+            (
+                df[f"{loc}.{column}"].where(df[f"{loc}.lat"].notna())
+                if f"{loc}.{column}" in df.columns
+                else pd.Series(pd.NA, index=df.index, dtype=object)  # empty fallback
+                for loc in SORTED_LOCATORS  # sorted by reliability
+            ),
+        )
+
+    @classmethod
+    def _still_unmatched(cls, df: pd.DataFrame) -> pd.Series:
+        """Check which rows / target EGEs have no match from any locator yet.
+
+        Args:
+            df (pd.DataFrame): The working dataframe of SysOp (target EGE) data.
+
+        Returns:
+            pd.Series: List of bool values, True if a target EGE is still unmatched else False.
+        """
+        return cls._matched_column(df, column="lat").isna()
+
+    @staticmethod
+    def _matched_officially(df: pd.DataFrame) -> pd.Series:
+        """Check which target EGEs carry their own official coordinates.
+
+        These come from the same source as the EGE data, so validation never vetoes them.
+        Official coordinates inherited from a sibling are an inference, so they don't count.
+
+        Args:
+            df (pd.DataFrame): The working dataframe of SysOp (target EGE) data.
+
+        Returns:
+            pd.Series: List of bool values, True if a target EGE has its own official ones.
+        """
+        return df[f"{OFFICIAL_LOCATOR}.lat"].notna() & df["sibling_of"].isna()
+
+    # ------------------------------------------------------------------
+    # SHARED STEP METHODS (run by every pipeline)
+    # ------------------------------------------------------------------
+    def _step_dedupe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """INITIALIZATION STEP --- Dedupe the raw SysOp rows to one row per unique EGE.
+
+        EGE identity is defined by the code_col value where it exists and name_col where not
+        - per row, since some EGEs don't have one (e.g. CEN provides none for its batteries).
+        Rows with neither name nor code are dropped (can't be matched!). Fuel values are
+        mapped and the distinct subtypes an EGE reports across its rows are combined into one
+        sorted value (e.g. "diesel oil, natural gas") - dedupe would otherwise keep whichever
+        came first, and an unsorted value would depend on the input's row order.
+        The fuel veto/classification compares token sets, so combining widens the overlap.
+
+        Args:
+            df (pd.DataFrame): The empty dataframe to be populated here. Unused input is
+                required so that ``run_pipeline`` functions properly.
+
+        Returns:
+            df_unique (pd.DataFrame): The working dataframe (now with unique EGs)
+
+        Raises:
+            MissingDataError: If a column named in the operator's metadata is absent.
+        """
+        df_all = self.run.df.copy()  # copied: deduping adds and sorts columns
+        if df_all.empty:
+            logger.warning(f"[{self.run.name}] No rows to find coordinates for.")
+            return pd.DataFrame()
+
+        # define relevant columns and ensure they actually exist in the operator data
+        relevant_cols = []
+        for col in self.sysop_cols.keys():  # go through original sysop's column names
+            if col not in df_all.columns:
+                raise MissingDataError(
+                    f"[{self.run.name}] No '{col}' column in the data!"
+                )
+            relevant_cols.append(col)
+
+        # get one row per EGE: code identifies it, name stands in where a code is missing.
+        # (deduping on code alone would collapse every row where code_col=NaN into one!)
+        dedupe_key = "_dedupe_key"
+        if self.code_col:
+            codes = df_all[self.code_col]
+            no_codes = codes.map(is_missing)
+            df_all[dedupe_key] = codes.where(~no_codes, df_all[self.name_col])
+            if named := int(df_all.loc[no_codes, dedupe_key].nunique()):
+                logger.warning(
+                    f"[{self.run.name}] {named} EGEs have no code in '{self.code_col}'"
+                    f" - identified by name value in '{self.name_col}' instead."
+                )
+        else:
+            df_all[dedupe_key] = df_all[self.name_col]
+
+        # remove any EGEs that have no dedupe_key (no code or name!)
+        no_keys = df_all[dedupe_key].map(is_missing)
+        if no_keys.any():
+            logger.warning(
+                f"[{self.run.name}] Dropping {int(no_keys.sum())} of {len(df_all)} "
+                f"row(s) with neither a code nor a name - no identity to count EGEs by!"
+            )
+            df_all = df_all[~no_keys]
+
+        # normalized keys, so a lookup can't miss on case/accents (as NameTokenizer does)
+        if self.fuel_mapping:
+            fuel_mapping = {normalize_name(k): v for k, v in self.fuel_mapping.items()}
+            for fuel_col in (self.fuel_col, self.fuel_sub_col):
+                if fuel_col and fuel_col in df_all.columns:
+                    df_all[fuel_col] = df_all[fuel_col].map(
+                        lambda x: fuel_mapping.get(normalize_name(x) or "")
+                    )
+
+        # keep every subtype an EGE reports (e.g. CEN's per-configuration rows)
+        if self.fuel_sub_col and self.fuel_sub_col in df_all.columns:
+            df_all[self.fuel_sub_col] = df_all.groupby(dedupe_key, dropna=False)[
+                self.fuel_sub_col
+            ].transform(lambda s: ", ".join(sorted(set(s.dropna()))) or None)
+
+        # Operators may report the same EGE with & without its name, so define the unique
+        # winner by sorting (named before nameless) & code existence, not appearance
+        if self.code_col:
+            unnamed = df_all[self.name_col].isna()
+            df_all = df_all.sort_values(
+                by=self.name_col, key=lambda _: unnamed, kind="stable"
+            )
+
+        # official coordinates the caller added are constant per EGE, so they ride along
+        official = [c for c in df_all.columns if c.startswith(f"{OFFICIAL_LOCATOR}.")]
+        df_unique = (
+            df_all[[*relevant_cols, *official, dedupe_key]]
+            .drop_duplicates(subset=[dedupe_key])
+            .drop(columns=dedupe_key)
+            .reset_index(drop=True)
+        )
+
+        self.unique_targets = len(df_unique)
+        unnamed = int(df_unique[self.name_col].isna().sum())
+        self._log_step_result(
+            "Dedupe",
+            matched=self.unique_targets - unnamed,
+            note=(
+                f"from {len(df_all)} row(s)"
+                + (f"; {unnamed} unnamed (unmatchable by name)" if unnamed else "")
+            ),
+        )
+        return df_unique
+
+    def _step_prepare_matching(self, df: pd.DataFrame) -> pd.DataFrame:
+        """PREP STEP --- Rename columns with a "sysop." prefix and flesh out the fuel column.
+
+        The fuel values themselves were mapped in `_step_dedupe`, so only the
+        refinement with the subtype happens here.
+
+        Args:
+            df (pd.DataFrame): The working dataframe of SysOp data.
+
+        Returns:
+            df (pd.DataFrame): The updated working dataframe (now with fuel type).
+        """
+        # 1. rename relevant columns to generic "sysop.*" (e.g. 'nom_usina' → 'sysop.name')
+        df = df.rename(columns=self.sysop_cols)
+
+        # a sysop's official locator may know the region its raw data doesn't name
+        official_region = f"{OFFICIAL_LOCATOR}.region"
+        if SYSOP_REGION_COL not in df.columns and official_region in df.columns:
+            df[SYSOP_REGION_COL] = df[official_region]
+
+        # 2. create SysOp fuel column with None values if fuel column is missing/unconfigured
+        if SYSOP_FUEL_COL not in df.columns:
+            df[SYSOP_FUEL_COL] = None
+
+        # 3. refine the fuel type with the subtype data, keeping both if they disagree
+        # e.g. CEN's fuel "Térmica" + subfuel "Termosolar" is solar, which "thermal" hides
+        if SYSOP_FUEL_SUB_COL in df.columns:
+            fueltypes = []
+            for primary, sub in zip(df[SYSOP_FUEL_COL], df[SYSOP_FUEL_SUB_COL]):
+                if is_missing(sub):
+                    fueltypes.append(primary)
+                elif classify_fueltype_match(primary, sub) == "mismatch":
+                    fueltypes.append(", ".join(dict.fromkeys((primary, sub))))
+                else:
+                    fueltypes.append(sub)
+            df[SYSOP_FUEL_COL] = pd.Series(fueltypes, index=df.index)
+
+            # remove the sub fueltype (served its purpose, no need to keep it)
+            df = df.drop(columns=[SYSOP_FUEL_SUB_COL])
+
+        # 4. ensure the required columns for matching algorithms are created
+        self._create_match_method_columns(df)
+
+        # 5. the official record IS the EGE (ID + name checked), so its fuel is the EGE's own
+        official = df[f"{OFFICIAL_LOCATOR}.lat"].notna()
+        df[f"{OFFICIAL_LOCATOR}.fueltype"] = df[SYSOP_FUEL_COL].where(official)
+
+        # 6. count the caller's official coordinates, so later steps report only their own
+        if official.any():
+            self._log_step_result("Official coordinates", df=df)
+        return df
+
+    def _step_name_match(self, df: pd.DataFrame) -> pd.DataFrame:
+        """NAME MATCHING STEP --- Unified name matching (direct and with fuzzy logic).
+
+        This step uses a various different sources depending on the pipeline.
+        1. GEM -> used by all pipelines.
+        2. Live OSM Overpass API -> used by all pipelines.
+        2. Power plant database (self.ppdb_loc), defined by the pipeline:
+        - "entsoe" pipeline: self.ppdb_loc = PPM (powerplantmatching) = Europe-only data
+        - "default" pipeline: self.ppdb_loc = OSMPP (OSM-power plants) = Global data
+        4. EIC-derived alternative names / wcode.* candidate columns, defined by the pipeline:
+        - "entsoe" pipeline: populated by entsoe's own earlier `_step_entsoe_*` steps
+        - "default" pipeline: NON-EXISTENT! (row.get() -> None -> only uses sysop.<name_col>)
+
+        If a self.<...>_loc is None, that source is disabled and not used at all.
+
+        Args:
+            df (pd.DataFrame): The working dataframe.
+
+        Returns:
+            df (pd.DataFrame): The updated working dataframe (now with fuzzy matchings).
+        """
+        self._create_match_method_columns(df)
+
+        # build the country's OSM dataframe (the locator loads each country only once)
+        osm_df = (
+            self.osm_loc.get_country_df(self.country_code)
+            if self.osm_loc is not None and self.country_code
+            else pd.DataFrame()
+        )
+
+        matcher = NameMatcher(
+            country=self.country,
+            gem_df=self.gem_loc.df if self.gem_loc is not None else None,
+            ppdb_df=self.ppdb_loc.df if self.ppdb_loc is not None else None,
+            osm_df=osm_df if len(osm_df) > 0 else None,
+            region_reg=self.region_reg,
+            tok=self.tok,
+            style_policy=self.name_str_style,
+        )
+        self._add_alt_names(df, matcher)
+
+        return self._name_match_core(df, matcher)
+
+    def _step_validate_fueltype(self, df: pd.DataFrame) -> pd.DataFrame:
+        """VALIDATION STEP --- Fuel-type validation for all matched EGEs (except official).
+
+        Args:
+            df (pd.DataFrame): The working dataframe.
+
+        Returns:
+            df (pd.DataFrame): The updated working dataframe (with validated fuel type).
+        """
+        if SYSOP_FUEL_COL not in df.columns:
+            return df
+
+        fueltypes = self._matched_column(df, column="fueltype")
+
+        df["fueltype_match"] = None
+        df["fueltype_match_level"] = None
+        for idx in df.index[fueltypes.notna() & ~self._matched_officially(df)]:
+            level = classify_fueltype_match(
+                sysop_type=df.at[idx, SYSOP_FUEL_COL], loc_type=fueltypes[idx]
+            )
+            df.at[idx, "fueltype_match"] = level != "mismatch"
+            df.at[idx, "fueltype_match_level"] = level
+
+        mismatches = df.index[df["fueltype_match_level"] == "mismatch"]
+        if len(mismatches):
+            logger.warning(
+                f"[{self.run.name}] Fuel-type mismatch on {len(mismatches)} matched "
+                f"EGE(s) — verify these rows manually."
+            )
+            # provide details on the siblings: a shared place is the ONLY evidence,
+            # so a differing fuel usually means a different EGE at the same site
+            methods = self._matched_column(df, "match_method")
+            siblings = [i for i in mismatches if str(methods[i]).endswith("sibling")]
+            if siblings:
+                logger.info(
+                    f"[{self.run.name}] {len(siblings)} of those would have matched "
+                    f"as siblings:\n"
+                    + "\n".join(
+                        f"    {df.at[i, SYSOP_NAME_COL]} "
+                        f"({df.at[i, SYSOP_FUEL_COL]}) <- {df.at[i, 'sibling_of']}"
+                        for i in siblings
+                    )
+                )
+        return df
+
+    def _step_validate_region(self, df: pd.DataFrame) -> pd.DataFrame:
+        """VALIDATION STEP --- Coordinate validation for all matched EGEs (except official).
+
+        Args:
+            df (pd.DataFrame): The working dataframe.
+
+        Returns:
+            df (pd.DataFrame): The updated working dataframe (with validated coordinates).
+        """
+        if SYSOP_REGION_COL not in df.columns or self.region_reg is None:
+            return df
+
+        lats, lons = (self._matched_column(df, "lat"), self._matched_column(df, "lon"))
+        df["region_match"] = None
+        df["region_match_level"] = None
+        for idx in df.index[lats.notna() & ~self._matched_officially(df)]:
+            level = self.region_reg.classify_match(
+                self.country,
+                target_region=df.at[idx, SYSOP_REGION_COL],
+                cand_coord=(lats[idx], lons[idx]),
+            )
+            df.at[idx, "region_match"] = level != "mismatch"
+            df.at[idx, "region_match_level"] = level
+
+        mismatches = (df["region_match_level"] == "mismatch").sum()
+        if mismatches:
+            logger.warning(
+                f"[{self.run.name}] Region mismatch on {mismatches} matched "
+                f"EGE(s) — verify these rows manually."
+            )
+        return df
+
+    def _step_finalize(self, df: pd.DataFrame) -> pd.DataFrame:
+        """LAST STEP --- Finalize lat/lon, match_method, and write the output CSV.
+
+        Create and populate final ``lat``, ``lon`` and ``match_method`` columns with results.
+        If a validation step rejected a match, its values are excluded from these columns.
+        The locator's own "<loc>.*" columns are left intact, so the process / rejected
+        candidates stay visible for review together with the "*_match_level" details.
+
+        Args:
+            df (pd.DataFrame): SysOp df with matched coordinates.
+
+        Returns:
+            df (pd.DataFrame): Enriched SysOp df with matched coordinates.
+        """
+        # 1. Determine which matches were vetoed by the validation step(s)
+        vetoed = pd.Series(False, index=df.index)
+        for col in ("fueltype_match", "region_match"):
+            if col in df.columns:
+                vetoed |= df[col].eq(False)  # veto=True if already True or col=False
+
+        # 2. Add lat/lon columns to df and populate with matches (excluding vetoed ones)
+        for col in ("lat", "lon"):
+            df[col] = self._matched_column(df, column=col).mask(vetoed)
+
+        # 3. Define the 'match_method' value for all matches (excluding vetoed ones)
+        df["match_method"] = (
+            self._matched_column(df, "match_method")
+            .fillna("unmatched")
+            .mask(vetoed, "unmatched")
+        )
+
+        # 4. Log a detailed overview of how many matches were achieved by what methods
+        matches = df.loc[df["lat"].notna(), "match_method"].value_counts().to_dict()
+        self._log_step_result(
+            "--- TOTAL ---",
+            matched=int(df["lat"].notna().sum()),
+            note="\n" + "\n".join(f"    {k}:\t{v}" for k, v in matches.items()),
+        )
+
+        if self.output_dir:
+            out_path = Path(self.output_dir, f"coordinates_{self.run.name}.csv")
+            df.to_csv(out_path, index=False)
+            logger.info(
+                f"[{self.run.name}] Coordinates dataframe saved to '{out_path}'.\n-----"
+                "--------------------------------------------------------------------------"
+            )
+
+        return df
+
+    # ------------------------------------------------------------------
+    # DIRECT HELPER METHODS (used by shared and/or pipeline-specific steps)
+    # ------------------------------------------------------------------
+    def _name_match_core(self, df: pd.DataFrame, matcher: NameMatcher) -> pd.DataFrame:
+        """FUZZY STEP HELPER --- Shared per-row fuzzy-match loop, used by every pipeline.
+
+        The method _ensure_exact_match_columns(df) needs to have been called beforehand.
+
+        Each EGE is matched on its sysop_name alone. Any further names worth trying (e.g.
+        ENTSO-E's EIC registry names) are registered by _add_alt_names and enter as the
+        first rungs of the matcher's own variant ladder, so all names for one EGE are
+        ordered and tried within a single match() call.
+
+        Args:
+            df (pd.DataFrame): The working dataframe.
+            matcher (NameMatcher): A matcher object attuned to pipeline-related locator.
+
+        Returns:
+            df (pd.DataFrame): Updated working dataframe (now with ppdb, gem, osm matches).
+        """
+        # 1. Dataframe setup
+        self._create_match_method_columns(df)  # main df column check (no-op if already)
+        fuzzy_results_list = []  # list for storing fuzzy matches as a background lookup
+
+        # 2. Fuzzy matching candidate search
+        for idx, row in df[self._still_unmatched(df)].iterrows():
+            sysop_name = strip_str(row.get(SYSOP_NAME_COL))
+            sysop_fuel = row.get(SYSOP_FUEL_COL)
+            sysop_region = row.get(SYSOP_REGION_COL)
+            if sysop_name is None:
+                continue
+
+            result = matcher.match(
+                target_name=sysop_name,
+                target_fueltype=sysop_fuel,
+                target_region=sysop_region,
+            )
+            fuzzy_results_list.extend(
+                result.to_dicts(target_idx=idx, target_fueltype=sysop_fuel)
+            )
+
+            if result.matched and result.candidate:
+                candidate = result.candidate
+                locator = candidate.locator
+
+                if locator in LOCATOR_RELIABILITY:
+                    self._write_candidate_into_df(
+                        df,
+                        idx,
+                        candidate,
+                        match_score=result.score,
+                        match_method=f"{locator}_{result.matched_via}",
+                    )
+
+        self._log_step_result("Fuzzy-matched by name", df=df)
+
+        # 3. Combine fuzzy matching details into a df and store to a debugging CSV
+        df_fuzzy_results = pd.DataFrame(fuzzy_results_list)
+
+        if self.output_dir and not df_fuzzy_results.empty:
+            out_path = Path(self.output_dir, f"name_matches_{self.run.name}.csv")
+            df_fuzzy_results.to_csv(out_path, index=False)
+            logger.info(f"[{self.run.name}] Debugging dataframe saved to '{out_path}'.")
+
+        return df
+
+    def _sibling_fallback_core(
+        self, df: pd.DataFrame, ege_group_keys: pd.Series
+    ) -> pd.DataFrame:
+        """FALLBACK STEP HELPER --- Shared sibling-unit fallback (via prev-derived group key).
+
+        Some units have no usable name of their own (e.g. an extra generator block added
+        later) but share the same physical plant as another unit that was already matched
+        by any of the previous steps. Rather than re-guessing a name for OSM/ppdb/GEM
+        matching, simply inherit that sibling's coordinates.
+
+        Inherited values are written into the DONOR's locator columns (marked by a
+        "<loc>_sibling" match source), so a sibling match is shaped like any other match
+        and every later check applies to it without a special case. The donor's own name
+        is recorded separately in "sibling_of" for auditing.
+
+        Args:
+            df (pd.DataFrame): The working dataframe.
+            ege_group_keys (pd.Series): The previously-derived plant group keys.
+
+        Returns:
+            df (pd.DataFrame): The updated working dataframe (now with sibling matches).
+
+        Raises:
+            RuntimeError: If sibling matches have been recorded before this step.
+        """
+        if any(
+            df[f"{loc}.match_method"]
+            .astype("string")
+            .str.endswith("_sibling", na=False)
+            .any()
+            for loc in SORTED_LOCATORS
+        ):
+            raise RuntimeError(
+                "Sibling matching has not yet occurred, but a '<loc>_sibling' match source "
+                "is already recorded. Something has gone wrong!"
+            )
+
+        # 1. Helpers for getting sibling information
+        has_group = ege_group_keys.map(lambda k: isinstance(k, str) and bool(k.strip()))
+        already_matched = self._matched_column(df, "lat").notna()
+
+        # 2. Define a lookup with all donor info (name, locator, fueltype, ...) by '_key'
+        donor_locator = pd.Series(None, index=df.index, dtype=object)
+        for loc in reversed(SORTED_LOCATORS):  # most reliable takes precedence
+            donor_locator = donor_locator.mask(df[f"{loc}.lat"].notna(), loc)
+
+        donors = already_matched & has_group
+        donor_lookup = (
+            pd.DataFrame({"_key": ege_group_keys[donors], "_idx": df.index[donors]})
+            .dropna(subset=["_key"])
+            .drop_duplicates(subset=["_key"])
+            .set_index("_key")["_idx"]
+        )
+
+        # 3. Search for sibling matches for the still unmatched EGEs
+        needs_sibling = ~already_matched & has_group
+        for idx in df.index[needs_sibling]:
+            key = ege_group_keys.at[idx]
+            if key not in donor_lookup.index:
+                continue
+
+            # inherit all the donor's attributes (except the score its own name earned)
+            donor = donor_lookup.at[key]
+            loc = donor_locator.at[donor]
+            for col in df.columns:
+                if col.startswith(f"{loc}.") and col != f"{loc}.match_score":
+                    df.at[idx, col] = df.at[donor, col]
+
+            df.at[idx, f"{loc}.match_method"] = f"{loc}_sibling"
+            df.at[idx, "sibling_of"] = df.at[donor, SYSOP_NAME_COL]
+
+        self._log_step_result("Matched by sibling group", df=df)
+        return df
+
+    # ------------------------------------------------------------------
+    # GENERAL HELPER METHODS
+    # ------------------------------------------------------------------
+    def _log_step_result(
+        self,
+        step: str,
+        df: pd.DataFrame | None = None,
+        matched: int | None = None,
+        total: int | None = None,
+        note: str | None = None,
+    ) -> None:
+        """Log one pipeline step's outcome in the format shared by every step.
+
+        Two ways to call it, depending on what the step reports:
+        1. provide ``df`` for a step that adds coordinate matches: all is derived from it,
+        2. provide ``matched``(opt with own ``total``) for a step that reports something else
+            (e.e. number of units enriched, names recovered)
+
+        Steps report the CUMULATIVE count. Their own contribution goes in "+N".
+
+        Args:
+            step (str): Short step label (e.g. "fuzzy name match").
+            df (pd.DataFrame | None): Working df (for coordinate-matching). Defaults to None.
+            matched (int | None): Explicit count (for other steps). Defaults to None.
+            total (int | None): What ``matched`` is measured against. Defaults to None,
+                in which case the pipeline's EGE count is used (``self.unique_targets``).
+            note (str | None): Free-text added information. Defaults to None.
+
+        Raises:
+            ValueError: If neither ``df`` nor ``matched`` is given or both are.
+        """
+        # Option 1. Derive params (matched = # matches, delta = # new, counts = # per loc)
+        delta, counts = None, None
+        if df is not None and matched is None:
+            matched = int(self._matched_column(df, "lat").notna().sum())
+            delta = matched - self._matched_so_far
+            self._matched_so_far = matched
+
+            loc_counts: dict[str, int] = {
+                loc: int(df.get(f"{loc}.lat", pd.Series(dtype=float)).notna().sum())
+                for loc in SORTED_LOCATORS
+            }
+            counts = ", ".join(f"{k} {v}" for k, v in loc_counts.items() if v)
+
+        # Option 2. Params provided directly, nothing to derive
+        elif df is None and matched is not None:
+            pass
+
+        else:
+            raise ValueError(f"Logging '{step}' requires either `df` or `matched`!")
+
+        total = self.unique_targets if total is None else total
+        share = f"{matched / total * 100:>3.0f}%" if total else "  -"
+
+        details = []
+        if delta is not None:
+            details.append(f"+{delta:>3}")
+        if counts:
+            details.append(counts)
+        if note:
+            details.append(note)
+
+        logger.info(
+            f"[{self.run.name}] {step:<32}{matched:>4}/{total:<4} ({share})"
+            + (f"   {' | '.join(details)}" if details else "")
+        )
+
+    @staticmethod
+    def _write_candidate_into_df(
+        df: pd.DataFrame,
+        idx: int,
+        candidate: MatchCandidate,
+        match_method: str,
+        match_score: float | None = None,
+    ) -> None:
+        """Write a matched candidate into the df with its `<source>.*` columns.
+
+        Args:
+            df (pd.DataFrame): The working dataframe.
+            idx (int): Index of the candidate to write.
+            candidate (MatchCandidate): The candidate to write.
+            match_method (str): The match algorithm that was used to find this candidate.
+            match_score (float | None): The match score of the target and candidate,
+                if one exists (e.g. for fuzzy matching).
+        """
+        for field, value in candidate.to_dict().items():
+            df.at[idx, f"{field}"] = value
+
+        df.at[idx, f"{candidate.locator}.match_score"] = match_score
+        df.at[idx, f"{candidate.locator}.match_method"] = match_method
+
+    def _add_alt_names(self, df: pd.DataFrame, matcher: NameMatcher) -> None:
+        """Add alternative names to matcher. Overwritable by child pipeline (i.e. entsoe).
+
+        Args:
+            df (pd.DataFrame): Dataframe with names for which alternatives will be found.
+            matcher (NameMatcher): NameMatcher instance.
+        """
+        return None

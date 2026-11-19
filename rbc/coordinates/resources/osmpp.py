@@ -1,0 +1,72 @@
+"""Coordinate finding for EGEs using the osm-powerplants package.
+
+Source: GitHub package (https://github.com/open-energy-transition/osm-powerplants)
+Data foundation: OSM data
+"""
+
+from pathlib import Path
+
+import pandas as pd
+from loguru import logger
+
+from rbc.coordinates.match_schema import PPDB_SCHEMA
+from rbc.coordinates.utils.country import normalize_locator_countries
+from rbc.coordinates.utils.resources import fetch_resource
+from rbc.energy.utils import load_df_from_file
+
+OSMPP_URL = (
+    "https://raw.githubusercontent.com/open-energy-transition/osm-powerplants/main/"
+)
+OSMPP_CSV_FILE = "osm_global.csv.gz"
+OSMPP_CSV_URL = OSMPP_URL + OSMPP_CSV_FILE
+OSMPP_REJECTED_CSV_URL = OSMPP_URL + "osm_global_rejected_plants.csv.gz"
+
+OSMPP_COLUMNS = PPDB_SCHEMA.columns
+
+
+class OSMPPLocator:
+    """Coordinate locator using osm-powerplants package.
+
+    Attributes:
+        df (pd.DataFrame): Dataframe of normalized OSMPP data from GitHub's global CSV.
+            Has the columns:
+            [
+                'projectID', 'Country', 'lat', 'lon', 'type', 'Fueltype', 'Technology',
+                'Capacity', 'Name', 'Set', 'capacity_source', 'DateIn', 'id', 'created_at',
+                'config_hash', 'config_version', 'processing_parameters', 'generator_count'
+            ]
+    """
+
+    def __init__(self, cache_dir: Path | None = None, update: bool = False) -> None:
+        """Initializes OSMPPLocator.
+
+        Args:
+            cache_dir (Path | None, optional): Directory for the local copy of OSMPP's
+                CSV. Defaults to None, in which case the CSV is read from its URL.
+            update (bool, optional): Download a fresh copy of the CSV, even if one
+                exists locally. Defaults to False.
+
+        Raises:
+            ValueError: If loaded OSMPP dataframe does not contain required columns.
+        """
+        source: Path | str = OSMPP_CSV_URL
+        if cache_dir is not None:
+            cache_path = Path(cache_dir, OSMPP_CSV_FILE)
+            local = fetch_resource(OSMPP_CSV_URL, cache_path, update)
+            source = local if local is not None else OSMPP_CSV_URL
+
+        # All energy entities in the world that "make the cut" according to osm-pp.
+        self.df: pd.DataFrame = load_df_from_file(source)
+        self.df = normalize_locator_countries(self.df)  # normalize the country values
+
+        # # Energy entities that are filtered out by osm-pp due to missing data
+        # self.df_rejected: pd.DataFrame = load_df_from_file(OSMPP_REJECTED_CSV_URL)
+        # self.df_rejected = normalize_locator_countries(self.df_rejected)
+
+        if not set(OSMPP_COLUMNS).issubset(self.df.columns):
+            raise ValueError(
+                f"Loaded OSMPP dataframe does not contain required columns: {OSMPP_COLUMNS}. "
+                f"Existing columns are: {self.df.columns}."
+            )
+
+        logger.info(f"OSMPPLocator initialized: {len(self.df)} entries")

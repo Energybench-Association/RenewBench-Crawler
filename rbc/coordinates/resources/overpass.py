@@ -1,0 +1,555 @@
+"""Coordinate finding for EGEs using the OSM Overpass Turbo API directly.
+
+Source: API (https://overpass-turbo.eu/)
+Data foundation: OpenStreetMap (https://www.openstreetmap.org)
+
+Note: The last two OVERPASS_URLS currently always return a "406 Client Error". The community
+has enforced bans on large requests made by non-custom user agents (e.g. "Mozilla/...")
+https://community.openstreetmap.org/t/overpass-api-performance-issues/140598/74
+Despite the definition and lots of variants tried, none seems to work.
+"""
+
+import json
+import re
+import time
+from pathlib import Path
+
+import pandas as pd
+import requests
+from loguru import logger
+
+from rbc.coordinates.mappings import COUNTRY_OSM_RELATION_ID_MAP
+from rbc.coordinates.match_schema import OSM_SCHEMA
+
+OVERPASS_URLS = [
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass-api.de/api/interpreter",  # sometimes given 406 Client Error
+    "https://lz4.overpass-api.de/api/interpreter",  # sometimes given 406 Client Error
+]
+OVERPASS_SERVER_TIMEOUT = 300
+OVERPASS_CLIENT_TIMEOUT = OVERPASS_SERVER_TIMEOUT + 60
+HEADER = {
+    "User-Agent": (
+        "RenewBench-Crawler/1.0 "
+        "(+https://github.com/EnergyBench-Association/RenewBench-Crawler)"
+    ),
+    "Accept": "application/json",
+}
+
+OSM_COLUMNS = OSM_SCHEMA.columns
+
+
+class OverpassLocator:
+    """Coordinate locator using the OSM Overpass API.
+
+    Meant to be built once per run and shared across all directories of that run, so
+    directories of the same country (e.g. 1h and 15min data, or several bidding zones)
+    reuse one load instead of querying Overpass again. Failed loads (empty DataFrames)
+    are kept too, so a country whose fetch failed isn't retried within the same run.
+
+    Attributes:
+        cache_dir (Path | None): Directory of the ``overpass_<CC>.*`` files.
+            If None, no local files are read or written.
+        update (bool): Ignore existing local files, re-fetch from Overpass and overwrite
+            them. Corresponds to the ``--update`` / ``-u`` CLI flag.
+    """
+
+    def __init__(self, cache_dir: Path | None = None, update: bool = False) -> None:
+        """Initialize the Overpass locator (no data is loaded until it's requested).
+
+        Args:
+            cache_dir (Path | None, optional): Directory for the local Overpass files.
+                Defaults to None, in which case no local files are read or written.
+            update (bool, optional): Ignore existing local files, re-fetch from Overpass
+                and overwrite them. Defaults to False.
+        """
+        self.cache_dir = cache_dir
+        self.update = update
+        self._country_dfs: dict[str, pd.DataFrame] = {}  # loaded EGEs per country code
+        logger.info("OverpassLocator initialized (queries Overpass per country).")
+
+    # ------------------------------------------------------------------
+    # Internal helpers for initialization
+    # ------------------------------------------------------------------
+    def _load(self, country_code: str) -> pd.DataFrame:
+        """Load a country's EGEs from local files or the Overpass API.
+
+        Unless in update mode, uses the local parquet / json file.
+        Otherwise, query Overpass by the ISO 3166-1 alpha-2 tag first (``country_code``) and
+        retry using the OSM relation ID if the initial search failed or returned nothing.
+        If both fail, a stale JSON file from an earlier run is the last resort.
+        Successful queries are saved to the cache_dir as `overpass_<CC>.parquet` & `.json`.
+
+        Args:
+            country_code (str): ISO 3166-1 alpha-2 country code (uppercase).
+
+        Returns:
+            pd.DataFrame: EGEs in the country (one row per name variant), or an empty
+                DataFrame if every source failed.
+        """
+        cache_path: Path | None = None
+        parquet_path: Path | None = None
+
+        if self.cache_dir is not None:
+            parquet_path = Path(self.cache_dir, f"overpass_{country_code}.parquet")
+            cache_path = Path(self.cache_dir, f"overpass_{country_code}.json")
+
+            if not self.update:
+                if parquet_path.is_file():  # Fast: local parquet (proc df, loads in ms)
+                    df_parquet = _load_parquet(parquet_path)
+                    if df_parquet is not None and len(df_parquet) > 0:
+                        return df_parquet
+
+                if cache_path.is_file():  # Fallback: raw JSON cache (re-parse on load)
+                    cached = _load_cached_overpass(cache_path)
+                    if isinstance(cached, dict):
+                        df_cached = _elements_to_df(cached)
+                        if len(df_cached) > 0:
+                            logger.info(
+                                f"Loaded {len(df_cached)} OSM rows from JSON cache for "
+                                f"country '{country_code}'."
+                            )
+                            return df_cached
+
+        logger.info(
+            f"No cached OSM data found for '{country_code}' or running in update mode: "
+            "Querying the Overpass API now (this may take a while)..."
+        )
+
+        # --- Attempt 1: ISO alpha-2 tag lookup ----------------------------------------
+        area_clause = _code_area(iso_alpha_code=country_code)
+        data = post_overpass(query=_build_query(area_clause), label=country_code)
+
+        # --- Attempt 2: osm country relation ID fallback ------------------------------
+        if data is None:
+            rel_id = COUNTRY_OSM_RELATION_ID_MAP.get(country_code)
+            if rel_id is not None:
+                logger.warning(
+                    f"ISO3166-1 lookup for '{country_code}' failed or returned 0 "
+                    f"elements; retrying via OSM relation {rel_id}."
+                )
+                area_clause = _id_area(relation_id=rel_id)
+                data = post_overpass(query=_build_query(area_clause), label=str(rel_id))
+            else:
+                logger.error(
+                    f"ISO3166-1 lookup for '{country_code}' failed or returned 0 "
+                    "elements and no relation ID is registered. Add one to "
+                    "COUNTRY_OSM_RELATION_ID_MAP!"
+                )
+
+        if data is not None:
+            df = _elements_to_df(data)
+
+            if len(df) > 0:
+                if parquet_path is not None:
+                    _save_parquet(parquet_path, df)
+                if cache_path is not None:
+                    _save_cached_overpass(cache_path, data)
+
+            logger.info(f"Built {len(df)} OSM rows for '{country_code}'.")
+            return df
+
+        # --- Stale cache as last resort -------------------------------------------
+        if cache_path is not None and cache_path.exists():
+            cached = _load_cached_overpass(cache_path)
+            if isinstance(cached, dict):
+                df_cached = _elements_to_df(cached)
+                if len(df_cached) > 0:
+                    logger.warning(
+                        f"All Overpass endpoints failed for '{country_code}'. "
+                        "Using stale cached OSM data."
+                    )
+                    return df_cached
+
+        logger.error(
+            f"All Overpass endpoints failed for country '{country_code}', "
+            "and no usable cache was found."
+        )
+        return pd.DataFrame(columns=OSM_COLUMNS)  # empty df
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def get_country_df(self, country_code: str) -> pd.DataFrame:
+        """Get all EGEs of one country, loading them only on the first request.
+
+        Args:
+            country_code (str): ISO 3166-1 alpha-2 country code (case-insensitive).
+
+        Returns:
+            pd.DataFrame: EGEs in the country (one row per name variant), or an empty
+                DataFrame if loading failed.
+        """
+        country_code = country_code.upper()
+        if country_code not in self._country_dfs:
+            self._country_dfs[country_code] = self._load(country_code)
+        country_df = self._country_dfs[country_code]
+        logger.info(f"OverpassLocator for {country_code}: {len(country_df)} entries")
+        return country_df
+
+
+# ---------------------------------------------------------------------------
+# Post query
+# ---------------------------------------------------------------------------
+def post_overpass(query: str, label: str) -> dict | None:
+    """Post a query to each Overpass endpoint in turn, return the first usable answer.
+
+    Moves on to the next endpoint after a network or server error, a runtime error in
+    the remark, or an answer without elements (the last two arrive with HTTP 200). A
+    rejected query (HTTP 400) stops right away, since it would fail everywhere.
+
+    Args:
+        query (str): Overpass QL query.
+        label (str): Label for identification used in log messages (e.g. the country code).
+
+    Returns:
+        dict | None: Parsed Overpass response (with elements), or None if every endpoint
+            failed or the query was rejected.
+    """
+    for endpoint in OVERPASS_URLS:
+        log_str = f"Overpass endpoint '{endpoint}' request for '{label}'"
+        try:
+            tick = time.perf_counter()
+            response = requests.post(
+                endpoint,
+                data={"data": query},
+                headers=HEADER,
+                timeout=OVERPASS_CLIENT_TIMEOUT,
+            )
+            tock = time.perf_counter()
+            time_str = f"{tock - tick:.2f}s"
+
+            # if query syntax error (400): will fail for all URLs, so quit immediately
+            if response.status_code == 400:
+                logger.error(
+                    f"{log_str} was rejected (HTTP 400): {response.text[:500]}"
+                )
+                return None
+
+            response.raise_for_status()
+            data = response.json()
+
+            n_elements = len(data.get("elements", []))
+            remark = str(data.get("remark", ""))
+            remark_str = "." if not remark else f" (remark: {remark})."
+
+            # some server issues: code=200 + n_elements=0 + remark="runtime error..." → catch!
+            if "error" in remark.lower():
+                logger.warning(
+                    f"{log_str} failed in {time_str}: {remark}. Trying next endpoint..."
+                )
+                continue  # try the next endpoint
+
+            if n_elements == 0:
+                logger.warning(
+                    f"{log_str} returned 0 elements in {time_str}"
+                    + remark_str
+                    + " Trying next endpoint..."
+                )
+                continue  # try the next endpoint
+
+            logger.info(
+                f"{log_str} returned {n_elements} elements in {time_str}" + remark_str
+            )
+            return data
+
+        except (requests.RequestException, json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"{log_str} failed: {e}")
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Build query
+# ---------------------------------------------------------------------------
+_INACTIVE_STAGES = (
+    "abandoned",
+    "disused",
+    "demolished",
+    "razed",
+    "removed",
+    "ruins",
+    "was",
+    "construction",
+    "proposed",
+    "planned",
+)
+
+
+def _build_query(area_clause: str) -> str:
+    """Build the Overpass query for EGEs within a given area.
+
+    Args:
+        area_clause (str): A complete Overpass statement including `.searchArea`,
+            e.g. `area["ISO3166-1"="DE"]->.searchArea;` or `area(3600051477)->.searchArea;`.
+
+    Returns:
+        str: Overpass QL query string.
+    """
+    inactive_queries = """"""
+    for k in _INACTIVE_STAGES:
+        inactive_queries += f"""  nwr["{k}:power"="plant"](area.searchArea);\n"""
+
+    return f"""
+    [out:json][timeout:{OVERPASS_SERVER_TIMEOUT}];
+    {area_clause}
+    (
+      // Active EGEs
+      nwr["power" = "plant"](area.searchArea);
+
+      // Historic / decommissioned / planned EGEs
+    {inactive_queries}
+    );
+    out body center;
+    """
+
+
+def _code_area(iso_alpha_code: str) -> str:
+    """OSM area clause defining a country by its ISO 3166-1 alpha-2 code.
+
+    Args:
+        iso_alpha_code (str): ISO 3166-1 alpha-2 code (uppercase).
+
+    Returns:
+        str: Overpass statement binding `.searchArea`.
+    """
+    return (
+        f'(area["ISO3166-1"="{iso_alpha_code}"]["admin_level"="2"];'
+        f'area["ISO3166-1:alpha2"="{iso_alpha_code}"]["admin_level"="2"];)'
+        f"->.searchArea;"
+    )
+
+
+def _id_area(relation_id: int) -> str:
+    """OSM area clause defining a boundary (country) directly by OSM relation ID.
+
+    Args:
+        relation_id (int): OSM relation ID of the boundary.
+
+    Returns:
+        str: Overpass statement binding `.searchArea`.
+    """
+    return f"area({3600000000 + relation_id})->.searchArea;"
+
+
+# ---------------------------------------------------------------------------
+# Data extraction helpers
+# ---------------------------------------------------------------------------
+_FUEL_KEY = "source"
+_CAPA_KEY = "output:electricity"
+_NAME_KEYS = (
+    "name",
+    "alt_name",
+    "old_name",
+    "official_name",
+    "short_name",
+    "int_name",
+    "loc_name",
+    "reg_name",
+    "nat_name",
+)
+# find language-dep names (i.e. "name", "name:en", "name:zh-Hant", but not "name:etymology")
+_LANGUAGE_SUFFIX = re.compile(r"^[a-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})?$")
+
+
+def _elements_to_df(data: dict) -> pd.DataFrame:
+    """Extract relevant elements (EGEs) from OSM data and transform into DataFrame.
+
+    Args:
+        data (dict): OSM data received from API call.
+
+    Returns:
+        df (pd.DataFrame): DataFrame containing structured OSM data.
+    """
+    results = []
+    for el in data.get("elements", []):
+        raw_tags = el.get("tags", {})
+        if not raw_tags:
+            continue
+
+        status, name_variants, tags = _parse_tag_information(raw_tags)
+
+        if not name_variants:  # only continue if element (EGE) has a name!
+            continue
+
+        lat, lon = _parse_coordinates(el)
+        osm_id = el.get("id")
+        osm_type = str(el.get("type", ""))  # node, way or relation
+        osm_url = f"https://www.openstreetmap.org/{osm_type}/{osm_id}"
+        fuel = tags.get(
+            f"plant:{_FUEL_KEY}", tags.get(f"generator:{_FUEL_KEY}", "unknown")
+        )
+        capa = tags.get(
+            f"plant:{_CAPA_KEY}", tags.get(f"generator:{_CAPA_KEY}", "unknown")
+        )
+
+        base_data = {
+            "Fueltype": fuel,
+            "lat": lat,
+            "lon": lon,
+            "OSM_ID": osm_id,
+            "OSM_Type": osm_type,
+            "OSM_URL": osm_url,
+            "Status": status,
+            "Capacity": capa,
+        }
+        for name in name_variants:
+            results.append({"Name": name, **base_data})
+
+    df = pd.DataFrame(results)
+    if len(df) == 0:
+        return pd.DataFrame(columns=OSM_COLUMNS)  # empty df
+
+    return df[OSM_COLUMNS]  # ensure columns exist
+
+
+def _parse_tag_information(tags: dict) -> tuple[str, list[str], dict]:
+    """Parse raw OSM tags of an EGE extract all relevant information in one go.
+
+    Args:
+        tags (dict): Raw OSM tags of one EGE received from API call.
+
+    Returns:
+        tuple:
+            - status (str): EGE status (e.g. active, decommissioned (=inactive), unknown)
+            - name_variants (list): All name variants for an EGE
+            - clean_tags (dict): Clean tags (prefixes for inactive EGEs like "was:" stripped)
+    """
+    status = "unknown"
+    name_variants = set()
+    clean_tags = {}
+
+    if tags.get("power") in {"plant", "generator"}:
+        status = "active"
+
+    for key, value in tags.items():
+        prefix, sep, rest = key.partition(":")
+        is_inactive = prefix in _INACTIVE_STAGES and sep
+
+        # 1. Clean the key (strip prefixes if it's an inactive EGE)
+        clean_key = rest if is_inactive else key
+
+        # 2. Redefine the status if the EGE wasn't strictly "active"
+        if (
+            status == "unknown"
+            and is_inactive
+            and clean_key == "power"
+            and value in {"plant", "generator"}
+        ):
+            status = prefix
+
+        # 3. Collect all known name variants
+        if _is_name_key(clean_key) and isinstance(value, str) and value.strip():
+            name_variants.add(value.strip())
+
+        # 4. Populate clean_tags (active keys win e.g.: "power:source" > "was:power:source")
+        if not is_inactive or clean_key not in clean_tags:
+            clean_tags[clean_key] = value
+
+    return status, sorted(name_variants), clean_tags
+
+
+def _is_name_key(key: str) -> bool:
+    """Check whether a tag key holds a name / name variant (e.g. "old_name", "name:hv-Hall).
+
+    Args:
+        key (str): Tag key.
+
+    Returns:
+        bool: True if the key is a name or a language-suffixed name variant.
+    """
+    if key in _NAME_KEYS:
+        return True
+
+    name, sep, suffix = key.partition(":")
+    return name in _NAME_KEYS and bool(sep) and bool(_LANGUAGE_SUFFIX.match(suffix))
+
+
+def _parse_coordinates(el: dict) -> tuple[float | None, float | None]:
+    """Extract an OSM element's coordinates (nodes: own; ways/relations: ``center``).
+
+    Args:
+        el (dict): The OSM data element.
+
+    Returns:
+        tuple[float | None, float | None]: (lat, lon), or (None, None) if not found.
+    """
+    center = el.get("center")
+    point = center if isinstance(center, dict) else el  # nodes have lat/lon themselves
+    lat, lon = point.get("lat"), point.get("lon")
+
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        return float(lat), float(lon)
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# I/O (read/write) helpers
+# ---------------------------------------------------------------------------
+def _load_parquet(parquet_path: Path) -> pd.DataFrame | None:
+    """Load parquet data from a file.
+
+    Args:
+        parquet_path (Path): Parquet file path.
+
+    Returns:
+        pd.DataFrame | None: Parquet data loaded as a DataFrame, if extractable.
+    """
+    try:
+        df = pd.read_parquet(parquet_path)
+        logger.info(
+            f"Loaded {len(df)} OSM rows from local parquet for "
+            f"'{parquet_path.stem.split('_')[1]}'."
+        )
+        return df
+    except Exception as e:
+        logger.warning(f"Could not read parquet '{parquet_path}': {e}")
+        return None
+
+
+def _save_parquet(parquet_path: Path, df: pd.DataFrame) -> None:
+    """Save DataFrame data to a parquet file.
+
+    Args:
+        parquet_path (Path): Parquet file path to save DataFrame to.
+        df (pd.DataFrame): DataFrame data to save.
+    """
+    try:
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(parquet_path, index=False)
+        logger.info(f"OSM plant data saved → {parquet_path} ({len(df)} rows)")
+    except Exception as e:
+        logger.warning(f"Could not write parquet '{parquet_path}': {e}")
+
+
+def _load_cached_overpass(cache_path: Path) -> dict | None:
+    """Load cached Overpass data from a file.
+
+    Args:
+        cache_path (Path): Overpass cache JSON path.
+
+    Returns:
+        dict | None: Loaded cached Overpass data loaded as a dict, if extractable.
+    """
+    try:
+        with cache_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Could not read Overpass cache '{cache_path}': {e}")
+        return None
+
+
+def _save_cached_overpass(cache_path: Path, data: dict) -> None:
+    """Save cached Overpass data to a JSON file.
+
+    Args:
+        cache_path (Path): Overpass cache JSON path to save data to.
+        data (dict): Overpass data to be stored.
+    """
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except OSError as e:
+        logger.warning(f"Could not write Overpass cache '{cache_path}': {e}")

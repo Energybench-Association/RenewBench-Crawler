@@ -6,7 +6,7 @@ Schema definitions for different data sources.
 from pathlib import Path
 from typing import Literal, Type
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 # ----------------------------------
@@ -17,9 +17,25 @@ class Paths(BaseModel):
 
     Attributes:
         dst_dir_raw (Path): Destination directory for raw data output.
+        dst_dir_proc (Path): Destination directory for processed data outputs.
     """
 
     dst_dir_raw: Path
+    dst_dir_proc: Path | None = None
+
+    @model_validator(mode="after")
+    def _default_proc_dir(self) -> "Paths":
+        """Define a default dst_dir_proc path if none was provided."""
+        if self.dst_dir_proc is None:
+            dst_dir_proc = Path(str(self.dst_dir_raw).replace("/raw/", "/processed/"))
+
+            if dst_dir_proc == self.dst_dir_raw:
+                sysop = self.dst_dir_raw.parts[-1]
+                dst_dir_proc = Path(self.dst_dir_raw.parent, "processed", sysop)
+
+            self.dst_dir_proc = dst_dir_proc
+
+        return self
 
 
 class AccessAPI(BaseModel):
@@ -65,8 +81,8 @@ class PathValidation:
             ValueError: If the path is not writable.
         """
         for field, path in paths.model_dump().items():
-            if not isinstance(path, (str, Path)):
-                continue
+            if not isinstance(path, (str, Path)) or field == "dst_dir_proc":
+                continue  # created by the processing writing into it, not by every script
 
             try:
                 Path(path).mkdir(parents=True, exist_ok=True)
@@ -312,6 +328,113 @@ class Barra2Config(PathValidation, BaseModel):
 
 
 # ----------------------------------
+# Coordinate finding schemas
+# ----------------------------------
+class CoordinatesPaths(BaseModel):
+    """Filesystem paths used by coordinate finding (shared by all energy sources).
+
+    Attributes:
+        resources_dir (Path): Directory of the resources coordinate finding downloads or
+            reads (e.g. GEM trackers in `gem/`, the EIC directory, OSM files).
+    """
+
+    resources_dir: Path
+
+
+class CoordinatesConfig(PathValidation, BaseModel):
+    """Configuration schema for coordinate finding.
+
+    Attributes:
+        source (Literal): Name of the config.
+        paths (CoordinatesPaths): Paths pydantic model for paths.
+    """
+
+    source: Literal["coordinates"] = "coordinates"
+    paths: CoordinatesPaths
+
+
+# ----------------------------------
+# Publishing schemas
+# ----------------------------------
+class PublishLsdf(BaseModel):
+    """The LSDF route: write to the mounted LSDF, the VM publishes from there.
+
+    Attributes:
+        dst_dir_data (Path): Directory holding the bucket's directory.
+        dst_dir_inbox (Path): Folder the VM picks the STAC records up from.
+    """
+
+    dst_dir_data: Path
+    dst_dir_inbox: Path
+
+
+class PublishS3(BaseModel):
+    """The S3 route: write over S3, publish to the STAC API directly.
+
+    Attributes:
+        url_endpoint (str): S3 endpoint the repositories are written to.
+        url_stac_api (str): Root URL of the STAC API (with Transactions).
+    """
+
+    url_endpoint: str
+    url_stac_api: str
+
+
+class PublishChunks(BaseModel):
+    """Chunk shape of the generation arrays.
+
+    Attributes:
+        entities (int): EGEs per chunk.
+        days (int): Days of data per chunk, whatever the data's temporal resolution
+            (e.g. 365 days = 8760 hourly or 35040 15-minute steps).
+    """
+
+    entities: int = 16
+    days: int = 365
+
+
+class PublishConfig(BaseModel):
+    """Configuration schema for publishing processed data to EnergyBench.
+
+    Attributes:
+        source (Literal): Name of the config.
+        route (Literal["lsdf", "s3"]): How the data is published (s. `lsdf`, `s3`).
+        bucket (str): Bucket of the repositories, on either route.
+        url_public (str): Permanent public URL the STAC assets name, on either route
+            (only used when publishing: else they name the local repository).
+        lsdf (PublishLsdf): Settings of the LSDF route.
+        s3 (PublishS3): Settings of the S3 route.
+        chunks (PublishChunks): Chunk shape of the generation arrays.
+    """
+
+    source: Literal["publish"] = "publish"
+    route: Literal["lsdf", "s3"]
+    bucket: str = "energybench"
+    url_public: str
+    lsdf: PublishLsdf
+    s3: PublishS3
+    chunks: PublishChunks = PublishChunks()
+
+    def check_publishable(self) -> None:
+        """Check the URLs publishing on the chosen route needs hold real values.
+
+        Raises:
+            ValueError: If any of them still holds its placeholder, naming them all.
+        """
+        urls = {"url_public": self.url_public}
+        if self.route == "s3":
+            urls |= {
+                "s3.url_endpoint": self.s3.url_endpoint,
+                "s3.url_stac_api": self.s3.url_stac_api,
+            }
+        if unset := [name for name, url in urls.items() if url.startswith("YOUR-")]:
+            raise ValueError(
+                f"Publishing needs real values for {unset} (pass them with -o "
+                f"key=value or a local config), or run with --no-publish."
+            )
+
+
+# ----------------------------------
 # Schema registry
 # ----------------------------------
 SCHEMA_REGISTRY: dict[str, Type[BaseModel]] = {
@@ -330,4 +453,6 @@ SCHEMA_REGISTRY: dict[str, Type[BaseModel]] = {
     "era5": Era5Config,
     "icon_dream_eu": IconDreamEuConfig,
     "icon_dream_global": IconDreamGlobalConfig,
+    "coordinates": CoordinatesConfig,
+    "publish": PublishConfig,
 }
