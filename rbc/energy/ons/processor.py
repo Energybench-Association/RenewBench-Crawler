@@ -34,6 +34,7 @@ from rbc.energy.processing import (
     to_layout,
     to_utc,
 )
+from rbc.energy.stac_entity import EntityTypeDefiner
 from rbc.energy.utils import load_df_from_file, write_df_to_csv
 from rbc.publish.icechunk_store import (
     EnergyIcechunkWriter,
@@ -209,6 +210,8 @@ class OnsProcessor:
         self.shared = build_shared_resources(
             sysop=SOURCE, resources_dir=self.resources_dir
         )
+        # FOR STAC (entity types: s. `_prepare_for_stac`)
+        self.entity_types = EntityTypeDefiner(sysop=SOURCE)
 
     # ------------------------------------------------------------------
     # ENTRYPOINT
@@ -286,6 +289,8 @@ class OnsProcessor:
         df_eg_unique = pd.DataFrame()  # each EGE's own values, collected from every CSV
         ambiguous: list[pd.DataFrame] = []
         zarr_ids: set[str] = set()  # to check both outputs describe the same EGEs
+        totals = pd.Series(dtype=float)  # each EGE's total generation
+        active: dict[str, set[str]] = {}  # the months each EGE reports values in
         for path in run.files:
             df_eg = load_df_from_file(path).rename(columns=ONS_COLUMNS)  # layout names!
             self._check_modes(df_eg[MODE_COL], month=path.stem)
@@ -301,6 +306,9 @@ class OnsProcessor:
             df_zarr, df_ambiguous = self._prepare_for_zarr(df_eg, month=path.stem)
             writer.add(df_zarr["id"], df_zarr["timestamp"], df_zarr["value"])
             zarr_ids.update(df_zarr["id"].dropna())
+            totals = totals.add(df_zarr.groupby("id")["value"].sum(), fill_value=0.0)
+            for ege in df_zarr.dropna(subset=["value"])["id"].unique():
+                active.setdefault(ege, set()).add(path.stem)
             ambiguous.append(df_ambiguous)
 
         snapshot = writer.finish(
@@ -318,7 +326,9 @@ class OnsProcessor:
             write_df_to_csv(kept_out, Path(self.output_dir, "review", name))
 
         # Step 3: STAC records, one Item per EGE
-        df_stac = self._prepare_for_stac(df_ege, df_eg_unique)
+        df_stac = self._prepare_for_stac(
+            df_ege, df_eg_unique, pd.Series(active, dtype=object), totals
+        )
         log_unjoined_ids(zarr_ids, df_stac["id"])
         items = build_items(
             df_stac, writer.spans(), ONS_DATASET, release, storage, snapshot, step_iso
@@ -439,7 +449,11 @@ class OnsProcessor:
         return utc, repeated
 
     def _prepare_for_stac(
-        self, df_ege: pd.DataFrame, df_eg_unique: pd.DataFrame
+        self,
+        df_ege: pd.DataFrame,
+        df_eg_unique: pd.DataFrame,
+        active: pd.Series,
+        totals: pd.Series,
     ) -> pd.DataFrame:
         """Prep unique EGE data from coordinate finding (_ege) & raw (_eg_unique) for STAC.
 
@@ -450,7 +464,10 @@ class OnsProcessor:
           matching (e.g. `"gem": ...`)
         - "entity_name": use "nom_usina" column values from df_ege
         - "entity_type": "portfolio" for a group of plants (s. GROUP_MODES) without a
-          point (several sites), else "facility"
+          point (several sites), "group" for a single plant that is part of a facility
+          (s. `EntityTypeDefiner.find_groups`, by CEG or by name and location), else
+          "facility"
+        - "facility_name": the facility such a part belongs to
         - "fuel_type", "fuel_subtype", "hybrid_fuel_types": "nom_tipousina" and
           "nom_tipocombustivel" mapped to STAC's vocabulary (s. STAC_FUELS)
         - "measurement_type": "forecast" for Tipo III plants and their groups (s.
@@ -465,6 +482,8 @@ class OnsProcessor:
         Args:
             df_ege (pd.DataFrame): The EGEs as coordinate finding returned them.
             df_eg_unique (pd.DataFrame): The EGE information from raw generation data.
+            active (pd.Series): The months each EGE reports values in, by its ID.
+            totals (pd.Series): Each EGE's total generation, by its ID.
 
         Returns:
             pd.DataFrame: The EGEs in the STAC_COLUMNS layout.
@@ -492,6 +511,21 @@ class OnsProcessor:
         # a group located to one point is one site, else it spans several
         spread = df_ege[MODE_COL].isin(GROUP_MODES) & df_ege["lat"].isna()
         df_ege["entity_type"] = spread.map({True: "portfolio", False: "facility"})
+        plants = df_ege[~df_ege[MODE_COL].isin(GROUP_MODES)].rename(
+            columns={CEG_COL: "code"}
+        )
+        groups = self.entity_types.find_groups(
+            plants[["id", "entity_name", "code", "lat", "lon"]], active, totals
+        )
+        df_ege["entity_type"] = (
+            df_ege["id"].map(groups["entity_type"]).fillna(df_ege["entity_type"])
+        )
+        df_ege["facility_name"] = df_ege["id"].map(groups["facility_name"])
+        if len(groups):
+            logger.info(
+                f"{len(groups)} EGEs are parts of {groups['facility_name'].nunique()} "
+                f"facilities: {sorted(groups['facility_name'].unique())}"
+            )
         df_ege["entity_ids"] = entity_ids(
             df_ege,
             own={"ons": codes_as_text(df_ege[SYSOP_CODE_COL]), "ceg": df_ege[CEG_COL]},

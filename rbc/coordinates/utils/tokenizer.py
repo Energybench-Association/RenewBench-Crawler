@@ -32,9 +32,15 @@ JOINED_GENERIC_UNIT_TOKENS = "|".join(
 GLUED_GENERIC_TOKEN_PATTERN = re.compile(
     rf"\b([a-z]{{3,}})({JOINED_GENERIC_UNIT_TOKENS})(\d{{0,3}})\b"
 )
-ROMAN_UNIT_NUMERALS: frozenset[str] = frozenset(
-    "i ii iii iv v vi vii viii ix x xi xii xiii xiv xv xvi xvii xviii xix xx".split()
-)
+# Map: roman unit numeral → its number (e.g. "iv" -> "4")
+ROMAN_TO_ARABIC: dict[str, str] = {
+    roman: str(number)
+    for number, roman in enumerate(
+        "i ii iii iv v vi vii viii ix x xi xii xiii xiv xv xvi xvii xviii xix xx".split(),
+        start=1,
+    )
+}
+ROMAN_UNIT_NUMERALS: frozenset[str] = frozenset(ROMAN_TO_ARABIC)
 
 # Pattern: an operator's record-state marker in square brackets (e.g. "[NO_MOSTRAR]")
 BRACKETED_MARKER_PATTERN = re.compile(r"\[[^\]]*\]")
@@ -414,6 +420,36 @@ class NameTokenizer:
         result = WeightedTokens(tokens, weights, types)
         self._weighted_cache[normalized] = result
         return result
+
+    def get_discriminator_key(self, name: str | None) -> str | None:
+        """Reduce a name to its discriminator tokens, e.g. "Mauá Bloco 4" -> "maua".
+
+        Args:
+            name (str | None): The name to reduce.
+
+        Returns:
+            str | None: Its discriminator tokens, space-separated; None if it has none.
+        """
+        wt = self.weighted_tokenize(name)
+        key = " ".join(
+            t for t, kind in zip(wt.tokens, wt.types) if kind == "discriminator"
+        )
+        return key or None
+
+    def get_canonical_tokens(self, name: str | None) -> tuple[str, ...]:
+        """Give a name's tokens with roman designators as numbers ("Termonorte I" -> 1).
+
+        Args:
+            name (str | None): The name to tokenize.
+
+        Returns:
+            tuple[str, ...]: Its tokens, so that "X I" and "X 1" compare equal.
+        """
+        wt = self.weighted_tokenize(name)
+        return tuple(
+            ROMAN_TO_ARABIC.get(t, t) if kind == "designator" else t
+            for t, kind in zip(wt.tokens, wt.types)
+        )
 
     # ---------------------------------------------------------------------------
     # Helper methods: tokenize
