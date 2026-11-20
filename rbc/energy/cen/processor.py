@@ -96,19 +96,18 @@ CEN_COLUMNS = {
 }
 
 # What CEN's Collections say about the source, its terms of use and our processing
-CEN_TERMS_URL = "https://www.coordinador.cl/terminos-y-condiciones/"
 CEN_DATASET = DatasetInfo(
     dataset=SOURCE,
     title="CEN (Chile) {tres} generation per plant",
     description=(
         "{Tres} gross generation in MW of each power plant of Chile's National "
         "Electric System (SEN), as reported by the Coordinador Eléctrico Nacional "
-        "(CEN) through its public information system (SIP) API.\n\n"
-        "For academic, non-commercial use only, citing the source, as CEN's terms of "
-        f"use allow ({CEN_TERMS_URL}). Not endorsed by CEN.\n\n"
+        "(CEN) through its public information system (SIP) API.\n\nFor academic, "
+        "non-commercial use only, citing the source, as CEN's terms of use allow "
+        "(https://www.coordinador.cl/terminos-y-condiciones/). Not endorsed by CEN.\n\n"
     ),
     license="proprietary",
-    license_url=CEN_TERMS_URL,
+    license_url="https://www.coordinador.cl/terminos-y-condiciones/",
     providers=[
         {
             "name": "Coordinador Eléctrico Nacional (CEN)",

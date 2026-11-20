@@ -78,6 +78,8 @@ class DatasetInfo:
         continents (list[str]): The continents it covers, e.g. ["South America"].
         keywords (list[str]): Extra keywords, e.g. the country; the resolution is
             added to them.
+        license_notice_url (str | None): Link to where the source states its license,
+            if not at `license_url`. Defaults to None.
     """
 
     dataset: str
@@ -92,6 +94,7 @@ class DatasetInfo:
     countries: dict[str, str]
     continents: list[str]
     keywords: list[str] = field(default_factory=list)
+    license_notice_url: str | None = None
 
     def for_resolution(self, step: str) -> "DatasetInfo":
         """Fill the texts in for one temporal resolution.
@@ -219,6 +222,23 @@ def build_collection(
         JSON: The Collection, linked as the root of a static catalog (s. `write_stac`).
     """
     info = info.for_resolution(step)
+    license_links = [
+        {
+            "rel": "license",
+            "href": info.license_url,
+            "type": "text/html",
+            "title": "License",
+        }
+    ]
+    if info.license_notice_url:
+        license_links.append(
+            {
+                "rel": "license",
+                "href": info.license_notice_url,
+                "type": "text/html",
+                "title": "License notice of the source",
+            }
+        )
     props = [it["properties"] for it in items]
     summaries: JSON = {}
     for f in SUMMARY_FIELDS:  # only those any Item has (STAC forbids empty lists)
@@ -331,12 +351,7 @@ def build_collection(
             }
         },
         "links": [
-            {
-                "rel": "license",
-                "href": info.license_url,
-                "type": "text/html",
-                "title": "Terms of use",
-            },
+            *license_links,
             {"rel": "root", "href": "./collection.json", "type": "application/json"},
             *(
                 {

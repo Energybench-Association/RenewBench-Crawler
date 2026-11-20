@@ -109,6 +109,7 @@ ONS_DATASET = DatasetInfo(
     ),
     license="CC-BY",  # as ONS's notice names it: not an SPDX ID, which needs a version
     license_url="http://opendefinition.org/od/2.1/pt-br/",
+    license_notice_url="https://dados.ons.org.br/dataset/geracao-usina-2#:~:text=Aviso,br",
     providers=[
         {
             "name": "Operador Nacional do Sistema Elétrico (ONS)",

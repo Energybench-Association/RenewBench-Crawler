@@ -2,6 +2,7 @@
 """Tests for a release's STAC Collection and Items."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -174,6 +175,33 @@ def test_collection_describes_the_repository() -> None:
     assert coll["sci:citation"] == INFO.citation
     item_links = [link["href"] for link in coll["links"] if link["rel"] == "item"]
     assert item_links == ["./items/op_a.json", "./items/op_b.json"]
+
+
+@pytest.mark.parametrize(
+    "notice, licenses",
+    [
+        (None, ["https://example.org/terms"]),
+        (
+            "https://example.org/data#notice",
+            ["https://example.org/terms", "https://example.org/data#notice"],
+        ),
+    ],
+)
+def test_collection_links_the_license_notice(
+    notice: str | None, licenses: list[str]
+) -> None:
+    """Happy path: a source's license notice, if any, is a second license link.
+
+    Args:
+        notice (str | None): Where the source states its license.
+        licenses (list[str]): The Collection's license links expected.
+    """
+    info = replace(INFO, license_notice_url=notice)
+    coll = stac.build_collection(
+        info, "v0.1.0", _built()[1], STORAGE, "SNAP", ENTITIES, TIMES, "PT1H"
+    )
+
+    assert [ln["href"] for ln in coll["links"] if ln["rel"] == "license"] == licenses
 
 
 @pytest.mark.parametrize(

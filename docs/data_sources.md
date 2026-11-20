@@ -421,7 +421,8 @@ Columns:
 General:
 - `license`: `'CC-BY'`, as ONS's legal notice on the dataset page names it, without a
   version (so not an SPDX ID). The Collections link the license
-  ONS links (the [Open Definition 2.1](http://opendefinition.org/od/2.1/pt-br/)).
+  ONS links (the [Open Definition 2.1](http://opendefinition.org/od/2.1/pt-br/)) and the
+  [notice itself](https://dados.ons.org.br/dataset/geracao-usina-2#:~:text=Aviso,br).
 - `description`: states the changes made to ONS's data (s. Processing), as CC-BY asks.
 
 Energy extension:

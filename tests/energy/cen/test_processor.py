@@ -599,7 +599,7 @@ def test_collection_describes_the_release(processed: tuple[Path, MagicMock]) -> 
         [{"id": "south-america", "title": "South America"}],
     ]
     assert coll["summaries"]["energy:fuel_type"] == ["hybrid", "storage", "wind"]
-    assert coll["links"][0]["href"] == processor.CEN_TERMS_URL
+    assert coll["links"][0]["href"] == processor.CEN_DATASET.license_url
     assert coll["description"].startswith("Hourly gross generation in MW")
     assert "academic, non-commercial" in coll["description"]
     assert coll["extent"]["temporal"]["interval"] == [
