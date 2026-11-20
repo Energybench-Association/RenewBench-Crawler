@@ -126,6 +126,19 @@ CEN_DATASET = DatasetInfo(
         "Processed and published by the EnergyBench Association, "
         "https://www.energybench.org."
     ),
+    lineage=(
+        "Processing into Icechunk repositories:\n"
+        "- Values: a plant's operating configurations ('id_opreal') are summed per hour, "
+        "a battery's charging counted as negative. Rows CEN's files repeat are dropped; "
+        "where their values disagree, the plant's hour is left out.\n"
+        "- Times: converted from Chile's local time (incl. DST) to UTC, CEN's placeholder "
+        "rows for the hour the clocks skipped dropped.\n\n"
+        "Processing into STAC metadata:\n"
+        "- Mappings: technologies, statuses and IDs are mapped to the STAC energy "
+        "extension's fields.\n"
+        "- Locations: from CEN's plant registry, else from matching plant names to open "
+        "plant databases (GEM, osm-powerplants, OpenStreetMap)."
+    ),
     values="{Tres} gross generation (MW)",
     system_operator="Coordinador Eléctrico Nacional (CEN)",
     countries={"CL": "Chile"},

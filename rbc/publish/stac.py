@@ -7,7 +7,10 @@ import json
 import math
 import re
 import shutil
+import subprocess
+import tomllib
 from dataclasses import dataclass, field, replace
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +35,10 @@ THEMES_EXT = "https://stac-extensions.github.io/themes/v1.0.0/schema.json"
 ITEM_ASSETS_EXT = "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json"
 DATACUBE_EXT = "https://stac-extensions.github.io/datacube/v2.2.0/schema.json"
 SCIENTIFIC_EXT = "https://stac-extensions.github.io/scientific/v1.0.0/schema.json"
+PROCESSING_EXT = "https://stac-extensions.github.io/processing/v1.2.0/schema.json"
+
+# The project's metadata: name and version of the software that processes the data
+PYPROJECT = Path(Path(__file__).resolve().parents[2], "pyproject.toml")
 
 # The energy extension's Item properties, as columns of the STAC data (without "energy:")
 ENERGY_FIELDS = [
@@ -57,18 +64,21 @@ SUMMARY_FIELDS = ["fuel_type", "entity_type", "status", "measurement_type"]
 class DatasetInfo:
     """What a dataset's Collections say about its source, license and processing.
 
-    A dataset can come in several temporal resolutions, so its title, description and
-    values name the resolution as `{tres}`, e.g. "hourly" or "15-minute", or as `{Tres}`
-    at the start of a sentence (s. `for_resolution`).
+    A dataset can come in several temporal resolutions, so its title, description,
+    lineage and values name the resolution as `{tres}`, e.g. "hourly" or "15-minute", or
+    as `{Tres}` at the start of a sentence (s. `for_resolution`).
 
     Attributes:
         dataset (str): ID of the dataset, e.g. "cen".
         title (str): Its title, e.g. "CEN (Chile) {tres} generation per plant".
-        description (str): Its description, incl. license terms and processing steps.
+        description (str): Its description, incl. license terms.
         license (str): The STAC license value, e.g. "proprietary" for terms of use.
         license_url (str): Link to the license's terms.
-        providers (list[JSON]): STAC providers, e.g. the operator as "licensor".
+        providers (list[JSON]): STAC providers, e.g. the operator as "licensor" and the
+            "EnergyBench Association" as "processor".
         citation (str): How to cite the data (the scientific extension's citation).
+        lineage (str): How the source's data was changed: the processing extension's
+            lineage, on the "processor" provider, also closing the description.
         values (str): What the repository's `values` hold, e.g. "{Tres} gross
             generation (MW)".
         system_operator (str): The system operator's name, e.g. "Coordinador
@@ -89,6 +99,7 @@ class DatasetInfo:
     license_url: str
     providers: list[JSON]
     citation: str
+    lineage: str
     values: str
     system_operator: str
     countries: dict[str, str]
@@ -124,9 +135,46 @@ class DatasetInfo:
             self,
             title=self.title.format(**words),
             description=self.description.format(**words),
+            lineage=self.lineage.format(**words),
             values=self.values.format(**words),
             keywords=[*self.keywords, word],
         )
+
+
+@cache
+def get_software() -> dict[str, str]:
+    """Define the STAC processing:software as project name and version plus git commit.
+
+    Read from the checked-out pyproject.toml, so both match the code that runs (an
+    editable install's metadata keeps the version it was installed with). The version
+    alone isn't raised per change, so the commit tells which code produced a release,
+    e.g. "0.0.1+g4176167" (a PEP 440 local version).
+
+    Returns:
+        dict[str, str]: The processing extension's software, e.g. {"RenewBench-Crawler":
+            "0.0.1+g4176167"}. Fallback: import package's name and "unknown" without
+            pyproject.toml; version without "+g<commit>" outside a git checkout.
+    """
+    try:
+        project = tomllib.loads(PYPROJECT.read_text())["project"]
+        name, package = project["name"], project["version"]
+
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        name, package = __name__.split(".")[0], "unknown"
+
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return {name: package}  # no git checkout or no git exists
+
+    return {name: f"{package}+g{commit}" if commit else package}
 
 
 def collection_id(dataset: str, step: str, release: str) -> str:
@@ -220,8 +268,25 @@ def build_collection(
 
     Returns:
         JSON: The Collection, linked as the root of a static catalog (s. `write_stac`).
+
+    Raises:
+        ValueError: If no provider is a "processor", to hold the lineage.
     """
     info = info.for_resolution(step)
+
+    processing = {
+        "processing:lineage": info.lineage,  # for "processor" provider (= EnergyBench)
+        "processing:software": get_software(),
+    }
+    providers = [
+        {**p, **processing} if "processor" in p.get("roles", []) else p
+        for p in info.providers
+    ]
+    if providers == info.providers:
+        raise ValueError(
+            f"'{info.dataset}' has no 'processor' provider for its lineage."
+        )
+
     license_links = [
         {
             "rel": "license",
@@ -278,9 +343,10 @@ def build_collection(
             ITEM_ASSETS_EXT,
             DATACUBE_EXT,
             SCIENTIFIC_EXT,
+            PROCESSING_EXT,
         ],
         "title": f"{info.title} — release {release}",
-        "description": info.description,
+        "description": f"{info.description.rstrip()}\n\n{info.lineage}",
         "license": info.license,
         "keywords": ["generation", release, *info.keywords],
         # the domain, then what the website's Browse filters offer (s. STAC contract)
@@ -307,7 +373,7 @@ def build_collection(
                 ],
             },
         ],
-        "providers": info.providers,
+        "providers": providers,
         "version": release,
         "deprecated": False,
         "sci:citation": info.citation,

@@ -100,12 +100,6 @@ ONS_DATASET = DatasetInfo(
         "their groups hold ONS's generation forecasts, not measurements.\n\n"
         "Licensed under CC-BY (version not stated), crediting ONS as the source "
         f"({ONS_DATA_URL}). Not endorsed by ONS.\n\n"
-        "Changes made: ONS's values ('val_geracao') are kept as reported, missing ones "
-        "stay missing. Times are converted from Brasília time (incl. DST until 2019) to "
-        "UTC; the hour the clocks repeated, which ONS reports in one row for two hours, "
-        "is left out. Plant and fuel types, operating modes and IDs are mapped to the "
-        "STAC energy extension's fields. Locations are found by matching plant names to "
-        "open plant databases (GEM, osm-powerplants, OpenStreetMap).\n\n"
     ),
     license="CC-BY",  # as ONS's notice names it: not an SPDX ID, which needs a version
     license_url="http://opendefinition.org/od/2.1/pt-br/",
@@ -126,6 +120,18 @@ ONS_DATASET = DatasetInfo(
         "Operador Nacional do Sistema Elétrico (ONS), Brazil: generation per plant "
         f"(Geração por Usina em Base Horária), {ONS_DATA_URL}. Processed and published "
         "by the EnergyBench Association, https://www.energybench.org."
+    ),
+    lineage=(
+        "Processing into Icechunk repositories:\n"
+        "- Values: ONS's values ('val_geracao') are kept as reported, missing ones stay "
+        "missing.\n"
+        "- Times: converted from Brasília time (incl. DST until 2019) to UTC; the hour the "
+        "clocks repeated, which ONS reports in one row for two hours, is left out.\n\n"
+        "Processing into STAC metadata:\n"
+        "- Mappings: plant and fuel types, operating modes and IDs are mapped to the STAC "
+        "energy extension's fields.\n"
+        "- Locations: found by matching plant names to open plant databases (GEM, "
+        "osm-powerplants, OpenStreetMap)."
     ),
     values="{Tres} generation (MW)",
     system_operator="Operador Nacional do Sistema Elétrico (ONS)",

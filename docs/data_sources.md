@@ -306,10 +306,21 @@ RenewBench-Crawler package.
 
 **Processing** (`python -m scripts.energy.cen_process`, s. [usage guide](guide_usage.md))
 
+General:
 - Access: an API token is required to access the CEN plant registry for location finding.
 - Coordinates: taken from CEN's plant registry first. A plant whose registry name differs
   from CEN's `central`, or whose registry point lies outside its own registry region, is
   left to [coordinate finding](coordinate_finding.md).
+- Translations: Spanish to English for fuel types, status definition and names (for name
+  matching).
+- Mappings ([`rbc/energy/cen/mappings.py`](../rbc/energy/cen/mappings.py)):
+  - status: `estado` to `STAC_STATUSES`; square bracket terms in `central` to
+    `STAC_NAME_STATUSES`.
+    A square bracket term in `central` (e.g. `[NO_MOSTRAR]`) is the EGE's true status and
+    overrides `estado`.
+  - fuel: `tipo_tecnologia`/`subtipo_tecnologia` to `STAC_FUELS`, `STAC_COGENERATION_FUELS`.
+
+Columns:
 - IDs: `cen-<id_central>`, or `cen-<central>` (lowercase, dashes) for a plant without one.
 - Values: a plant reported in several configurations gets their sum (s. STAC
   `entity_type`). A battery's charging (`Retiro`) counts as negative.
@@ -327,22 +338,26 @@ RenewBench-Crawler package.
 
 **STAC**
 
+General:
+- `license`: `'proprietary'`, linking CEN's terms of use (s. Access); the Collections'
+  description states "academic, non-commercial use".
+- `processing:lineage`: the changes made to CEN's data (s. Processing); on the
+  EnergyBench provider and repeated at the end of the description.
+- `processing:software`: the project's name and version from `pyproject.toml`, with the git commit (e.g.
+  `0.0.1+g4176167`), on the EnergyBench provider.
+
+Energy extension:
 - `measurement_type`: `'gross_output'`
   - According to the [API documentation v2.0](https://www.coordinador.cl/wp-content/uploads/2023/11/Uso_Api_SIP__Sistema_Informacion_Publica_-v2.0.pdf)
     (p. 57, `generacion-real`): "La Generación Real del Sistema Eléctrico Nacional,
     corresponde a la Potencia bruta real del sistema, medida en MW" (= the real *gross*
-    power). Its endpoints deliver raw data, "sin agregaciones ni transformaciones".
+    power). Its endpoints deliver raw data: "sin agregaciones ni transformaciones".
 - `entity_type`: `'facility'`
   - A `central` (`id_central`) is a physical plant. It may be reported in several
     operating configurations (`id_opreal`, e.g. one per unit combination and fuel mode),
     which run at the same time, so the processor sums them per plant and hour.
-- `license`: `'proprietary'`, linking CEN's terms of use (s. Access); the Collections'
-  description states "academic, non-commercial use".
-- Vocabulary: `tipo_tecnologia`/`subtipo_tecnologia` and the registry's `estado` map to
-  STAC's fuel types and statuses in [`rbc/energy/cen/mappings.py`](../rbc/energy/cen/mappings.py)
-  (`STAC_FUELS`, `STAC_COGENERATION_FUELS`, `STAC_STATUSES`). A square bracket term in
-  `central` (e.g. `[NO_MOSTRAR]`) is the EGE's true status and overrides `estado`
-  (`STAC_NAME_STATUSES`).
+- `fuel_type`/`fuel_subtype`: using defined mapping.
+- `status`: using defined mapping.
 
 </details>
 
@@ -423,7 +438,10 @@ General:
   version (so not an SPDX ID). The Collections link the license
   ONS links (the [Open Definition 2.1](http://opendefinition.org/od/2.1/pt-br/)) and the
   [notice itself](https://dados.ons.org.br/dataset/geracao-usina-2#:~:text=Aviso,br).
-- `description`: states the changes made to ONS's data (s. Processing), as CC-BY asks.
+- `processing:lineage`: the changes made to ONS's data as required per CC-BY (on
+  the EnergyBench provider and repeated at the end of the description).
+- `processing:software`: the project's name and version from `pyproject.toml`, with the git commit (e.g.
+  `0.0.1+g4176167`), on the EnergyBench provider.
 
 Energy extension:
 - `entity_ids`: `id_ons` (`ons`) and, where ONS gives a valid one, ANEEL's `ceg` (`ceg`;
