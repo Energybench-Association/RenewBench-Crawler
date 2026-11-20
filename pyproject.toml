@@ -12,9 +12,9 @@ allow-direct-references = true
 name = "RenewBench-Crawler"
 version = "0.0.1"
 authors = [
-  { name="RenewBench Association", email="renewbench@lists.kit.edu"},
+  { name="EnergyBench Association", email="renewbench@lists.kit.edu"},
 ]
-description = "Data crawlers for building RenewBench dataset"
+description = "Data crawlers for building EnergyBench dataset"
 readme = "README.md"
 requires-python = ">=3.12,<3.14.0"
 classifiers = [
