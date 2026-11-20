@@ -1,4 +1,4 @@
-# tests/test_utils.py
+# tests/utils/test_logs.py
 import sys
 from pathlib import Path
 from typing import Any
@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from loguru import logger
 
-from rbc.utils import clean_record, handle_exceptions, setup_logging
+from rbc.utils.logs import clean_record, handle_exceptions, setup_logging
 
 
 # ----------------------------------

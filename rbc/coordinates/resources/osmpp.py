@@ -12,7 +12,7 @@ from loguru import logger
 from rbc.coordinates.match_schema import PPDB_SCHEMA
 from rbc.coordinates.utils.country import normalize_locator_countries
 from rbc.coordinates.utils.resources import fetch_resource
-from rbc.energy.utils import load_df_from_file
+from rbc.utils.io import load_df_from_file
 
 OSMPP_URL = (
     "https://raw.githubusercontent.com/open-energy-transition/osm-powerplants/main/"

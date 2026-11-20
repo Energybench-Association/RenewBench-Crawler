@@ -42,7 +42,7 @@ from rbc.coordinates.utils.fuel import classify_fueltype_match
 from rbc.coordinates.utils.tokenizer import NameTokenizer
 from rbc.coordinates.utils.values import is_missing, normalize_name, strip_str
 from rbc.energy.entsoe.mappings import ACTIVE_ZONES_METADATA
-from rbc.energy.utils import MissingDataError
+from rbc.utils.errors import MissingDataError
 
 # the operator's own coordinates take precedence over every matched locator's
 SORTED_LOCATORS = [

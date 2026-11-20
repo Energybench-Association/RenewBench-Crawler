@@ -24,7 +24,7 @@ from rbc.energy.cen.processor import (
     REGISTRY_RENAMES,
     CenProcessor,
 )
-from rbc.energy.processing import combine_fuels, global_ids
+from rbc.energy.utils.processing import combine_fuels, global_ids
 
 RELEASE = "v0.1.0"
 PUBLISH_CFG = PublishConfig(

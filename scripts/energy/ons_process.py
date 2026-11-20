@@ -18,7 +18,7 @@ from rbc.config.loader import (
 )
 from rbc.config.schema import CoordinatesConfig, PublishConfig
 from rbc.energy.ons.processor import SOURCE, OnsProcessor
-from rbc.utils import setup_logging
+from rbc.utils.logs import setup_logging
 
 
 def parse_arguments() -> Namespace:

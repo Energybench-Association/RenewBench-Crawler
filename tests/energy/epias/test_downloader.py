@@ -11,12 +11,8 @@ from requests.exceptions import HTTPError
 
 from rbc.energy.epias import EpiasDownloader
 from rbc.energy.epias.downloader import EXPECTED_COLS
-from rbc.energy.utils import (
-    DataStructureError,
-    DownloadTask,
-    InvalidError,
-    MissingDataError,
-)
+from rbc.energy.utils.downloading import DownloadTask
+from rbc.utils.errors import DataStructureError, InvalidError, MissingDataError
 
 
 # ----------------------------------

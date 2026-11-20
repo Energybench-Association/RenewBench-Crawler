@@ -13,12 +13,8 @@ from requests import exceptions
 
 from rbc.energy.aeso import AesoDownloader
 from rbc.energy.aeso.downloader import EXPECTED_COLS
-from rbc.energy.utils import (
-    DataStructureError,
-    DownloadTask,
-    InvalidError,
-    MissingDataError,
-)
+from rbc.energy.utils.downloading import DownloadTask
+from rbc.utils.errors import DataStructureError, InvalidError, MissingDataError
 
 
 # ----------------------------------

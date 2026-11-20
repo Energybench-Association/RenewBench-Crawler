@@ -22,7 +22,7 @@ from rbc.coordinates.resources.eic import (
     EICCodeRegistry,
     extract_prefix,
 )
-from rbc.energy.utils import InvalidError
+from rbc.utils.errors import InvalidError
 
 EIC_MODULE = "rbc.coordinates.resources.eic"
 

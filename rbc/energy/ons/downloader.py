@@ -12,14 +12,9 @@ import pandas as pd
 import requests
 from loguru import logger
 
-from rbc.energy.utils import (
-    WORKERS,
-    DataStructureError,
-    DownloadTask,
-    EnergyDownloader,
-    MissingDataError,
-    load_df_from_file,
-)
+from rbc.energy.utils.downloading import WORKERS, DownloadTask, EnergyDownloader
+from rbc.utils.errors import DataStructureError, MissingDataError
+from rbc.utils.io import load_df_from_file
 
 URL_BASE = "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/geracao_usina_2_ho/"
 

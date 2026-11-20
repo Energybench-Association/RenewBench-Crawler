@@ -10,12 +10,8 @@ import pytest
 from entsoe.query.decorators import ServiceUnavailableError
 
 from rbc.energy.entsoe import EntsoeDownloader
-from rbc.energy.utils import (
-    DataStructureError,
-    DownloadTask,
-    InvalidError,
-    MissingDataError,
-)
+from rbc.energy.utils.downloading import DownloadTask
+from rbc.utils.errors import DataStructureError, InvalidError, MissingDataError
 
 
 # ----------------------------------

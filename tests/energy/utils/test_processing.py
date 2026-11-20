@@ -1,4 +1,4 @@
-# tests/energy/test_processing.py
+# tests/energy/utils/test_processing.py
 """Tests for the energy processors' shared output layout."""
 
 import json
@@ -9,7 +9,7 @@ import pytest
 from loguru import logger
 from shapely.geometry import Polygon, mapping
 
-from rbc.energy.processing import (
+from rbc.energy.utils.processing import (
     STAC_COLUMNS,
     ZARR_COLUMNS,
     check_totals_kept,

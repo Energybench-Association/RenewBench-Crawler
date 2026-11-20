@@ -13,7 +13,8 @@ from requests import exceptions
 
 from rbc.energy.ons import OnsDownloader
 from rbc.energy.ons.downloader import EXPECTED_COLS, URL_BASE
-from rbc.energy.utils import DataStructureError, DownloadTask, MissingDataError
+from rbc.energy.utils.downloading import DownloadTask
+from rbc.utils.errors import DataStructureError, MissingDataError
 
 
 # ----------------------------------

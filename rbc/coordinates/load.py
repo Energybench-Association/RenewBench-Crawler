@@ -13,7 +13,8 @@ import pandas as pd
 from loguru import logger
 
 from rbc.coordinates.mappings import OPERATOR_COLUMNS, OPERATOR_METADATA
-from rbc.energy.utils import DATE_PATTERN, TRES_PATTERN, load_df_from_file
+from rbc.energy.utils.downloading import DATE_PATTERN, TRES_PATTERN
+from rbc.utils.io import load_df_from_file
 
 
 @dataclass(frozen=True, eq=False)  # eq=False: a dataframe can't be compared or hashed

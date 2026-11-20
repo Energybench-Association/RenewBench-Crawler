@@ -18,7 +18,9 @@ from rapidfuzz import fuzz, process
 
 from rbc.coordinates.utils.resources import fetch_resource
 from rbc.coordinates.utils.values import strip_str
-from rbc.energy.utils import RETRY_ERRORS, InvalidError, load_df_from_file
+from rbc.energy.utils.downloading import RETRY_ERRORS
+from rbc.utils.errors import InvalidError
+from rbc.utils.io import load_df_from_file
 
 EIC_URL = "https://eepublicdownloads.blob.core.windows.net/cio-lio/csv/"
 EIC_CSV_FILE = "W_eicCodes.csv"

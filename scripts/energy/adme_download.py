@@ -13,7 +13,7 @@ from loguru import logger
 from rbc.config.loader import load_config, parse_key_value_pairs
 from rbc.energy.adme import AdmeDownloader
 from rbc.energy.adme.downloader import MIN_YEAR
-from rbc.utils import setup_logging
+from rbc.utils.logs import setup_logging
 
 SOURCE = "adme"
 

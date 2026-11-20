@@ -16,15 +16,13 @@ from openelectricity import AsyncOEClient, DataMetric, OEClient
 from openelectricity.client import APIError
 from openelectricity.models.facilities import FacilityResponse
 
-from rbc.energy.utils import (
+from rbc.energy.utils.downloading import (
     ASYNC_WORKERS,
     WORKERS,
-    DataStructureError,
     DownloadTask,
     EnergyDownloader,
-    InvalidError,
-    MissingDataError,
 )
+from rbc.utils.errors import DataStructureError, InvalidError, MissingDataError
 
 logging.getLogger("openelectricity").setLevel(logging.CRITICAL)
 

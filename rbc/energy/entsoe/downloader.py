@@ -15,15 +15,9 @@ from entsoe.utils import add_timestamps, extract_records
 from loguru import logger
 
 from rbc.energy.entsoe.mappings import ACTIVE_ZONES, ACTIVE_ZONES_METADATA, MIN_YEAR
-from rbc.energy.utils import (
-    WORKERS,
-    DataStructureError,
-    DownloadTask,
-    EnergyDownloader,
-    InvalidError,
-    MissingDataError,
-    write_df_to_csv,
-)
+from rbc.energy.utils.downloading import WORKERS, DownloadTask, EnergyDownloader
+from rbc.utils.errors import DataStructureError, InvalidError, MissingDataError
+from rbc.utils.io import write_df_to_csv
 
 EXPECTED_COLS = [
     "timestamp",

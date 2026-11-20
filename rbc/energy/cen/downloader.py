@@ -12,15 +12,14 @@ import requests
 from loguru import logger
 from requests import exceptions
 
-from rbc.energy.utils import (
+from rbc.energy.utils.downloading import (
     MAX_RETRIES,
     RATE_LIMIT_RETRY_DELAY,
     WORKERS,
-    DataStructureError,
     DownloadTask,
     EnergyDownloader,
-    MissingDataError,
 )
+from rbc.utils.errors import DataStructureError, MissingDataError
 
 URL_ROOT = "https://sipub.api.coordinador.cl/"
 URL_BASE = "https://sipub.api.coordinador.cl/generacion-real/v3/findByDate"

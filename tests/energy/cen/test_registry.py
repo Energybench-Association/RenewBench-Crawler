@@ -10,7 +10,8 @@ from requests import exceptions
 
 from rbc.energy.cen import registry
 from rbc.energy.cen.registry import CenCoordinateRegistry, add_latlon, utm_to_latlon
-from rbc.energy.utils import MAX_RETRIES, DataStructureError
+from rbc.energy.utils.downloading import MAX_RETRIES
+from rbc.utils.errors import DataStructureError
 
 # a point in Antofagasta (zone 19K) and one in O'Higgins (zone 19H), as CEN formats them
 ANTOFAGASTA = ("300.000", "7.460.000", "19 K")

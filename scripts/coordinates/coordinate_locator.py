@@ -8,7 +8,7 @@ from typing import cast
 from rbc.config.loader import CONFIGS_DIR, load_config
 from rbc.config.schema import CoordinatesConfig
 from rbc.coordinates.orchestrator import perform_coordinate_finding
-from rbc.utils import setup_logging
+from rbc.utils.logs import setup_logging
 
 SOURCES = [p.stem for p in sorted(Path(CONFIGS_DIR, "energy").glob("*.yaml"))]
 

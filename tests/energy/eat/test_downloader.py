@@ -11,7 +11,8 @@ from requests import exceptions
 
 from rbc.energy.eat import EatDownloader
 from rbc.energy.eat.downloader import EXPECTED_COLS
-from rbc.energy.utils import DataStructureError, DownloadTask, MissingDataError
+from rbc.energy.utils.downloading import DownloadTask
+from rbc.utils.errors import DataStructureError, MissingDataError
 
 
 # ----------------------------------

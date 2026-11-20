@@ -1,25 +1,31 @@
-"""UTILS.
+"""DOWNLOADING.
 
-Shared helper functions for data downloaders
+Shared base of the energy data downloaders: tasks, their threading and retries.
 """
 
-import json
 import os
 import pickle
 import re
 import threading
 import time
 import urllib
-import zipfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable
 
 import pandas as pd
 import requests
 import urllib3
 from loguru import logger
+
+from rbc.utils.errors import (
+    DataStructureError,
+    InvalidError,
+    MissingDataError,
+    RateLimitError,
+)
+from rbc.utils.io import write_df_to_csv, write_dict_to_json
 
 WORKERS = 4
 ASYNC_WORKERS = 10
@@ -48,30 +54,6 @@ RETRY_ERRORS = (
     ConnectionError,
     TimeoutError,
 )
-
-
-class MissingDataError(Exception):
-    """Raised when a data source is missing data that a task is trying to download."""
-
-    pass
-
-
-class DataStructureError(Exception):
-    """Raised when a data source changes its structure significantly."""
-
-    pass
-
-
-class RateLimitError(Exception):
-    """Raised when the API rate limit has been reached and downloading must be stopped."""
-
-    pass
-
-
-class InvalidError(Exception):
-    """Raised when provided values/arguments are invalid in some way that force a stop."""
-
-    pass
 
 
 @dataclass(frozen=True)
@@ -528,115 +510,3 @@ class EnergyDownloader(ABC):
             list[str]: List of all valid years, formatted as YYYY.
         """
         return list(dict.fromkeys(d[:4] for d in self._get_date_list()))
-
-
-def write_df_to_csv(df: pd.DataFrame, file_path: Path, index: bool = False) -> None:
-    """Write dataframe to csv file.
-
-    Args:
-        df (pd.DataFrame): Pandas dataframe to be stored in csv file.
-        file_path (Path): Path to the csv file.
-        index (bool, optional): Whether to include the df index in the csv (True) or not
-            (False). Defaults to False.
-    """
-    file_path = file_path.with_suffix(".csv")
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-
-    df.to_csv(file_path, index=index)
-    logger.info(f"Successfully wrote dataframe to '{file_path}'")
-
-
-def write_dict_to_json(data: dict, file_path: Path) -> None:
-    """Write dictionary to json file.
-
-    Args:
-        data (dict): Dictionary to be stored in json file.
-        file_path (Path): Path to the json file.
-    """
-    file_path = file_path.with_suffix(".json")
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(file_path, "w") as f:
-        json.dump(data, f, indent=4)
-    logger.info(f"Successfully wrote dictionary to '{file_path}'")
-
-
-def load_df_from_file(
-    file_path: Path | str, file_type: Literal[".csv", ".xlsx"] | None = None, **args
-) -> pd.DataFrame:
-    """Load pandas dataframe from a file such as an Excel or csv (file or URL directly).
-
-    Args:
-        file_path (Path | str): Path to the Excel file.
-        file_type (str | None): Manual file type definition for loading. Defaults to None.
-        args (optional): Additional arguments to be passed to pandas loading
-            function, i.e. sheet_name for an Excel or index_col for a CSV.
-
-    Returns:
-        pd.DataFrame: Pandas dataframe extracted from the provided file.
-
-    Raises:
-        InvalidError: If the file doesn't have one of the expected suffixes, if the file
-            doesn't exist, if invalid arguments (args) were provided for loading with pandas.
-        RETRY_ERRORS: If the file is a URL that is inaccessible for some reason.
-    """
-    # get suffix as: the defined type OR one of the path suffixes, if it's a valid option
-    suffix: str = file_type or next(
-        (s for s in Path(file_path).suffixes if s in (".csv", ".xlsx")), ""
-    )
-
-    try:
-        if suffix == ".xlsx":
-            df = pd.read_excel(str(file_path), **args)
-
-        elif suffix == ".csv":
-            df = pd.read_csv(str(file_path), **args)
-
-        else:
-            raise InvalidError(
-                f"Invalid extension in '{file_path}' - not a csv or xlsx!"
-            )
-
-    except FileNotFoundError:
-        raise InvalidError(f"Invalid path - file '{file_path}' does not exist!")
-
-    except TypeError as e:
-        raise InvalidError(f"Invalid argument for loading from '{file_path}': {e}")
-
-    except RETRY_ERRORS:  # these can occur when the file is a URL!
-        raise
-
-    logger.info(f"Successfully loaded dataframe from '{file_path}'")
-    return df
-
-
-def load_excel_from_file(file_path: Path | str) -> pd.ExcelFile:
-    """Load an Excel file from the provided URL.
-
-    Args:
-        file_path (str): URL to download data from.
-
-    Returns:
-        pd.ExcelFile: Excel file extracted from the provided URL.
-
-    Raises:
-        InvalidError: If the file isn't an xlsx, if the file doesn't exist
-        RETRY_ERRORS: If the file is a URL that is inaccessible for some reason.
-    """
-    if Path(file_path).suffix != ".xlsx":
-        raise InvalidError(f"Invalid extension in '{file_path}' - not an xlsx!")
-
-    try:
-        xlsx_file = pd.ExcelFile(file_path)
-
-    except FileNotFoundError:
-        raise InvalidError(f"Invalid path - file '{file_path}' does not exist!")
-
-    except zipfile.BadZipFile:
-        raise InvalidError(f"Invalid file content - '{file_path}' is not a valid xlsx!")
-
-    except RETRY_ERRORS:  # these can occur when the file is a URL!
-        raise
-
-    logger.info(f"Successfully loaded excel from '{file_path}'")
-    return xlsx_file

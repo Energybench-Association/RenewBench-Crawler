@@ -11,12 +11,8 @@ import pytest
 from requests import exceptions
 
 from rbc.energy.eia import EiaDownloader
-from rbc.energy.utils import (
-    MAX_RETRIES,
-    DataStructureError,
-    DownloadTask,
-    MissingDataError,
-)
+from rbc.energy.utils.downloading import MAX_RETRIES, DownloadTask
+from rbc.utils.errors import DataStructureError, MissingDataError
 
 
 # ----------------------------------

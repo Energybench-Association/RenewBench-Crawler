@@ -16,7 +16,7 @@ import pandas as pd
 import xarray as xr
 from loguru import logger
 
-from rbc.energy.utils import TRES_PATTERN
+from rbc.energy.utils.downloading import TRES_PATTERN
 
 # Map: the resolution's unit → its ISO 8601 duration, e.g. "15min" → "PT15M"
 ISO_DURATIONS = {"min": "PT{}M", "h": "PT{}H", "d": "P{}D"}

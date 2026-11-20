@@ -1,10 +1,10 @@
-# tests/energy/test_stac_entity.py
+# tests/energy/utils/test_stac_entity.py
 """Tests for the energy extension's entity types (parts of a facility)."""
 
 import pandas as pd
 import pytest
 
-from rbc.energy.stac_entity import EntityTypeDefiner
+from rbc.energy.utils.stac_entity import EntityTypeDefiner
 
 EARLY = {"2020-01", "2020-02"}
 LATE = {"2025-07"}
