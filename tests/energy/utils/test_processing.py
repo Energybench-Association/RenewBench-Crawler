@@ -17,10 +17,8 @@ from rbc.energy.utils.processing import (
     EnergyProcessor,
     check_totals_kept,
     combine_fuels,
-    ege_ids,
     entity_ids,
     geometries,
-    global_ids,
     local_period_in_utc,
     log_unjoined_ids,
     to_layout,
@@ -53,13 +51,32 @@ def test_to_layout_leaves_what_isnt_provided_unknown() -> None:
     assert out.loc[0].isna().all()
 
 
+def _ids(sysop: str, codes: list, names: list | None = None) -> pd.Series:
+    """Give EGEs their global IDs, as a processor of `sysop` does.
+
+    Args:
+        sysop (str): The operator, e.g. "cen".
+        codes (list): The EGEs' codes (None for missing).
+        names (list | None, optional): Their names. Defaults to none.
+
+    Returns:
+        pd.Series: The EGEs' global IDs.
+    """
+
+    class _OfSysop(_Processor):
+        SYSOP = sysop
+
+    names = names or [None] * len(codes)
+    return _OfSysop._get_global_ids(pd.Series(codes), pd.Series(names, dtype="string"))
+
+
 def test_global_ids_are_the_same_in_every_run() -> None:
     """Happy path: an EGE's global ID depends on its key alone, not on the other EGEs.
 
     So an EGE added later neither changes the existing IDs nor takes one of them.
     """
-    first = global_ids("cen", pd.Series(["116", "BESS BETA"]))
-    later = global_ids("cen", pd.Series(["2", "BESS BETA", "116"]))
+    first = _ids("cen", ["116", "BESS BETA"])
+    later = _ids("cen", ["2", "BESS BETA", "116"])
 
     assert first.tolist() == [later[2], later[1]] == ["cen-116", "cen-bess-beta"]
     assert later.nunique() == 3
@@ -67,20 +84,18 @@ def test_global_ids_are_the_same_in_every_run() -> None:
 
 def test_global_ids_differ_between_operators() -> None:
     """Happy path: the same key of two operators gives two IDs, unique across all."""
-    assert (
-        global_ids("cen", pd.Series(["1"]))[0] != global_ids("ons", pd.Series(["1"]))[0]
-    )
+    assert _ids("cen", ["1"])[0] != _ids("ons", ["1"])[0]
 
 
 def test_global_ids_missing_without_key() -> None:
     """Failure path: an EGE without a key gets no ID, rather than a shared one."""
-    assert global_ids("cen", pd.Series(["1", None])).isna().tolist() == [False, True]
+    assert _ids("cen", ["1", None]).isna().tolist() == [False, True]
 
 
 def test_global_ids_raise_on_clash() -> None:
     """Failure path: two keys written the same way raise, so no two EGEs share an ID."""
     with pytest.raises(ValueError, match="share the ID 'cen-bess-beta'"):
-        global_ids("cen", pd.Series(["BESS Beta", "BESS-BETA"]))
+        _ids("cen", ["BESS Beta", "BESS-BETA"])
 
 
 @pytest.mark.parametrize(
@@ -93,7 +108,9 @@ def test_global_ids_raise_on_clash() -> None:
         (None, "BESS BETA", "BESS BETA"),
     ],
 )
-def test_ege_ids(code: float | str | None, name: str, key: str) -> None:
+def test_global_ids_by_code_else_name(
+    code: float | str | None, name: str, key: str
+) -> None:
     """Happy path: an EGE's global ID is keyed by its code as text, else by its name.
 
     Both tables are written with these IDs, so they have to agree however a numeric code
@@ -104,8 +121,7 @@ def test_ege_ids(code: float | str | None, name: str, key: str) -> None:
         name (str): Its name.
         key (str): The key its global ID should derive from.
     """
-    expected = global_ids("cen", pd.Series([key])).tolist()
-    assert ege_ids("cen", pd.Series([code]), pd.Series([name])).tolist() == expected
+    assert _ids("cen", [code], [name]).tolist() == _ids("cen", [key]).tolist()
 
 
 @pytest.mark.parametrize(

@@ -7,8 +7,8 @@ steps can treat all operators alike:
 - Zarr data: one row per energy generating entity (EGE) and timestamp = time series EG data,
 - STAC data: one row per EGE, its columns named after the STAC energy extension.
 
-Both identify an EGE by its global ID ('id', s. `global_ids`), the STAC item's ID.
-A column an operator doesn't provide stays empty, i.e. its value is unknown.
+Both identify an EGE by its global ID ('id', s. `EnergyProcessor._get_global_ids`), the
+STAC item's ID. A column an operator doesn't provide stays empty, i.e. its value is unknown.
 """
 
 import json
@@ -17,7 +17,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar, Literal
 
-import icechunk as ic
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -39,10 +38,9 @@ from rbc.coordinates.utils.values import normalize_name
 from rbc.energy.utils.downloading import DATE_PATTERN
 from rbc.publish.icechunk_store import (
     EnergyIcechunkWriter,
-    StorageInfo,
-    open_repository,
-    repo_prefix,
-    resolution,
+    get_resolution,
+    get_storage_location,
+    open_or_create_repository,
 )
 from rbc.publish.stac import (
     DatasetInfo,
@@ -236,18 +234,22 @@ class EnergyProcessor(ABC):
 
         build_map([df_ege], labels=[run.map_label], output_dir=self.coordinates_dir)
         df_ege = df_ege.assign(
-            id=ege_ids(self.SYSOP, df_ege[SYSOP_CODE_COL], df_ege[SYSOP_NAME_COL])
-        )  # without coordinate finding, it's run.df
+            id=self._get_global_ids(df_ege[SYSOP_CODE_COL], df_ege[SYSOP_NAME_COL])
+        )  # without coordinate finding, this is simply run.df
 
         # Step 2: get raw EG data and build Icechunk repo for release
-        prefix = repo_prefix(self.SYSOP, run.name)
-        storage = self._get_storage_location(prefix)
+        step, step_iso = get_resolution(run.name)  # the raw data dir's, e.g. "1h"
+        storage = get_storage_location(
+            f"energy/{self.SYSOP}/{step_iso}/repository",
+            self.publish_cfg,
+            publish=self.publish,
+            local_dir=Path(self.output_dir, "icechunk"),
+        )
         entities = sorted(df_ege["id"].dropna().unique())
-        step, step_iso = resolution(run.name)  # the raw data dir's, e.g. "1h"
         file_periods = [path.stem for path in run.files]  # a year, month or day each
 
         writer = EnergyIcechunkWriter(
-            repo=self._open_repository(storage),
+            repo=open_or_create_repository(storage, self.publish_cfg),
             tag=self.release,
             entities=entities,
             start=local_period_in_utc(file_periods[0], self.TZ)[0],
@@ -415,45 +417,6 @@ class EnergyProcessor(ABC):
     # ------------------------------------------------------------------
     # HELPERS
     # ------------------------------------------------------------------
-    def _get_storage_location(self, prefix: str) -> StorageInfo:
-        """Give the repository's location: the published one if publishing, else local.
-
-        Args:
-            prefix (str): The repository's prefix, e.g. "energy/cen/PT1H/repository".
-
-        Returns:
-            StorageInfo: The repository's location.
-        """
-        if self.publish:
-            return StorageInfo(
-                prefix=prefix,
-                bucket=self.publish_cfg.bucket,
-                url_public=self.publish_cfg.url_public,
-            )
-        return StorageInfo(prefix=prefix, local_dir=Path(self.output_dir, "icechunk"))
-
-    def _open_repository(self, storage: StorageInfo) -> ic.Repository:
-        """Open the repository a StorageInfo names, on the config's route if published.
-
-        Args:
-            storage (StorageInfo): The repository's location.
-
-        Returns:
-            ic.Repository: The opened repository.
-        """
-        local_dir = storage.local_dir
-        # published on the LSDF route: <dst_dir_data>/<bucket>/<prefix>
-        if local_dir is None and self.publish_cfg.route == "lsdf":
-            local_dir = Path(
-                self.publish_cfg.lsdf.dst_dir_data, self.publish_cfg.bucket
-            )
-        return open_repository(
-            storage.prefix,
-            local_dir=local_dir,
-            endpoint=self.publish_cfg.s3.url_endpoint,
-            bucket=self.publish_cfg.bucket,
-        )
-
     def _get_raw_ids(self, df_eg: pd.DataFrame) -> pd.Series:
         """Give a raw file's rows their EGE's global ID, by its code or else its name.
 
@@ -461,11 +424,45 @@ class EnergyProcessor(ABC):
             df_eg (pd.DataFrame): A raw file's rows, with the operator's name/code columns.
 
         Returns:
-            pd.Series: Each row's EGE ID (s. `ege_ids`).
+            pd.Series: Each row's EGE ID (s. `_get_global_ids`).
         """
         code_col = self.meta.get("code_col")
         codes = df_eg[code_col] if code_col else pd.Series(pd.NA, index=df_eg.index)
-        return ege_ids(self.SYSOP, codes, df_eg[self.meta["name_col"]])
+        return self._get_global_ids(codes=codes, names=df_eg[self.meta["name_col"]])
+
+    @classmethod
+    def _get_global_ids(cls, codes: pd.Series, names: pd.Series) -> pd.Series:
+        """Give EGEs a readable ID unique across operators: '<SYSOP>-<code, else name>'.
+
+        The key (its code as text, else its name) is written in lowercase ASCII with dashes,
+        e.g. a CEN EGE with ID 1907 -> "cen-1907", a CEN EGE with only a name "BESS Andes"
+        -> "cen-bess-andes". Key creation is reproducible (same key for an EGE in every run),
+        so Zarr and STAC are joined correctly and a new EGE won't take an existing one's key.
+
+        Args:
+            codes (pd.Series): The EGEs' codes (missing for some).
+            names (pd.Series): The EGEs' names.
+
+        Returns:
+            pd.Series: The EGEs' global IDs (e.g. "cen-1907"), missing without a key.
+
+        Raises:
+            ValueError: If two keys give the same ID (e.g. "BESS Andes", "BESS-ANDES").
+        """
+        keys = codes_as_text(codes).fillna(names.astype("string"))
+        lookup = {
+            key: f"{cls.SYSOP}-{normalize_name(str(key)).replace(' ', '-')}"
+            for key in keys.dropna().unique()
+        }
+        seen: dict[str, object] = {}
+        for key, gid in lookup.items():
+            if gid in seen:
+                raise ValueError(
+                    f"'{cls.SYSOP}' EGE keys '{seen[gid]}' and '{key}' share the ID "
+                    f"'{gid}'."
+                )
+            seen[gid] = key
+        return keys.map(lookup)
 
     def _prepare_for_stac(
         self,
@@ -524,22 +521,6 @@ class EnergyProcessor(ABC):
 # ------------------------------------------------------------------
 # GENERAL HELPERS
 # ------------------------------------------------------------------
-def ege_ids(sysop: str, codes: pd.Series, names: pd.Series) -> pd.Series:
-    """Give EGEs their global ID, keyed by their ID or else their name.
-
-    The same identity coordinate finding dedupes by, so the Zarr and STAC data join.
-
-    Args:
-        sysop (str): Name of the system operator, e.g. "cen".
-        codes (pd.Series): The EGEs' IDs (missing for some).
-        names (pd.Series): The EGEs' names.
-
-    Returns:
-        pd.Series: The EGEs' global IDs, the same in the Zarr and the STAC data.
-    """
-    return global_ids(sysop, codes_as_text(codes).fillna(names.astype("string")))
-
-
 def codes_as_text(codes: pd.Series) -> pd.Series:
     """Write codes as text, numbers however they were read (116, 116.0, '116' -> '116').
 
@@ -552,38 +533,6 @@ def codes_as_text(codes: pd.Series) -> pd.Series:
     num = pd.to_numeric(codes, errors="coerce")
     whole = num.where(num % 1 == 0).astype("Int64").astype("string")
     return whole.fillna(codes.astype("string"))  # e.g. 'AMBA', '48W000000ABC1234'
-
-
-def global_ids(sysop: str, keys: pd.Series) -> pd.Series:
-    """Give each EGE a readable ID unique across all operators: '<sysop>-<its key>'.
-
-    The key is written in lowercase ASCII with dashes (e.g. CEN's plant ID 1907 gives
-    "cen-1907", a plant known only by its name "BESS Andes" gives "cen-bess-andes").
-    It needs no stored state: the same key gets the same ID in every run, and an EGE
-    added later can't take an existing one's.
-
-    Args:
-        sysop (str): Name of the system operator, e.g. "cen".
-        keys (pd.Series): Each EGE's key, unique within its operator (e.g. its code).
-
-    Returns:
-        pd.Series: The EGEs' global IDs (e.g. "cen-1907"), missing without a key.
-
-    Raises:
-        ValueError: If two keys give the same ID (e.g. "BESS Andes", "BESS-ANDES").
-    """
-    lookup = {
-        key: f"{sysop}-{normalize_name(str(key)).replace(' ', '-')}"
-        for key in keys.dropna().unique()
-    }
-    seen: dict[str, object] = {}
-    for key, gid in lookup.items():
-        if gid in seen:
-            raise ValueError(
-                f"'{sysop}' EGE keys '{seen[gid]}' and '{key}' share the ID '{gid}'."
-            )
-        seen[gid] = key
-    return keys.map(lookup)
 
 
 def log_unjoined_ids(zarr_ids: set[str], stac_ids: pd.Series) -> None:

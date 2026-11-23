@@ -3,6 +3,7 @@
 Write an operator's generation time series into its versioned Icechunk repository (Zarr
 v3), in MW, on a regular UTC axis at the data's own temporal resolution (e.g. hourly,
 15-minutely), one repository per resolution and one tagged snapshot per release.
+Where a repository lives (local, LSDF or S3) follows the publish config.
 """
 
 import os
@@ -16,6 +17,7 @@ import pandas as pd
 import xarray as xr
 from loguru import logger
 
+from rbc.config.schema import PublishConfig
 from rbc.energy.utils.downloading import TRES_PATTERN
 
 # Map: the resolution's unit → its ISO 8601 duration, e.g. "15min" → "PT15M"
@@ -55,7 +57,7 @@ class StorageInfo:
         return f"{str(self.url_public).rstrip('/')}/{self.bucket}/{self.prefix}"
 
 
-def resolution(tres: str) -> tuple[pd.Timedelta, str]:
+def get_resolution(tres: str) -> tuple[pd.Timedelta, str]:
     """Read a raw data directory's temporal resolution.
 
     Args:
@@ -77,62 +79,73 @@ def resolution(tres: str) -> tuple[pd.Timedelta, str]:
     return step, ISO_DURATIONS[unit].format(int(count))
 
 
-def repo_prefix(source: str, tres: str) -> str:
-    """Give an operator's repository prefix for one temporal resolution.
-
-    Args:
-        source (str): Name of the system operator, e.g. "entsoe".
-        tres (str): Name of its raw data directory, e.g. "15min".
-
-    Returns:
-        str: e.g. "energy/entsoe/PT15M/repository".
-    """
-    return f"energy/{source}/{resolution(tres)[1]}/repository"
-
-
-def open_repository(
-    prefix: str,
-    local_dir: Path | None = None,
-    endpoint: str | None = None,
-    bucket: str | None = None,
-) -> ic.Repository:
-    """Open (or create) a repository on S3, or in a local directory.
+def get_storage_location(
+    prefix: str, publish_cfg: PublishConfig, publish: bool, local_dir: Path
+) -> StorageInfo:
+    """Give a repository's location: the published one if publishing, else a local one.
 
     Args:
         prefix (str): Repository prefix, e.g. "energy/cen/PT1H/repository".
-        local_dir (Path | None, optional): Directory for a local repository. Defaults to
-            None, which stores it on S3.
-        endpoint (str | None, optional): S3 endpoint to write to. Defaults to None.
-        bucket (str | None, optional): S3 bucket. Defaults to None.
+        publish_cfg (PublishConfig): Where releases are published.
+        publish (bool): Whether the release is published.
+        local_dir (Path): Directory for an unpublished repository.
+
+    Returns:
+        StorageInfo: The repository's location.
+    """
+    if publish:
+        return StorageInfo(
+            prefix=prefix, bucket=publish_cfg.bucket, url_public=publish_cfg.url_public
+        )
+    return StorageInfo(prefix=prefix, local_dir=local_dir)
+
+
+def open_or_create_repository(
+    storage: StorageInfo, publish_cfg: PublishConfig | None = None
+) -> ic.Repository:
+    """Open the repository at a location, or create it there.
+
+    A local repository lives in its `local_dir`. A published one goes on the config's
+    route: `<lsdf.dst_dir_data>/<bucket>/<prefix>` for LSDF, else S3.
+
+    Args:
+        storage (StorageInfo): The repository's location (s. `get_storage_location`).
+        publish_cfg (PublishConfig | None, optional): Where releases are published, only
+            needed for a published repository. Defaults to None.
 
     Returns:
         ic.Repository: The opened repository.
 
     Raises:
-        ValueError: If neither a local directory nor an S3 endpoint and bucket is given,
-            or if the S3 credentials are not set.
+        ValueError: If a published repository has no config, no S3 endpoint and bucket,
+            or the S3 credentials are not set.
     """
-    if local_dir is not None:
-        path = Path(local_dir, prefix)
-        path.mkdir(parents=True, exist_ok=True)
-        return ic.Repository.open_or_create(ic.local_filesystem_storage(str(path)))
+    if storage.local_dir is not None:
+        path = Path(storage.local_dir, storage.prefix)
+    elif publish_cfg is None:
+        raise ValueError(f"Publishing '{storage.prefix}' needs the publish config.")
+    elif publish_cfg.route == "lsdf":
+        path = Path(publish_cfg.lsdf.dst_dir_data, publish_cfg.bucket, storage.prefix)
+    else:
+        endpoint, bucket = publish_cfg.s3.url_endpoint, publish_cfg.bucket
+        if not (endpoint and bucket):
+            raise ValueError("An S3 repository needs an endpoint and a bucket.")
+        key, secret = os.environ.get("S3_ACCESS_KEY"), os.environ.get("S3_SECRET_KEY")
+        if not (key and secret):
+            raise ValueError("Set S3_ACCESS_KEY and S3_SECRET_KEY to write to S3.")
+        s3 = ic.s3_storage(
+            bucket=bucket,
+            prefix=storage.prefix,
+            endpoint_url=endpoint,
+            allow_http=endpoint.startswith("http://"),
+            force_path_style=True,
+            access_key_id=key,
+            secret_access_key=secret,
+        )
+        return ic.Repository.open_or_create(s3)
 
-    if not (endpoint and bucket):
-        raise ValueError("An S3 repository needs an endpoint and a bucket.")
-    key, secret = os.environ.get("S3_ACCESS_KEY"), os.environ.get("S3_SECRET_KEY")
-    if not (key and secret):
-        raise ValueError("Set S3_ACCESS_KEY and S3_SECRET_KEY to write to S3.")
-
-    storage = ic.s3_storage(
-        bucket=bucket,
-        prefix=prefix,
-        endpoint_url=endpoint,
-        allow_http=endpoint.startswith("http://"),
-        force_path_style=True,
-        access_key_id=key,
-        secret_access_key=secret,
-    )
-    return ic.Repository.open_or_create(storage)
+    path.mkdir(parents=True, exist_ok=True)
+    return ic.Repository.open_or_create(ic.local_filesystem_storage(str(path)))
 
 
 class EnergyIcechunkWriter:

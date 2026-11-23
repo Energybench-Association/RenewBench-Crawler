@@ -2,6 +2,7 @@
 """Tests for writing a release's generation into its Icechunk repository."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import icechunk as ic
 import numpy as np
@@ -12,9 +13,9 @@ import xarray as xr
 from rbc.publish.icechunk_store import (
     EnergyIcechunkWriter,
     StorageInfo,
-    open_repository,
-    repo_prefix,
-    resolution,
+    get_resolution,
+    get_storage_location,
+    open_or_create_repository,
 )
 
 START = pd.Timestamp("2024-01-01 00:00", tz="UTC")
@@ -47,7 +48,9 @@ def _writer(
     Returns:
         EnergyIcechunkWriter: The writer.
     """
-    repo = open_repository("energy/x/PT1H/repository", local_dir=tmp_path)
+    repo = open_or_create_repository(
+        StorageInfo("energy/x/PT1H/repository", local_dir=tmp_path)
+    )
     return EnergyIcechunkWriter(
         repo, tag, list(entities), START, end, step=pd.Timedelta("1h"), chunks=(1, 4)
     )
@@ -166,30 +169,42 @@ def test_existing_release_with_another_time_axis_raises(tmp_path: Path) -> None:
         _writer(tmp_path, end=END + pd.Timedelta(hours=5))
 
 
-def test_repo_prefix_and_storage_href(tmp_path: Path) -> None:
-    """Happy path: the repository prefix layout, and where readers find it."""
-    prefix = repo_prefix("cen", "1h")
-    assert prefix == "energy/cen/PT1H/repository"
-    assert repo_prefix("entsoe", "15min") == "energy/entsoe/PT15M/repository"
-    published = StorageInfo(
-        prefix=prefix, bucket="energybench", url_public="https://data.example.org/"
-    )
+def test_storage_location_and_href(tmp_path: Path) -> None:
+    """Happy path: a release's repository is published or local, and where readers find it."""
+    prefix = "energy/cen/PT1H/repository"
+    cfg = MagicMock(bucket="energybench", url_public="https://data.example.org/")
+
+    published = get_storage_location(prefix, cfg, publish=True, local_dir=tmp_path)
+    assert published.local_dir is None
     assert (
         published.href
         == "https://data.example.org/energybench/energy/cen/PT1H/repository"
     )
-    assert StorageInfo(prefix=prefix, local_dir=tmp_path).href == str(
-        Path(tmp_path, prefix)
-    )
-    with pytest.raises(ValueError, match="isn't a temporal resolution"):
-        repo_prefix("cen", "hourly")
+    local = get_storage_location(prefix, cfg, publish=False, local_dir=tmp_path)
+    assert local.href == str(Path(tmp_path, prefix))
 
 
-def test_s3_repository_needs_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Failure path: writing to S3 without credentials in the environment raises."""
+def test_published_repository_on_the_lsdf_route(tmp_path: Path) -> None:
+    """Happy path: on the LSDF route, a published repository goes into dst_dir_data."""
+    cfg = MagicMock(route="lsdf", bucket="b")
+    cfg.lsdf.dst_dir_data = tmp_path
+    open_or_create_repository(StorageInfo("p", bucket="b"), cfg)
+    assert Path(tmp_path, "b", "p").is_dir()
+
+
+def test_published_repository_needs_config_and_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure path: publishing without the config or S3 credentials raises."""
+    storage = StorageInfo("p", bucket="b")
+    with pytest.raises(ValueError, match="needs the publish config"):
+        open_or_create_repository(storage)
+
     monkeypatch.delenv("S3_ACCESS_KEY", raising=False)
+    cfg = MagicMock(route="s3", bucket="b")
+    cfg.s3.url_endpoint = "https://s3.example.org"
     with pytest.raises(ValueError, match="S3_ACCESS_KEY"):
-        open_repository("p", endpoint="https://s3.example.org", bucket="b")
+        open_or_create_repository(storage, cfg)
 
 
 @pytest.mark.parametrize(
@@ -202,7 +217,7 @@ def test_s3_repository_needs_credentials(monkeypatch: pytest.MonkeyPatch) -> Non
         ("1d", pd.Timedelta(days=1), "P1D"),
     ],
 )
-def test_resolution(tres: str, step: pd.Timedelta, iso: str) -> None:
+def test_get_resolution(tres: str, step: pd.Timedelta, iso: str) -> None:
     """Happy path: a raw data dir's name gives the time step and its ISO 8601 duration.
 
     Args:
@@ -210,12 +225,20 @@ def test_resolution(tres: str, step: pd.Timedelta, iso: str) -> None:
         step (pd.Timedelta): The expected time step.
         iso (str): The expected ISO 8601 duration.
     """
-    assert resolution(tres) == (step, iso)
+    assert get_resolution(tres) == (step, iso)
+
+
+def test_get_resolution_raises_on_other_names() -> None:
+    """Failure path: a directory name that isn't a temporal resolution raises."""
+    with pytest.raises(ValueError, match="isn't a temporal resolution"):
+        get_resolution("hourly")
 
 
 def test_15_minute_axis(tmp_path: Path) -> None:
     """Happy path: a 15-minute writer keeps every quarter hour; off-axis times raise."""
-    repo = open_repository("energy/x/PT15M/repository", local_dir=tmp_path)
+    repo = open_or_create_repository(
+        StorageInfo("energy/x/PT15M/repository", local_dir=tmp_path)
+    )
     writer = EnergyIcechunkWriter(
         repo,
         "v0.1.0",

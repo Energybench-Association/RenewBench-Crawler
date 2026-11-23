@@ -25,7 +25,7 @@ from rbc.energy.cen.processor import (
     CenProcessor,
 )
 from rbc.energy.utils import processing
-from rbc.energy.utils.processing import combine_fuels, global_ids
+from rbc.energy.utils.processing import combine_fuels
 
 RELEASE = "v0.1.0"
 PUBLISH_CFG = PublishConfig(
@@ -163,7 +163,7 @@ def _gid(key: str) -> str:
     Returns:
         str: Its global ID.
     """
-    return global_ids("cen", pd.Series([key]))[0]
+    return CenProcessor._get_global_ids(pd.Series([key]), pd.Series([key]))[0]
 
 
 def _raw_row(
