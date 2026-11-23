@@ -1,24 +1,18 @@
 """CEN DATA PROCESSOR."""
 
-from dataclasses import replace
 from pathlib import Path
 
-import icechunk as ic
 import pandas as pd
 from loguru import logger
 from rapidfuzz import fuzz
 
 from rbc.config.schema import PublishConfig
-from rbc.coordinates.load import Run, load_runs
-from rbc.coordinates.map import build_map
 from rbc.coordinates.mappings import (
     OFFICIAL_LOCATOR,
     OPERATOR_METADATA,
     SYSOP_CODE_COL,
     SYSOP_NAME_COL,
 )
-from rbc.coordinates.orchestrator import find_coordinates
-from rbc.coordinates.pipelines import build_shared_resources
 from rbc.coordinates.utils.tokenizer import strip_square_brackets
 from rbc.coordinates.utils.values import normalize_name
 from rbc.energy.cen.mappings import (
@@ -30,60 +24,25 @@ from rbc.energy.cen.mappings import (
 )
 from rbc.energy.cen.registry import CenCoordinateRegistry
 from rbc.energy.utils.processing import (
-    LOCATION_COLUMNS,
-    STAC_COLUMNS,
     ZARR_COLUMNS,
+    EnergyProcessor,
     check_totals_kept,
-    codes_as_text,
     combine_fuels,
-    ege_ids,
-    entity_ids,
-    geometries,
-    log_unjoined_ids,
+    local_period_in_utc,
     to_layout,
     to_utc,
 )
-from rbc.publish.icechunk_store import (
-    EnergyIcechunkWriter,
-    StorageInfo,
-    open_repository,
-    repo_prefix,
-    resolution,
-)
-from rbc.publish.stac import (
-    DatasetInfo,
-    build_collection,
-    build_items,
-    drop_stac,
-    publish_stac,
-    validate,
-    write_stac,
-)
-from rbc.utils.io import load_df_from_file, write_df_to_csv
+from rbc.publish.stac import DatasetInfo
 
 SOURCE = "cen"
 
+# CEN columns
 META = OPERATOR_METADATA[SOURCE]
 COUNTRY = META["country"]
 NAME_COL = META["name_col"]
 CODE_COL = META["code_col"]
+CONFIG_COL = "id_opreal"  # a CEN EGE's ('central') operating configuration
 
-# Chile's time zone (CEN reports local time, incl. its DST changes)
-TZ = "America/Santiago"
-
-# A CEN plant's ('central') operating configuration, reported in rows of its own
-CONFIG_COL = "id_opreal"
-
-# CEN API docs v2.0 (2023), p. 57: "La Generación Real del Sistema Eléctrico Nacional,
-# corresponde a la Potencia bruta real del sistema, medida en MW" (s. data_sources.md)
-MEASUREMENT_TYPE = "gross_output"
-
-# Map: relevant registry columns for STAC (API names) → neutral names for processor
-REGISTRY_RENAMES = {
-    "id_central": "id",
-    "central": "name",
-    "estado": "status",
-}
 # Map: CEN's raw columns → the shared layout's (s. docs/data_sources.md, renamed on loading)
 CEN_COLUMNS = {
     "hora": "hour",
@@ -95,7 +54,17 @@ CEN_COLUMNS = {
     "subtipo_tecnologia": "fuel_subtype",
 }
 
-# What CEN's Collections say about the source, its terms of use and our processing
+# Map: relevant registry columns for STAC (API names) → neutral names for processor
+REGISTRY_RENAMES = {
+    "id_central": "id",
+    "central": "name",
+    "estado": "status",
+}
+
+# STAC measurement type (s. data_sources.md for details)
+MEASUREMENT_TYPE = "gross_output"
+
+# STAC Collection details for CEN, its license and our processing
 CEN_DATASET = DatasetInfo(
     dataset=SOURCE,
     title="CEN (Chile) {tres} generation per plant",
@@ -147,38 +116,28 @@ CEN_DATASET = DatasetInfo(
 )
 
 
-def local_day_in_utc(day: str) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Give a local calendar day's start and end in UTC (23, 24 or 25 hours apart).
+class CenProcessor(EnergyProcessor):
+    """CEN data processor (s. `EnergyProcessor`).
 
-    Args:
-        day (str): The local date, e.g. '2023-04-01'.
-
-    Returns:
-        tuple[pd.Timestamp, pd.Timestamp]: The day's first and the next day's first
-            instant in UTC. A midnight a DST change skips starts the day an hour later.
-    """
-    start, end = (
-        pd.Timestamp(d).tz_localize(TZ, nonexistent="shift_forward").tz_convert("UTC")
-        for d in (day, pd.Timestamp(day) + pd.Timedelta(days=1))
-    )
-    return start, end
-
-
-class CenProcessor:
-    """CEN data processor.
+    Its own coordinates come from CEN's plant registry (s. `_get_own_coordinates`),
+    coordinate finding locates the rest.
 
     Attributes:
-        input_dir (Path): The input directory containing subfolders of raw csv files.
-        resources_dir (Path): The directory containing resources for coordinate finding.
-        output_dir (Path): The output directory for processed energy generation data.
-        coordinates_dir (Path): The output directory for coordinate finding results.
-        release (str): The release to write and publish, e.g. "v0.1.0".
-        publish_cfg (PublishConfig): Where the data is published.
-        publish (bool): Whether to publish the release, or only write it locally.
-        periods (list[str] | None): Years or months of raw data to process (None: all).
         df_registry (pd.DataFrame): The dataframe of EGE info from CEN API registry.
-        shared (SharedResources): The dataclass of shared resources for coordinate finding.
     """
+
+    SYSOP = SOURCE
+    DATASET = CEN_DATASET
+    TZ = "America/Santiago"  # Chile's time zone (CEN reports local time w DST changes)
+    COLUMNS = CEN_COLUMNS
+    EGE_COLUMNS = [
+        CODE_COL,
+        CONFIG_COL,
+        "operator",
+        "generation_capacity",
+        "fuel_type",
+        "fuel_subtype",
+    ]
 
     def __init__(
         self,
@@ -205,169 +164,26 @@ class CenProcessor:
                 `output_dir` and the STAC records only as JSON. Defaults to True.
             periods (list[str] | None, optional): Years or months of raw data to
                 process, e.g. ["2024", "2025-03"]. Defaults to None, i.e. all raw files.
-
-        Raises:
-            ValueError: If publishing while a URL is still the config's placeholder (s.
-                `PublishConfig.check_publishable`).
         """
-        self.input_dir = input_dir
-        self.resources_dir = resources_dir
-        self.output_dir = output_dir
-        self.coordinates_dir = Path(output_dir, "coordinates")
-        self.release = release
-        self.publish_cfg = publish_cfg
-        self.publish = publish
-        self.periods = periods
-        if publish:
-            publish_cfg.check_publishable()
-
-        # FOR COORDINATE FINDING
+        super().__init__(
+            input_dir=input_dir,
+            resources_dir=resources_dir,
+            output_dir=output_dir,
+            release=release,
+            publish_cfg=publish_cfg,
+            publish=publish,
+            periods=periods,
+        )
         # load EGE coordinate information from CEN registry API endpoint
         reg = CenCoordinateRegistry(
             token=token, cache_dir=Path(self.resources_dir, "cen_portal")
         )
         self.df_registry = reg.df_registry.rename(columns=REGISTRY_RENAMES)
-        # load dataclass of shared resources for coordinate finding branch
-        self.shared = build_shared_resources(
-            sysop=SOURCE, resources_dir=self.resources_dir
-        )
 
     # ------------------------------------------------------------------
-    # ENTRYPOINT
+    # HOOKS (s. EnergyProcessor)
     # ------------------------------------------------------------------
-    def process_data(self) -> None:
-        """Process previously downloaded, raw CEN energy generation data.
-
-        Processing includes the following steps:
-        1. Load all raw generation data from each CSV dir (e.g. each temporal res) into
-           its own EGE dataframe.
-        2. Perform coordinate finding to get one EGE dataframe of unique EGEs & their coords.
-        3. Convert the EGE dataframe into zarr, and publish to Icechunk repositories.
-        4. Generate the STAC Collection and Items (one per EGE), validate them, and
-           publish to the STAC API.
-
-        Any inconsistency (e.g. an hour lost in UTC conversion, an unmapped fuel type)
-        raises and stops processing, rather than being skipped.
-        """
-        runs = list(load_runs([self.input_dir], sysop=SOURCE, periods=self.periods))
-        if not runs:
-            for_periods = f" for {self.periods}" if self.periods else ""
-            raise ValueError(
-                f"No raw '{SOURCE}' data found in {self.input_dir}{for_periods}."
-            )
-
-        for run in runs:
-            logger.info(f"Processing run '{run.name}'")
-            try:
-                self._process_run(run)
-            except Exception as e:
-                logger.exception(f"Processing {run.map_label} failed: {e}")
-                raise
-
-    def _process_run(self, run: Run) -> None:
-        """Process one run (raw CSV dir) end to end (s. `process_data`).
-
-        Args:
-            run (Run): The run's EGE rows and raw files.
-
-        Raises:
-            ValueError: If coordinate finding returns no EGEs.
-        """
-        release = self.release
-
-        # Step 1.1: CEN-specific coordinate finding
-        df_ege = self._get_coordinates(df_eg=run.df)
-        # Step 1.2: General coordinate finding for all EGEs that still lack one
-        df_ege = find_coordinates(
-            replace(run, df=df_ege), shared=self.shared, output_dir=self.coordinates_dir
-        )
-        if df_ege is None or len(df_ege) == 0:
-            raise ValueError(f"Coordinate finding returned no EGEs for {run.name}.")
-
-        build_map([df_ege], labels=[run.map_label], output_dir=self.coordinates_dir)
-        entities = sorted(
-            ege_ids(SOURCE, df_ege[SYSOP_CODE_COL], df_ege[SYSOP_NAME_COL])
-            .dropna()
-            .unique()
-        )
-
-        # Step 2: generation data into the release's repository, one raw CSV at a time
-        storage = self._storage(repo_prefix(SOURCE, run.name))
-        step, step_iso = resolution(run.name)  # the raw data dir's, e.g. "1h"
-        days = [path.stem for path in run.files]
-        writer = EnergyIcechunkWriter(
-            repo=self._repository(storage),
-            tag=release,
-            entities=entities,
-            start=local_day_in_utc(days[0])[0],
-            end=local_day_in_utc(days[-1])[1],
-            step=step,
-            chunks=(
-                self.publish_cfg.chunks.entities,
-                int(pd.Timedelta(days=self.publish_cfg.chunks.days) / step),
-            ),
-        )
-        df_eg_unique = pd.DataFrame()  # each EGE's own values, collected from every CSV
-        placeholders: list[pd.DataFrame] = []
-        zarr_ids: set[str] = set()  # to check both outputs describe the same EGEs
-        for path in run.files:
-            df_eg = load_df_from_file(path).drop_duplicates()  # remove repeated rows
-            df_eg = df_eg.rename(columns=CEN_COLUMNS)  # layout names now!
-            df_eg["id"] = ege_ids(SOURCE, df_eg[CODE_COL], df_eg[NAME_COL])
-            df_eg = self._drop_repeated_hours(df_eg, day=path.stem)
-            eg_unique = df_eg[
-                ["id", CODE_COL, CONFIG_COL, "operator", "generation_capacity"]
-                + ["fuel_type", "fuel_subtype"]
-            ]
-            # distinct values only, the latest last (files are in date order)
-            df_eg_unique = pd.concat([df_eg_unique, eg_unique]).drop_duplicates(
-                keep="last"
-            )
-
-            df_zarr, df_placeholders = self._prepare_for_zarr(df_eg, day=path.stem)
-            writer.add(df_zarr["id"], df_zarr["timestamp"], df_zarr["value"])
-            zarr_ids.update(df_zarr["id"].dropna())
-            placeholders.append(df_placeholders)
-
-        snapshot = writer.finish(message=f"{SOURCE} {release}: {days[0]} to {days[-1]}")
-        if self.publish and not writer.reused:
-            logger.warning(
-                f"Release '{release}' wrote new objects: readers reach them through "
-                f"{storage.href} only once new temporary links are signed for them."
-            )
-        # kept for review: CEN's rows for hours the clocks skipped (no real hour)
-        kept_out = pd.concat(placeholders, ignore_index=True)
-        if not kept_out.empty:
-            name = f"skipped_hour_placeholders_{run.name}.csv"
-            write_df_to_csv(kept_out, Path(self.output_dir, "review", name))
-
-        # Step 3: STAC records, one Item per EGE
-        df_stac = self._prepare_for_stac(df_ege, df_eg_unique)
-        log_unjoined_ids(zarr_ids, df_stac["id"])
-        items = build_items(
-            df_stac, writer.spans(), CEN_DATASET, release, storage, snapshot, step_iso
-        )
-        collection = build_collection(
-            CEN_DATASET,
-            release,
-            items,
-            storage,
-            snapshot,
-            entities=writer.entities,
-            times=writer.times,
-            step=step_iso,
-        )
-        validate(collection, items)
-        write_stac(Path(self.output_dir, "stac"), collection, items)
-        if self.publish and self.publish_cfg.route == "lsdf":
-            drop_stac(self.publish_cfg.lsdf.dst_dir_inbox, collection, items)
-        elif self.publish:
-            publish_stac(self.publish_cfg.s3.url_stac_api, collection, items)
-
-    # ------------------------------------------------------------------
-    # MAIN HELPERS
-    # ------------------------------------------------------------------
-    def _get_coordinates(self, df_eg: pd.DataFrame) -> pd.DataFrame:
+    def _get_own_coordinates(self, df_eg: pd.DataFrame) -> pd.DataFrame:
         """Add the coordinates of CEN's own EGE registry to the distinct EGE rows.
 
         Coordinate finding includes the following steps:
@@ -437,7 +253,8 @@ class CenProcessor:
 
         # 3. sanity check: the registry point should lie in the registry's own region
         off_region = pd.Index([])
-        if (region_reg := self.shared.region_reg) is not None:
+        region_reg = self.shared.region_reg if self.shared else None
+        if region_reg is not None:
             located = df_ege[f"{off}.lat"].notna()
             levels = pd.Series(
                 [
@@ -474,6 +291,19 @@ class CenProcessor:
         )
 
         return df_ege.drop(columns=[f"{off}.id", f"{off}.name"])  # served their purpose
+
+    def _clean_file(self, df_eg: pd.DataFrame, period: str) -> pd.DataFrame:
+        """Remove the rows a raw CSV repeats, identical ones and repeated hours.
+
+        Args:
+            df_eg (pd.DataFrame): A raw CSV's rows, in layout names, with their "id".
+            period (str): The local date the CSV holds, e.g. '2009-12-31'.
+
+        Returns:
+            pd.DataFrame: The rows, each configuration's hour once (s.
+                `_drop_repeated_hours`).
+        """
+        return self._drop_repeated_hours(df_eg.drop_duplicates(), day=period)
 
     @staticmethod
     def _drop_repeated_hours(df_eg: pd.DataFrame, day: str) -> pd.DataFrame:
@@ -531,7 +361,7 @@ class CenProcessor:
 
     def _prepare_for_zarr(
         self, df_eg: pd.DataFrame, day: str
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         """Bring one raw CSV (one local day) into the shared layout for the repository.
 
         Return a df with columns ZARR_COLUMNS ("id", "timestamp", and "value"):
@@ -550,9 +380,9 @@ class CenProcessor:
             day (str): The local date the CSV holds, e.g. '2023-04-01'.
 
         Returns:
-            tuple[pd.DataFrame, pd.DataFrame]: The generation data in the ZARR_COLUMNS
-                layout (UTC tz-aware), and CEN's placeholder rows for an hour the clocks
-                skipped.
+            tuple[pd.DataFrame, dict[str, pd.DataFrame]]: The generation data in the
+                ZARR_COLUMNS layout (UTC tz-aware), and CEN's placeholder rows for an
+                hour the clocks skipped, for review ("skipped_hour_placeholders").
 
         Raises:
             ValueError: If an hour can't be placed in UTC exactly once, or if any EGE's
@@ -587,10 +417,14 @@ class CenProcessor:
         check_totals_kept(
             net.groupby(df_eg["id"]).sum(), summed.groupby("id")["value"].sum(), day
         )
-        return to_layout(summed, ZARR_COLUMNS), placeholders
+        return (
+            to_layout(summed, ZARR_COLUMNS),
+            {"skipped_hour_placeholders": placeholders},
+        )
 
-    @staticmethod
-    def _hours_to_utc(df_eg: pd.DataFrame, day: str) -> tuple[pd.Series, pd.Series]:
+    def _hours_to_utc(
+        self, df_eg: pd.DataFrame, day: str
+    ) -> tuple[pd.Series, pd.Series]:
         """Place one raw CSV's hours in UTC, as CEN reports them around DST changes.
 
         Args:
@@ -612,11 +446,11 @@ class CenProcessor:
         if (pd.to_datetime(df_eg["timestamp"]) != clock).any():
             raise ValueError(f"{day}: 'fecha_hora' disagrees with 'hora'.")
 
-        start, end = local_day_in_utc(day)
+        start, end = local_period_in_utc(day, self.TZ)
         repeated = hour == 25
         if repeated.any():
-            prev_start, prev_end = local_day_in_utc(
-                str((pd.Timestamp(day) - pd.Timedelta(days=1)).date())
+            prev_start, prev_end = local_period_in_utc(
+                str((pd.Timestamp(day) - pd.Timedelta(days=1)).date()), self.TZ
             )
             if prev_end - prev_start != pd.Timedelta(hours=25):
                 raise ValueError(
@@ -625,7 +459,7 @@ class CenProcessor:
 
         # the only ambiguous clock hour left is Saturday's 23:00, its first one (DST)
         utc = to_utc(
-            clock, tz=TZ, dst=pd.Series(True, index=clock.index), skipped="NaT"
+            clock, tz=self.TZ, dst=pd.Series(True, index=clock.index), skipped="NaT"
         )
         # the repeated 23:00, standard time
         utc = utc.mask(repeated, start - pd.Timedelta(hours=1))
@@ -643,19 +477,17 @@ class CenProcessor:
             raise ValueError(f"{day}: hours outside the local day.")
         return utc, placeholder
 
-    def _prepare_for_stac(
-        self, df_ege: pd.DataFrame, df_eg_unique: pd.DataFrame
+    def _get_stac_fields(
+        self,
+        df_ege: pd.DataFrame,
+        df_eg_unique: pd.DataFrame,
+        active: pd.Series,
+        totals: pd.Series,
     ) -> pd.DataFrame:
-        """Prep unique EGE data from coordinate finding (_ege) & raw (_eg_unique) for STAC.
+        """Give each EGE's CEN-specific STAC fields (the rest: s. `EnergyProcessor`).
 
-        Return a df with columns STAC_COLUMNS:
-        - "id": get from global helper
-        - "entity_ids": use "id_central" column value (for `"cen": ...`) and, if found via
-           coordinate finding, the ID of the locator used for matching (e.g. `"gem": ...`)
-        - "entity_name": use "central" column values from df_eg_unique
+        - "entity_name": "central" without its square bracket term
         - "entity_type": hard-coded as "facility"
-        - "facility_name": -
-        - "group_name": -
         - "operator": use "propietario" column values from df_eg_unique
         - "fuel_type", "fuel_subtype", "hybrid_fuel_types": "tipo_tecnologia" and
           "subtipo_tecnologia" mapped to STAC's vocabulary (s. STAC_FUEL_MAPPING)
@@ -664,8 +496,6 @@ class CenProcessor:
         - "status": the square bracket term in "central", else the registry's "estado",
           mapped to STAC's vocabulary (s. STAC_NAME_STATUSES, STAC_STATUSES)
         - "measurement_type": hard-coded as "gross_output" (s. MEASUREMENT_TYPE)
-        - "lat", "lon", "region": from df_ege
-        - "geometry": a point, else the region's/country's polygon
 
         CEN reports a physical EGE ('central'). Sometimes, these are split into different
         operating configurations ('id_opreal') of units subdivided into fuel modes. E.g.
@@ -680,11 +510,14 @@ class CenProcessor:
         name (e.g. "[NO_MOSTRAR]") is the EGE's true status, else the registry's "estado".
 
         Args:
-            df_ege (pd.DataFrame): The EGEs as coordinate finding returned them.
+            df_ege (pd.DataFrame): The EGEs as coordinate finding returned them, once per
+                "id".
             df_eg_unique (pd.DataFrame): The EGE information from raw generation data.
+            active (pd.Series): The days each EGE reports values in (unused).
+            totals (pd.Series): Each EGE's total generation (unused).
 
         Returns:
-            pd.DataFrame: The EGEs in the STAC_COLUMNS layout.
+            pd.DataFrame: The fields above, indexed by EGE ID.
         """
         latest = df_eg_unique.drop_duplicates(subset=["id", CONFIG_COL], keep="last")
         per_ege = latest.groupby("id").agg(operator=("operator", "last"))
@@ -705,32 +538,24 @@ class CenProcessor:
 
         df_ege = self._join_registry(df_ege, code_col=SYSOP_CODE_COL, cols=["status"])
         names = df_ege[SYSOP_NAME_COL]
-        codes = df_ege[SYSOP_CODE_COL]
-        df_ege = (
-            df_ege.assign(
-                id=ege_ids(SOURCE, codes, names),
-                entity_ids=entity_ids(df_ege, own={"cen": codes_as_text(codes)}),
-                entity_name=names.map(
+        fields = pd.DataFrame(
+            {
+                "entity_name": names.map(
                     lambda n: (
                         (strip_square_brackets(n) or n) if isinstance(n, str) else n
                     )
-                ),
-                entity_type="facility",  # a CEN 'central' (s. docs/data_sources.md)
-                status=self._stac_status(
+                ).to_numpy(),
+                "entity_type": "facility",  # a CEN 'central' (s. docs/data_sources.md)
+                "status": self._stac_status(
                     names.str.extract(r"\[([^\]]+)\]", expand=False),
                     df_ege[f"{OFFICIAL_LOCATOR}.status"],
-                ),
-                measurement_type=MEASUREMENT_TYPE,
-            )
-            .drop_duplicates(subset="id")  # an EGE in several resolutions
-            .merge(per_ege.reset_index(), on="id", how="left")
+                ).to_numpy(),
+                "measurement_type": MEASUREMENT_TYPE,
+            },
+            index=pd.Index(df_ege["id"], name="id"),
         )
-
-        df_ege = to_layout(df_ege, STAC_COLUMNS, renames=LOCATION_COLUMNS)
-        df_ege["geometry"] = geometries(
-            df_ege, country=COUNTRY, region_reg=self.shared.region_reg
-        )
-        return df_ege
+        fields = fields[~fields.index.duplicated()]  # a registry ID listed twice
+        return fields.join(per_ege)
 
     # ------------------------------------------------------------------
     # SECONDARY HELPERS
@@ -815,44 +640,6 @@ class CenProcessor:
         if unknown:
             raise ValueError(f"CEN statuses without STAC status: {unknown}")
         return from_name.where(from_name.notna(), from_registry)  # where vs depr fillna
-
-    def _storage(self, prefix: str) -> StorageInfo:
-        """Return storage location - the published one if publishing, else locally.
-
-        Args:
-            prefix (str): The repository's prefix, e.g. "energy/cen/PT1H/repository".
-
-        Returns:
-            StorageInfo: The repository's location.
-        """
-        if self.publish:
-            return StorageInfo(
-                prefix=prefix,
-                bucket=self.publish_cfg.bucket,
-                url_public=self.publish_cfg.url_public,
-            )
-        return StorageInfo(prefix=prefix, local_dir=Path(self.output_dir, "icechunk"))
-
-    def _repository(self, storage: StorageInfo) -> ic.Repository:
-        """Open the repository a StorageInfo names, on the config's route if published.
-
-        Args:
-            storage (StorageInfo): The repository's location.
-
-        Returns:
-            ic.Repository: The opened repository.
-        """
-        cfg = self.publish_cfg
-        local_dir = storage.local_dir
-        # published on the LSDF route: <dst_dir_data>/<bucket>/<prefix>
-        if local_dir is None and cfg.route == "lsdf":
-            local_dir = Path(cfg.lsdf.dst_dir_data, cfg.bucket)
-        return open_repository(
-            storage.prefix,
-            local_dir=local_dir,
-            endpoint=cfg.s3.url_endpoint,
-            bucket=cfg.bucket,
-        )
 
     def _join_registry(
         self, df: pd.DataFrame, code_col: str, cols: list[str]

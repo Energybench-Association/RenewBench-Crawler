@@ -24,6 +24,7 @@ from rbc.energy.cen.processor import (
     REGISTRY_RENAMES,
     CenProcessor,
 )
+from rbc.energy.utils import processing
 from rbc.energy.utils.processing import combine_fuels, global_ids
 
 RELEASE = "v0.1.0"
@@ -98,7 +99,7 @@ def make_processor(
                 "CenCoordinateRegistry",
                 return_value=SimpleNamespace(df_registry=registry_rows),
             ),
-            patch.object(processor, "build_shared_resources", return_value=shared),
+            patch.object(processing, "build_shared_resources", return_value=shared),
         ):
             return CenProcessor(
                 token="token",
@@ -272,8 +273,8 @@ def processed(make_processor: Callable, tmp_path: Path) -> tuple[Path, MagicMock
     """
     _write_raw(Path(tmp_path, "raw", "cen", "1h"))
     with (
-        patch.object(processor, "build_map") as mock_map,
-        patch.object(processor, "validate", _skip),
+        patch.object(processing, "build_map") as mock_map,
+        patch.object(processing, "validate", _skip),
     ):
         make_processor(region_reg=_region_reg({})).process_data()
     return Path(tmp_path, "processed", "cen"), mock_map
@@ -313,7 +314,7 @@ def test_join_registry_matches_all_id_formats(make_processor: Callable) -> None:
 # ----------------------------------
 # Tests: official coordinates
 # ----------------------------------
-def test_get_coordinates_become_official(make_processor: Callable) -> None:
+def test_get_own_coordinates_become_official(make_processor: Callable) -> None:
     """Happy path: an EGE found by ID gets the registry's point as official coordinates.
 
     EGEs without registry coordinates (or without an ID) are kept with empty ones, for
@@ -324,7 +325,7 @@ def test_get_coordinates_become_official(make_processor: Callable) -> None:
     """
     df = _ege_rows((1.0, "TER ALPHA"), (4.0, "PE GAMMA"), (None, "BESS BETA"))
 
-    out = make_processor()._get_coordinates(df).set_index(NAME_COL)
+    out = make_processor()._get_own_coordinates(df).set_index(NAME_COL)
 
     assert out.at["TER ALPHA", "official.lat"] == -33.4
     assert out.at["TER ALPHA", "official.match_method"] == "official_id_exact"
@@ -341,7 +342,7 @@ def test_get_coordinates_become_official(make_processor: Callable) -> None:
         ("PMGD PVF DOÑA RUBENA", 2.0),  # a typo: ratio 95
     ],
 )
-def test_get_coordinates_match_stays_if_alike_names(
+def test_get_own_coordinates_match_stays_if_alike_names(
     make_processor: Callable, cen_name: str, code: float
 ) -> None:
     """Happy path: names differing only by a marker or a typo still confirm the ID.
@@ -351,11 +352,11 @@ def test_get_coordinates_match_stays_if_alike_names(
         cen_name (str): CEN's name for the EGE.
         code (float): Its ID.
     """
-    out = make_processor()._get_coordinates(_ege_rows((code, cen_name)))
+    out = make_processor()._get_own_coordinates(_ege_rows((code, cen_name)))
     assert out.loc[0, "official.lat"] == pytest.approx(-33.4 if code == 1 else -35.4)
 
 
-def test_get_coordinates_one_alike_name_is_enough(make_processor: Callable) -> None:
+def test_get_own_coordinates_one_alike_name_is_enough(make_processor: Callable) -> None:
     """Happy path: an ID is doubted only if none of its name variants is alike enough.
 
     Args:
@@ -363,12 +364,12 @@ def test_get_coordinates_one_alike_name_is_enough(make_processor: Callable) -> N
     """
     df = _ege_rows((3.0, "HE QUILLECO"), (3.0, "HE RUCUE"))
 
-    out = make_processor()._get_coordinates(df)
+    out = make_processor()._get_own_coordinates(df)
 
     assert out["official.lat"].notna().all()
 
 
-def test_get_coordinates_match_removed_if_unlike_names(
+def test_get_own_coordinates_match_removed_if_unlike_names(
     make_processor: Callable,
 ) -> None:
     """Happy path: an ID whose names differ loses its registry point, on all its rows.
@@ -381,7 +382,7 @@ def test_get_coordinates_match_removed_if_unlike_names(
     """
     df = _ege_rows((3.0, "HE RUCUE"), (3.0, None), (1.0, "TER ALPHA"))
 
-    out = make_processor()._get_coordinates(df)
+    out = make_processor()._get_own_coordinates(df)
 
     assert out.loc[out[CODE_COL] == 3.0, "official.lat"].isna().all()
     assert out.loc[out[CODE_COL] == 3.0, "official.match_method"].isna().all()
@@ -389,7 +390,7 @@ def test_get_coordinates_match_removed_if_unlike_names(
 
 
 @pytest.mark.parametrize("level, kept", [("mismatch", False), ("within_bounds", True)])
-def test_get_coordinates_match_removed_if_outside_region(
+def test_get_own_coordinates_match_removed_if_outside_region(
     make_processor: Callable, level: str, kept: bool
 ) -> None:
     """Happy path: a registry point clearly outside the registry's own region is dropped.
@@ -405,20 +406,20 @@ def test_get_coordinates_match_removed_if_outside_region(
     proc = make_processor(region_reg=_region_reg({"Biobío": level}))
     df = _ege_rows((3.0, "HE QUILLECO"), (1.0, "TER ALPHA"))
 
-    out = proc._get_coordinates(df).set_index(NAME_COL)
+    out = proc._get_own_coordinates(df).set_index(NAME_COL)
 
     lat = out.at["HE QUILLECO", "official.lat"]
     assert lat == -37.4 if kept else pd.isna(lat)
     assert out.at["TER ALPHA", "official.lat"] == -33.4
 
 
-def test_get_coordinates_match_kept_if_no_region(make_processor: Callable) -> None:
+def test_get_own_coordinates_match_kept_if_no_region(make_processor: Callable) -> None:
     """Happy path: without a region registry, registry points aren't region-checked.
 
     Args:
         make_processor (Callable): Factory for processors.
     """
-    out = make_processor(region_reg=None)._get_coordinates(
+    out = make_processor(region_reg=None)._get_own_coordinates(
         _ege_rows((3.0, "HE QUILLECO"))
     )
     assert out.loc[0, "official.lat"] == -37.4
@@ -620,8 +621,8 @@ def test_rerun_reuses_the_releases_tag(
     before = _items(out_dir)[_gid("1")]["assets"]["data"]["icechunk:snapshot"]
 
     with (
-        patch.object(processor, "build_map"),
-        patch.object(processor, "validate", _skip),
+        patch.object(processing, "build_map"),
+        patch.object(processing, "validate", _skip),
     ):
         make_processor(region_reg=_region_reg({})).process_data()
 
@@ -674,9 +675,9 @@ def test_publishing_on_the_lsdf_route(make_processor: Callable, tmp_path: Path) 
     )
     _write_raw(Path(tmp_path, "raw", "cen", "1h"))
     with (
-        patch.object(processor, "build_map"),
-        patch.object(processor, "validate", _skip),
-        patch.object(processor, "publish_stac") as mock_publish,
+        patch.object(processing, "build_map"),
+        patch.object(processing, "validate", _skip),
+        patch.object(processing, "publish_stac") as mock_publish,
     ):
         make_processor(
             region_reg=_region_reg({}), publish_cfg=cfg, publish=True
@@ -720,15 +721,16 @@ def test_skipped_hour_placeholders_kept_for_review(
 
     def with_placeholder(
         self: CenProcessor, df: pd.DataFrame, day: str
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         out, _ = prepare(self, df, day)
-        return out, df.head(1)  # one row per day, as if its hour had been skipped
+        # one row per day, as if its hour had been skipped
+        return out, {"skipped_hour_placeholders": df.head(1)}
 
     _write_raw(Path(tmp_path, "raw", "cen", "1h"))  # 2024-01-01 and 2024-01-02
     with (
         patch.object(CenProcessor, "_prepare_for_zarr", with_placeholder),
-        patch.object(processor, "build_map"),
-        patch.object(processor, "validate", _skip),
+        patch.object(processing, "build_map"),
+        patch.object(processing, "validate", _skip),
     ):
         make_processor(region_reg=_region_reg({})).process_data()
 
@@ -811,7 +813,7 @@ def test_local_day_in_utc(day: str, hours: int) -> None:
         day (str): A local date in Chile.
         hours (int): Its expected length in hours.
     """
-    start, end = processor.local_day_in_utc(day)
+    start, end = processing.local_period_in_utc(day, CenProcessor.TZ)
     assert (end - start).total_seconds() / 3600 == hours
 
 
@@ -843,7 +845,8 @@ def test_fall_back_sunday_adds_the_repeated_hour_as_hora_25(
         make_processor (Callable): Factory for processors.
     """
     df = _day("2023-04-02", _clock("2023-04-02", list(range(1, 26))))
-    out, placeholders = make_processor()._prepare_for_zarr(df, "2023-04-02")
+    out, review = make_processor()._prepare_for_zarr(df, "2023-04-02")
+    placeholders = review["skipped_hour_placeholders"]
 
     assert out["timestamp"].nunique() == 25
     assert out["timestamp"].min() == pd.Timestamp("2023-04-02 03:00", tz="UTC")
@@ -864,7 +867,8 @@ def test_spring_forward_placeholder_is_kept_out_and_returned(
     """
     df = _day("2023-09-03", _clock("2023-09-03", list(range(1, 25))))
     df.loc[df["hour"] == 1, "value"] = 0.0
-    out, placeholders = make_processor()._prepare_for_zarr(df, "2023-09-03")
+    out, review = make_processor()._prepare_for_zarr(df, "2023-09-03")
+    placeholders = review["skipped_hour_placeholders"]
 
     assert out["timestamp"].nunique() == 23
     assert out["timestamp"].min() == pd.Timestamp("2023-09-03 04:00", tz="UTC")

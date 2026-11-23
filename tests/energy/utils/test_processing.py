@@ -1,23 +1,27 @@
 # tests/energy/utils/test_processing.py
-"""Tests for the energy processors' shared output layout."""
+"""Tests for the energy processors' shared base and output layout."""
 
 import json
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 from loguru import logger
 from shapely.geometry import Polygon, mapping
 
+from rbc.energy.utils import processing
 from rbc.energy.utils.processing import (
     STAC_COLUMNS,
     ZARR_COLUMNS,
+    EnergyProcessor,
     check_totals_kept,
     combine_fuels,
     ege_ids,
     entity_ids,
     geometries,
     global_ids,
+    local_period_in_utc,
     log_unjoined_ids,
     to_layout,
     to_utc,
@@ -324,3 +328,119 @@ def test_combine_fuels_raises_without_any_fuel() -> None:
     df = pd.DataFrame({"id": ["a"], "fuel_type": [None], "fuel_subtype": ["chp"]})
     with pytest.raises(ValueError, match="no fuel type"):
         combine_fuels(df)
+
+
+# ----------------------------------
+# Tests: base processor
+# ----------------------------------
+class _Processor(EnergyProcessor):
+    """The least a processor needs: its class attributes and the two required hooks."""
+
+    SYSOP = "aemo"  # not name_matchable: no coordinate finding
+    DATASET = MagicMock()
+    TZ = "America/Sao_Paulo"
+    COLUMNS = {}
+    EGE_COLUMNS = []
+
+    def _prepare_for_zarr(self, df_eg, period):  # noqa: D102
+        return df_eg, {}
+
+    def _get_stac_fields(self, df_ege, df_eg_unique, active, totals):  # noqa: D102
+        return pd.DataFrame(index=pd.Index([], name="id"))
+
+
+def _make(cls: type[EnergyProcessor], tmp_path: Path) -> EnergyProcessor:
+    """Build a processor that writes into a temporary directory and doesn't publish.
+
+    Args:
+        cls (type[EnergyProcessor]): The processor class.
+        tmp_path (Path): Pytest-provided temporary directory.
+
+    Returns:
+        EnergyProcessor: The processor.
+    """
+    return cls(
+        input_dir=Path(tmp_path, "raw"),
+        resources_dir=Path(tmp_path, "resources"),
+        output_dir=Path(tmp_path, "processed"),
+        release="v0.1.0",
+        publish_cfg=MagicMock(),  # not publishing: never read
+        publish=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "period, start, end",
+    [
+        ("2025", "2025-01-01 03:00", "2026-01-01 03:00"),
+        ("2018-11", "2018-11-01 03:00", "2018-12-01 02:00"),  # DST from 2018-11-04
+        ("2018-11-04", "2018-11-04 03:00", "2018-11-05 02:00"),  # 00:00 skipped: 23 h
+    ],
+)
+def test_local_period_in_utc(period: str, start: str, end: str) -> None:
+    """Happy path: a year, month or day's local start and end, in UTC (here Brasília).
+
+    Args:
+        period (str): The local period.
+        start (str): Its expected start in UTC.
+        end (str): Its expected end in UTC.
+    """
+    assert local_period_in_utc(period, "America/Sao_Paulo") == (
+        pd.Timestamp(start, tz="UTC"),
+        pd.Timestamp(end, tz="UTC"),
+    )
+
+
+def test_local_period_in_utc_rejects_other_formats() -> None:
+    """Failure path: a period that isn't a year, month or day raises."""
+    with pytest.raises(ValueError, match="year, month or day"):
+        local_period_in_utc("2025-W07", "America/Sao_Paulo")
+
+
+def test_processor_without_its_class_attributes_raises(tmp_path: Path) -> None:
+    """Failure path: a subclass that doesn't set all class attributes can't be built.
+
+    Args:
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+
+    class _Incomplete(_Processor):
+        pass
+
+    del _Processor.COLUMNS  # temporarily, as if never set
+    try:
+        with pytest.raises(TypeError, match="COLUMNS"):
+            _make(_Incomplete, tmp_path)
+    finally:
+        _Processor.COLUMNS = {}
+
+
+def test_processor_without_coordinate_finding_skips_its_resources(
+    tmp_path: Path,
+) -> None:
+    """Happy path: without coordinate finding, its expensive resources aren't built.
+
+    Args:
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+    with patch.object(processing, "build_shared_resources") as mock_build:
+        proc = _make(_Processor, tmp_path)
+    mock_build.assert_not_called()
+    assert proc.shared is None
+
+
+def test_review_files_written_only_with_rows(tmp_path: Path) -> None:
+    """Happy path: each review file gets its rows from all files, empty ones none.
+
+    Args:
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+    proc = _make(_Processor, tmp_path)
+    rows = pd.DataFrame({"id": ["a"], "value": [1.0]})
+    proc._write_review(
+        {"repeated_hour_rows": [rows, rows], "skipped": [rows.iloc[:0]]}, run="1h"
+    )
+
+    review = Path(tmp_path, "processed", "review")
+    assert [f.name for f in review.iterdir()] == ["repeated_hour_rows_1h.csv"]
+    assert len(pd.read_csv(Path(review, "repeated_hour_rows_1h.csv"))) == 2
