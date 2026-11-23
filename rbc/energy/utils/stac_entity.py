@@ -58,7 +58,7 @@ class EntityTypeDefiner:
     # Public API
     # ------------------------------------------------------------------
     def find_groups(
-        self, df: pd.DataFrame, active: pd.Series, totals: pd.Series
+        self, df_ege: pd.DataFrame, active: pd.Series, totals: pd.Series
     ) -> pd.DataFrame:
         """Find the EGEs that are parts ('group') of one facility, and name the facility.
 
@@ -73,7 +73,7 @@ class EntityTypeDefiner:
         that generated most. A facility without a name leaves its EGEs as they are.
 
         Args:
-            df (pd.DataFrame): The candidate EGEs (e.g. single plants, not plant groups),
+            df_ege (pd.DataFrame): The candidate EGEs (e.g. single plants, not plant groups),
                 with "id", "entity_name", "code" (missing if none), "lat" and "lon".
             active (pd.Series): The periods each EGE reports values in (a set, e.g. of
                 months), indexed by ID.
@@ -83,34 +83,36 @@ class EntityTypeDefiner:
             pd.DataFrame: Indexed by the parts' IDs, with "entity_type" ("group") and
                 "facility_name"; EGEs that aren't a part are left out.
         """
-        ege = df.set_index("id")
-        names = ege["entity_name"].where(
-            ege["entity_name"].map(lambda n: isinstance(n, str))
+        df_ege = df_ege.set_index("id")
+        names = df_ege["entity_name"].where(
+            df_ege["entity_name"].map(lambda n: isinstance(n, str))
         )
-        ege = ege.assign(
+        df_ege = df_ege.assign(
             key=names.map(self.tok.get_discriminator_key, na_action="ignore"),
             tokens=names.map(self.tok.get_canonical_tokens, na_action="ignore"),
-            active=[active.get(i, set()) for i in ege.index],
-            total=totals.reindex(ege.index).fillna(0.0),
+            active=[active.get(i, set()) for i in df_ege.index],
+            total=totals.reindex(df_ege.index).fillna(0.0),
         )
 
         parent = {
-            i: i for i in ege.index
+            i: i for i in df_ege.index
         }  # union-find: each EGE's link to its facility
         by_code: set[str] = set()  # EGEs linked by a code
         for col in ("code", "key"):
-            for _, members in ege.dropna(subset=[col]).groupby(col):
+            for _, members in df_ege.dropna(subset=[col]).groupby(col):
                 for a, b in combinations(members.index, 2):
-                    if self._are_parts(ege.loc[a], ege.loc[b], by_name=col == "key"):
+                    if self._are_parts(
+                        df_ege.loc[a], df_ege.loc[b], by_name=col == "key"
+                    ):
                         parent[self._find_root(parent, a)] = self._find_root(parent, b)
                         if col == "code":
                             by_code.update((a, b))
 
         facilities = pd.Series(
-            [self._find_root(parent, i) for i in ege.index], index=ege.index
+            [self._find_root(parent, i) for i in df_ege.index], index=df_ege.index
         )
         rows = {}
-        for _, members in ege.groupby(facilities):
+        for _, members in df_ege.groupby(facilities):
             if len(members) < 2:
                 continue
             linked_by_code = bool(by_code & set(members.index))

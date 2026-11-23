@@ -151,7 +151,7 @@ def test_ege_fields_by_operating_mode(proc: OnsProcessor) -> None:
         ("ons-i", "Itaipu 60 Hz", "UHE.PH.PR.001161-4.01", "TIPO I", True),
     ]
     ids = [r[0] for r in raw]
-    df_ege = pd.DataFrame(
+    df_ege_locators = pd.DataFrame(
         {
             "id": ids,
             "entity_name": [r[1] for r in raw],
@@ -159,7 +159,7 @@ def test_ege_fields_by_operating_mode(proc: OnsProcessor) -> None:
             "lon": [-60.0 if r[4] else None for r in raw],
         }
     )
-    df_eg_unique = pd.DataFrame(
+    df_ege_sysop = pd.DataFrame(
         {
             "id": ids,
             "id_ons": ids,
@@ -172,7 +172,7 @@ def test_ege_fields_by_operating_mode(proc: OnsProcessor) -> None:
     active = pd.Series({i: {"2020-01"} for i in ids}, dtype=object)
     totals = pd.Series(1.0, index=ids)
 
-    out = proc._get_stac_fields(df_ege, df_eg_unique, active, totals)
+    out = proc._get_stac_fields(df_ege_locators, df_ege_sysop, active, totals)
 
     assert out["entity_type"].to_dict() == {
         "ons-c": "facility",  # a group at one point

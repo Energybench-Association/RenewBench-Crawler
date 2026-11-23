@@ -221,20 +221,24 @@ class EnergyProcessor(ABC):
             ValueError: If coordinate finding returns no EGEs for the run.
         """
         # Step 1: find coordinates and store info in a dataframe (one row per EGE)
-        df_ege = self._get_own_coordinates(run.df)
+        df_ege_locators = self._get_own_coordinates(run.df)
         if self.run_coordinate_finding_pipeline:
-            df_ege = find_coordinates(
-                replace(run, df=df_ege),
+            df_ege_locators = find_coordinates(
+                replace(run, df=df_ege_locators),
                 shared=self.shared,
                 output_dir=self.coordinates_dir,
             )
 
-        if df_ege is None or len(df_ege) == 0:
+        if df_ege_locators is None or len(df_ege_locators) == 0:
             raise ValueError(f"Coordinate finding returned no EGEs for {run.name}.")
 
-        build_map([df_ege], labels=[run.map_label], output_dir=self.coordinates_dir)
-        df_ege = df_ege.assign(
-            id=self._get_global_ids(df_ege[SYSOP_CODE_COL], df_ege[SYSOP_NAME_COL])
+        build_map(
+            [df_ege_locators], labels=[run.map_label], output_dir=self.coordinates_dir
+        )
+        df_ege_locators = df_ege_locators.assign(
+            id=self._get_global_ids(
+                df_ege_locators[SYSOP_CODE_COL], df_ege_locators[SYSOP_NAME_COL]
+            )
         )  # without coordinate finding, this is simply run.df
 
         # Step 2: get raw EG data and build Icechunk repo for release
@@ -245,7 +249,7 @@ class EnergyProcessor(ABC):
             publish=self.publish,
             local_dir=Path(self.output_dir, "icechunk"),
         )
-        entities = sorted(df_ege["id"].dropna().unique())
+        entities = sorted(df_ege_locators["id"].dropna().unique())
         file_periods = [path.stem for path in run.files]  # a year, month or day each
 
         writer = EnergyIcechunkWriter(
@@ -261,7 +265,7 @@ class EnergyProcessor(ABC):
             ),
         )
 
-        df_eg_unique = pd.DataFrame()  # each EGE's own values, taken from every file
+        df_ege_sysop = pd.DataFrame()  # each EGE's own values, taken from every file
         totals = pd.Series(dtype=float)  # each EGE's total generation
         active: dict[str, set[str]] = {}  # the time periods each EGE reports values
         zarr_ids: set[str] = set()  # unique IDs of EGEs in Zarr files
@@ -275,9 +279,9 @@ class EnergyProcessor(ABC):
             df_eg = load_df_from_file(path).rename(columns=self.COLUMNS)
             df_eg["id"] = self._get_raw_ids(df_eg)
             df_eg = self._clean_file(df_eg, period)
-            # Build unique version of df_eg (distinct values only, latest last) - for STAC
-            df_eg_unique = pd.concat(
-                [df_eg_unique, df_eg[["id", *self.EGE_COLUMNS]]]
+            # Collect the EGEs' info from df_eg (distinct values only, latest last) - for STAC
+            df_ege_sysop = pd.concat(
+                [df_ege_sysop, df_eg[["id", *self.EGE_COLUMNS]]]
             ).drop_duplicates(keep="last")
 
             # Build Icechunk (Zarr) dataframe with 3 columns (id, timestamp, value)
@@ -285,8 +289,8 @@ class EnergyProcessor(ABC):
             writer.add(df_zarr["id"], df_zarr["timestamp"], df_zarr["value"])
             zarr_ids.update(df_zarr["id"].dropna())
             totals = totals.add(df_zarr.groupby("id")["value"].sum(), fill_value=0.0)
-            for ege in df_zarr.dropna(subset=["value"])["id"].unique():
-                active.setdefault(ege, set()).add(period)
+            for ege_id in df_zarr.dropna(subset=["value"])["id"].unique():
+                active.setdefault(ege_id, set()).add(period)
 
             for name, rows in kept_out.items():
                 review.setdefault(name, []).append(rows)
@@ -303,7 +307,7 @@ class EnergyProcessor(ABC):
 
         # Step 3: STAC records (one Item per EGE, one Collection for the dataset)
         df_stac = self._prepare_for_stac(
-            df_ege, df_eg_unique, pd.Series(active, dtype=object), totals
+            df_ege_locators, df_ege_sysop, pd.Series(active, dtype=object), totals
         )
         log_unjoined_ids(zarr_ids, df_stac["id"])
         items = build_items(
@@ -335,19 +339,19 @@ class EnergyProcessor(ABC):
     # ------------------------------------------------------------------
     # HOOKS (operator-specific)
     # ------------------------------------------------------------------
-    def _get_own_coordinates(self, df_eg: pd.DataFrame) -> pd.DataFrame:
+    def _get_own_coordinates(self, df_ege_sysop: pd.DataFrame) -> pd.DataFrame:
         """Add the operator's own coordinates to its EGE rows (e.g. from a registry).
 
         Without coordinate finding (not `name_matchable`), the result must have
         its layout: one row per EGE, with the 'sysop.*' columns, "lat" and "lon".
 
         Args:
-            df_eg (pd.DataFrame): The distinct EGE rows of a run (s. `Run.df`).
+            df_ege_sysop (pd.DataFrame): The distinct EGE rows of a run (s. `Run.df`).
 
         Returns:
             pd.DataFrame: The rows with the operator's coordinates; unchanged by default.
         """
-        return df_eg
+        return df_ege_sysop
 
     def _clean_file(self, df_eg: pd.DataFrame, period: str) -> pd.DataFrame:
         """Check and clean one raw file's rows before they are brought into the layout.
@@ -381,17 +385,17 @@ class EnergyProcessor(ABC):
     @abstractmethod
     def _get_stac_fields(
         self,
-        df_ege: pd.DataFrame,
-        df_eg_unique: pd.DataFrame,
+        df_ege_locators: pd.DataFrame,
+        df_ege_sysop: pd.DataFrame,
         active: pd.Series,
         totals: pd.Series,
     ) -> pd.DataFrame:
         """Give each EGE's operator-specific STAC fields, e.g. fuels, status, capacity.
 
         Args:
-            df_ege (pd.DataFrame): The EGEs as coordinate finding returned them, once per
+            df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them, once per
                 "id", with "entity_name".
-            df_eg_unique (pd.DataFrame): The EGEs' own values from the raw files (s.
+            df_ege_sysop (pd.DataFrame): The EGEs' own values from the raw files (s.
                 EGE_COLUMNS).
             active (pd.Series): The periods each EGE reports values in, by its ID.
             totals (pd.Series): Each EGE's total generation, by its ID.
@@ -402,17 +406,17 @@ class EnergyProcessor(ABC):
                 `_get_own_ids`.
         """
 
-    def _get_own_ids(self, df_ege: pd.DataFrame) -> dict[str, pd.Series]:
+    def _get_own_ids(self, df_ege_locators: pd.DataFrame) -> dict[str, pd.Series]:
         """Give each EGE's IDs in the operator's own systems (STAC's energy:entity_ids).
 
         Args:
-            df_ege (pd.DataFrame): The EGEs, with their fields (s. `_get_stac_fields`).
+            df_ege_locators (pd.DataFrame): The EGEs, with their fields (s. `_get_stac_fields`).
 
         Returns:
             dict[str, pd.Series]: Map of ID system → each EGE's ID in it; by default
                 the operator's code (e.g. {"cen": ...}).
         """
-        return {self.SYSOP: codes_as_text(df_ege[SYSOP_CODE_COL])}
+        return {self.SYSOP: codes_as_text(df_ege_locators[SYSOP_CODE_COL])}
 
     # ------------------------------------------------------------------
     # HELPERS
@@ -466,8 +470,8 @@ class EnergyProcessor(ABC):
 
     def _prepare_for_stac(
         self,
-        df_ege: pd.DataFrame,
-        df_eg_unique: pd.DataFrame,
+        df_ege_locators: pd.DataFrame,
+        df_ege_sysop: pd.DataFrame,
         active: pd.Series,
         totals: pd.Series,
     ) -> pd.DataFrame:
@@ -479,31 +483,33 @@ class EnergyProcessor(ABC):
         the region's/country's polygon). The rest comes from `_get_stac_fields`.
 
         Args:
-            df_ege (pd.DataFrame): The EGEs as coordinate finding returns them, with
+            df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returns them, with
                 their "id".
-            df_eg_unique (pd.DataFrame): The EGEs' own values from the raw files.
+            df_ege_sysop (pd.DataFrame): The EGEs' own values from the raw files.
             active (pd.Series): The periods each EGE reports values in, by its ID.
             totals (pd.Series): Each EGE's total generation, by its ID.
 
         Returns:
             pd.DataFrame: The EGEs in the STAC_COLUMNS layout.
         """
-        df_ege = df_ege.assign(entity_name=df_ege[SYSOP_NAME_COL]).drop_duplicates(
-            subset="id"
-        )  # an EGE in several resolutions
+        df_ege_locators = df_ege_locators.assign(
+            entity_name=df_ege_locators[SYSOP_NAME_COL]
+        ).drop_duplicates(subset="id")  # an EGE in several resolutions
 
-        fields = self._get_stac_fields(df_ege, df_eg_unique, active, totals)
-        df_ege = df_ege.drop(columns=[c for c in fields.columns if c in df_ege]).merge(
-            fields, left_on="id", right_index=True, how="left"
+        fields = self._get_stac_fields(df_ege_locators, df_ege_sysop, active, totals)
+        df_ege_locators = df_ege_locators.drop(
+            columns=[c for c in fields.columns if c in df_ege_locators]
+        ).merge(fields, left_on="id", right_index=True, how="left")
+        df_ege_locators["entity_ids"] = entity_ids(
+            df_ege_locators, own=self._get_own_ids(df_ege_locators)
         )
-        df_ege["entity_ids"] = entity_ids(df_ege, own=self._get_own_ids(df_ege))
 
-        df_ege = to_layout(df_ege, STAC_COLUMNS, renames=LOCATION_COLUMNS)
+        df_stac = to_layout(df_ege_locators, STAC_COLUMNS, renames=LOCATION_COLUMNS)
         region_reg = self.shared.region_reg if self.shared else None
-        df_ege["geometry"] = geometries(
-            df_ege, country=self.meta["country"], region_reg=region_reg
+        df_stac["geometry"] = geometries(
+            df_stac, country=self.meta["country"], region_reg=region_reg
         )
-        return df_ege
+        return df_stac
 
     def _write_review(self, review: dict[str, list[pd.DataFrame]], run: str) -> None:
         """Write the rows kept out of the data to `<output_dir>/review/<name>_<run>.csv`.
@@ -672,21 +678,21 @@ def check_totals_kept(before: pd.Series, after: pd.Series, what: str) -> None:
 # ------------------------------------------------------------------
 # STAC HELPERS
 # ------------------------------------------------------------------
-def entity_ids(df_ege: pd.DataFrame, own: dict[str, pd.Series]) -> pd.Series:
+def entity_ids(df_ege_locators: pd.DataFrame, own: dict[str, pd.Series]) -> pd.Series:
     """Collect each EGE's IDs in other systems as JSON (STAC's energy:entity_ids).
 
     Besides the operator's own IDs, an EGE gets the ID of the source that coordinate
     finding located it by. Not a sibling, as that ID is its donor's.
 
     Args:
-        df_ege (pd.DataFrame): The EGEs as coordinate finding returned them.
+        df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them.
         own (dict[str, pd.Series]): Map of the operator's ID system → each EGE's ID in it.
 
     Returns:
         pd.Series: Each EGE's IDs as a JSON object, missing where it has none.
     """
     # a locator's columns other than lat/lon/match_method exist only once it matched
-    df = df_ege.reindex(
+    df = df_ege_locators.reindex(
         columns=["match_method", "gem.id", "ppdb.id", "osm.id", "osm.type"]
     )
     method = df["match_method"].astype("string").fillna("")
@@ -739,13 +745,13 @@ def combine_fuels(fuels: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"{len(missing)} EGEs report no fuel type: {missing[:5]}")
 
     rows: dict[str, tuple[str, str | None, list[str] | None]] = {}
-    for ege, group in named.groupby("id"):
+    for ege_id, group in named.groupby("id"):
         types = sorted(set(group["fuel_type"]))
         subtypes = sorted(set(group["fuel_subtype"].dropna()))
         if len(types) == 1:
-            rows[ege] = (types[0], subtypes[0] if len(subtypes) == 1 else None, None)
+            rows[ege_id] = (types[0], subtypes[0] if len(subtypes) == 1 else None, None)
         else:
-            rows[ege] = ("hybrid", None, types)
+            rows[ege_id] = ("hybrid", None, types)
     return pd.DataFrame.from_dict(
         rows,
         orient="index",

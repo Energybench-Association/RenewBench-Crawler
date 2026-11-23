@@ -271,8 +271,8 @@ class OnsProcessor(EnergyProcessor):
 
     def _get_stac_fields(
         self,
-        df_ege: pd.DataFrame,
-        df_eg_unique: pd.DataFrame,
+        df_ege_locators: pd.DataFrame,
+        df_ege_sysop: pd.DataFrame,
         active: pd.Series,
         totals: pd.Series,
     ) -> pd.DataFrame:
@@ -294,34 +294,40 @@ class OnsProcessor(EnergyProcessor):
         A CEG can be shared by several EGEs (e.g. Itaipu's 50 Hz and 60 Hz sides).
 
         Args:
-            df_ege (pd.DataFrame): The EGEs as coordinate finding returned them, once per
+            df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them, once per
                 "id", with "entity_name".
-            df_eg_unique (pd.DataFrame): The EGE information from raw generation data.
+            df_ege_sysop (pd.DataFrame): The EGE information from raw generation data.
             active (pd.Series): The months each EGE reports values in, by its ID.
             totals (pd.Series): Each EGE's total generation, by its ID.
 
         Returns:
             pd.DataFrame: The fields above, indexed by EGE ID.
         """
-        latest = df_eg_unique.drop_duplicates(subset="id", keep="last")
-        per_ege = latest.set_index("id")[[CEG_COL, MODE_COL]]
-        per_ege = per_ege.join(combine_fuels(self._stac_fuels(latest)))
+        latest = df_ege_sysop.drop_duplicates(subset="id", keep="last")
+        fields_sysop = latest.set_index("id")[[CEG_COL, MODE_COL]]
+        fields_sysop = fields_sysop.join(combine_fuels(self._stac_fuels(latest)))
 
-        ceg = per_ege[CEG_COL].astype("string")
-        mode = per_ege[MODE_COL]
-        per_ege = per_ege.assign(
+        ceg = fields_sysop[CEG_COL].astype("string")
+        mode = fields_sysop[MODE_COL]
+        fields_sysop = fields_sysop.assign(
             ceg=ceg.where(ceg.str.fullmatch(CEG_PATTERN, na=False)),
             measurement_type=pd.Series(DEFAULT_MEASUREMENT_TYPE, index=mode.index)
             .mask(mode.isin(FORECAST_MODES), FORECAST_MEASUREMENT_TYPE)
             .mask(mode.isin(UNKNOWN_MEASUREMENT_MODES), UNKNOWN_MEASUREMENT_TYPE),
         )
 
-        ege = df_ege.set_index("id").join(per_ege[[CEG_COL, MODE_COL]])
-        fields = per_ege.reindex(ege.index)  # every EGE, also without raw values
+        df_ege_locators = df_ege_locators.set_index("id").join(
+            fields_sysop[[CEG_COL, MODE_COL]]
+        )
+        fields = fields_sysop.reindex(df_ege_locators.index)  # also EGEs without values
         # a group located to one point is one site, else it spans several
-        spread = ege[MODE_COL].isin(GROUP_MODES) & ege["lat"].isna()
+        spread = (
+            df_ege_locators[MODE_COL].isin(GROUP_MODES) & df_ege_locators["lat"].isna()
+        )
         fields["entity_type"] = spread.map({True: "portfolio", False: "facility"})
-        plants = ege[~ege[MODE_COL].isin(GROUP_MODES)].reset_index()
+        plants = df_ege_locators[
+            ~df_ege_locators[MODE_COL].isin(GROUP_MODES)
+        ].reset_index()
         groups = self.entity_types.find_groups(
             plants.rename(columns={CEG_COL: "code"})[
                 ["id", "entity_name", "code", "lat", "lon"]
@@ -341,22 +347,25 @@ class OnsProcessor(EnergyProcessor):
             )
         return fields
 
-    def _get_own_ids(self, df_ege: pd.DataFrame) -> dict[str, pd.Series]:
+    def _get_own_ids(self, df_ege_locators: pd.DataFrame) -> dict[str, pd.Series]:
         """Give each EGE's ONS ID and, where valid, ANEEL's CEG (energy:entity_ids).
 
         Args:
-            df_ege (pd.DataFrame): The EGEs, with their fields (s. `_get_stac_fields`).
+            df_ege_locators (pd.DataFrame): The EGEs, with their fields (s. `_get_stac_fields`).
 
         Returns:
             dict[str, pd.Series]: {"ons": ..., "ceg": ...}.
         """
-        return {**super()._get_own_ids(df_ege), "ceg": df_ege[CEG_COL]}
+        return {
+            **super()._get_own_ids(df_ege_locators),
+            "ceg": df_ege_locators[CEG_COL],
+        }
 
     # ------------------------------------------------------------------
     # SECONDARY HELPERS
     # ------------------------------------------------------------------
     @staticmethod
-    def _stac_fuels(df_eg_unique: pd.DataFrame) -> pd.DataFrame:
+    def _stac_fuels(df_ege_sysop: pd.DataFrame) -> pd.DataFrame:
         """Map each EGE's plant type and fuel to STAC's fuels (s. STAC_FUELS).
 
         Both sides are compared normalized: without case, accents or punctuation (s.
@@ -364,7 +373,7 @@ class OnsProcessor(EnergyProcessor):
         so the EGE becomes a hybrid (s. STAC_HYBRID_FUELS).
 
         Args:
-            df_eg_unique (pd.DataFrame): The EGE rows with "id", "fuel_type" and
+            df_ege_sysop (pd.DataFrame): The EGE rows with "id", "fuel_type" and
                 "fuel_subtype" as ONS reports them.
 
         Returns:
@@ -385,14 +394,14 @@ class OnsProcessor(EnergyProcessor):
         rows: list[tuple] = []
         unknown: set[tuple] = set()
         cols = ["id", "fuel_type", "fuel_subtype"]
-        for ege, main, sub in (
-            df_eg_unique[cols].drop_duplicates().itertuples(index=False)
+        for ege_id, main, sub in (
+            df_ege_sysop[cols].drop_duplicates().itertuples(index=False)
         ):
             main = main if isinstance(main, str) else None
             sub = sub if isinstance(sub, str) else None
             pair = (normalize_name(main), normalize_name(sub))
             if pair in fuels:
-                rows.extend((ege, *fuel) for fuel in fuels[pair])
+                rows.extend((ege_id, *fuel) for fuel in fuels[pair])
             else:
                 unknown.add((main, sub))  # as ONS spells it
 

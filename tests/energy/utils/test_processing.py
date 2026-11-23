@@ -361,7 +361,7 @@ class _Processor(EnergyProcessor):
     def _prepare_for_zarr(self, df_eg, period):  # noqa: D102
         return df_eg, {}
 
-    def _get_stac_fields(self, df_ege, df_eg_unique, active, totals):  # noqa: D102
+    def _get_stac_fields(self, df_ege_locators, df_ege_sysop, active, totals):  # noqa: D102
         return pd.DataFrame(index=pd.Index([], name="id"))
 
 
