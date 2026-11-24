@@ -84,7 +84,6 @@ def test_clocks_back_hour_is_left_out_for_review(proc: OnsProcessor) -> None:
     "times, month, error, match",
     [
         (["2018-03-01 00:00"], "2018-02", DataStructureError, "outside the month"),
-        (["2018-02-01 00:30"], "2018-02", DataStructureError, "not on the hour"),
         # clocks forward: `to_utc` is generic, so a plain ValueError
         (["2018-11-04 00:00"], "2018-11", ValueError, "DST change skips"),
     ],
@@ -96,7 +95,9 @@ def test_hours_that_cant_be_placed_raise(
     error: type[Exception],
     match: str,
 ) -> None:
-    """Failure path: hours outside the file's month, off the hour or skipped raise.
+    """Failure path: hours outside the file's month or skipped raise.
+
+    Off the hour or twice is checked for every operator (s. `check_zarr_rows`).
 
     Args:
         proc (OnsProcessor): The processor.
@@ -107,16 +108,6 @@ def test_hours_that_cant_be_placed_raise(
     """
     with pytest.raises(error, match=match):
         proc._prepare_for_zarr(_rows(times), month)
-
-
-def test_hour_reported_twice_raises(proc: OnsProcessor) -> None:
-    """Failure path: one EGE's hour in two rows raises, rather than picking one.
-
-    Args:
-        proc (OnsProcessor): The processor.
-    """
-    with pytest.raises(DataStructureError, match="reported twice"):
-        proc._prepare_for_zarr(_rows(["2020-01-01 00:00"] * 2), "2020-01")
 
 
 # ----------------------------------

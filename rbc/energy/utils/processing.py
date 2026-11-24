@@ -48,7 +48,7 @@ from rbc.publish.stac import (
     validate,
     write_stac,
 )
-from rbc.utils.errors import MissingDataError
+from rbc.utils.errors import DataStructureError, MissingDataError
 from rbc.utils.io import load_df_from_file, write_df_to_csv
 
 # Columns of the Zarr data: one row per EGE and timestamp
@@ -199,11 +199,11 @@ class EnergyProcessor(ABC):
 
         Each run (raw data dir such as one temporal resolution) is processed end to end:
         1. Coordinates:
-           a) use sysop's own coords/data (via `_get_own_coordinates`), then
+           a) use sysop's own coords/data (`_get_own_coordinates`), then
            b) coordinate finding pipeline for rest (if the operator is `name_matchable`).
         2. Generation data: one raw file at a time
-           a) load, rename to the shared layout (s. COLUMNS), clean (via `_clean_file`),
-           b) bring into the Zarr layout (via `_prepare_for_zarr`) and
+           a) load, rename cols to the shared layout (COLUMNS), clean (`_clean_file`),
+           b) bring into Zarr layout (`_prepare_for_zarr`) & check rows (`check_zarr_rows`),
            c) write to the release's Icechunk repository.
         3. STAC:
            a) build one Item per EGE (via `_get_stac_fields`)
@@ -269,33 +269,41 @@ class EnergyProcessor(ABC):
         zarr_ids: set[str] = set()  # unique IDs of EGEs in Zarr files
         review: dict[str, list[pd.DataFrame]] = {}  # excluded rows by review file
 
-        # Process one raw file at a time
+        # Process one raw file at a time (any error names the file)
         for path in run.files:
             period = path.stem
+            try:
+                # Build dataframe of energy generation values with "layout" columns
+                df_eg = load_df_from_file(path).rename(columns=self.COLUMNS)
+                df_eg["id"] = self._get_global_ids_of_rows(df_eg)
+                df_eg = self._clean_file(df_eg, period)
+                # Collect EGEs' info from df_eg (distinct values only, latest last) - for STAC
+                df_ege_sysop_file = df_eg[["id", *self.EGE_COLUMNS]]
+                df_ege_sysop = pd.concat([df_ege_sysop, df_ege_sysop_file])
+                df_ege_sysop = df_ege_sysop.drop_duplicates(keep="last")
 
-            # Build dataframe of energy generation values with "layout" columns
-            df_eg = load_df_from_file(path).rename(columns=self.COLUMNS)
-            df_eg["id"] = self._get_global_ids_of_rows(df_eg)
-            df_eg = self._clean_file(df_eg, period)
-            # Collect the EGEs' info from df_eg (distinct values only, latest last) - for STAC
-            df_ege_sysop = pd.concat(
-                [df_ege_sysop, df_eg[["id", *self.EGE_COLUMNS]]]
-            ).drop_duplicates(keep="last")
+                # Build Icechunk (Zarr) dataframe with 3 columns (id, timestamp, value)
+                df_zarr, kept_out = self._prepare_for_zarr(df_eg, period)
+                check_zarr_rows(
+                    df_zarr, start=get_period_bounds(period, self.TZ)[0], step=step
+                )
+                ic_writer.add(df_zarr["id"], df_zarr["timestamp"], df_zarr["value"])
 
-            # Build Icechunk (Zarr) dataframe with 3 columns (id, timestamp, value)
-            df_zarr, kept_out = self._prepare_for_zarr(df_eg, period)
-            ic_writer.add(df_zarr["id"], df_zarr["timestamp"], df_zarr["value"])
-            zarr_ids.update(df_zarr["id"].dropna())
-            totals = totals.add(df_zarr.groupby("id")["value"].sum(), fill_value=0.0)
-            for ege_id in df_zarr.dropna(subset=["value"])["id"].unique():
-                active_periods.setdefault(ege_id, set()).add(period)
+                zarr_ids.update(df_zarr["id"])
+                totals_file = df_zarr.groupby("id")["value"].sum()
+                totals = totals.add(totals_file, fill_value=0.0)
+                for ege_id in df_zarr.dropna(subset=["value"])["id"].unique():
+                    active_periods.setdefault(ege_id, set()).add(period)
 
-            for name, rows in kept_out.items():
-                review.setdefault(name, []).append(rows)
+                for name, rows in kept_out.items():
+                    review.setdefault(name, []).append(rows)
 
-        snapshot = ic_writer.finish(
-            message=f"{self.DATASET.sysop} {self.release}: {file_periods[0]} to {file_periods[-1]}"
-        )
+            except Exception as e:
+                e.add_note(f"Raw file: {path}")  # incl path info before raising error
+                raise
+
+        msg = f"{self.DATASET.sysop} {self.release}: {file_periods[0]} to {file_periods[-1]}"
+        snapshot = ic_writer.finish(message=msg)
         if self.publish and not ic_writer.reused:
             logger.warning(
                 f"Release '{self.release}' wrote new objects: readers reach them through "
@@ -373,6 +381,8 @@ class EnergyProcessor(ABC):
                 df_zarr: The generation data, and
                 kept_out: the rows kept out of it for review, by review file name (e.g.
                 {"repeated_hour_rows": ...}).
+                The base class checks df_zarr's time steps (s. `check_zarr_rows`); that
+                they lie in the file's period is the operator's check.
         """
 
     @abstractmethod
@@ -394,9 +404,9 @@ class EnergyProcessor(ABC):
             totals (pd.Series): Each EGE's total generation, by its ID.
 
         Returns:
-            pd.DataFrame: Indexed by EGE ID, with any STAC_COLUMNS (e.g. "fuel_type");
-                "entity_name" replaces the default. Further columns are available to
-                `_get_own_ids`.
+            pd.DataFrame: Indexed by EGE ID (one row each), with any STAC_COLUMNS
+                (e.g. "fuel_type"); "entity_name" replaces the default. Further columns
+                are available to `_get_own_ids`.
         """
 
     def _get_own_ids(self, df_ege_locators: pd.DataFrame) -> dict[str, pd.Series]:
@@ -485,6 +495,9 @@ class EnergyProcessor(ABC):
 
         Returns:
             pd.DataFrame: The EGEs in the STAC_COLUMNS layout.
+
+        Raises:
+            ValueError: If `_get_stac_fields` gives an EGE more than one row.
         """
         df_ege_locators = df_ege_locators.assign(
             entity_name=df_ege_locators[SYSOP_NAME_COL]
@@ -496,6 +509,11 @@ class EnergyProcessor(ABC):
             active_periods=active_periods,
             totals=totals,
         )
+        if (twice := fields.index.duplicated()).any():
+            raise ValueError(
+                f"`_get_stac_fields` gives {int(twice.sum())} EGEs more than one row, "
+                f"e.g. {sorted(set(fields.index[twice]))[:5]}: one Item each expected."
+            )
         df_ege_locators = df_ege_locators.drop(
             columns=[c for c in fields.columns if c in df_ege_locators]
         ).merge(fields, left_on="id", right_index=True, how="left")
@@ -538,6 +556,43 @@ def codes_as_text(codes: pd.Series) -> pd.Series:
     num = pd.to_numeric(codes, errors="coerce")
     whole = num.where(num % 1 == 0).astype("Int64").astype("string")
     return whole.fillna(codes.astype("string"))  # e.g. 'AMBA', '48W000000ABC1234'
+
+
+def check_zarr_rows(
+    df_zarr: pd.DataFrame, start: pd.Timestamp, step: pd.Timedelta
+) -> None:
+    """Raise if a file's Zarr rows lack IDs, or time steps are off the grid or twice.
+
+    Shared by all operators, after `_prepare_for_zarr`. Whether the rows lie in the
+    file's period is left to the operator: CEN reports one hour in the next day's file.
+
+    Args:
+        df_zarr (pd.DataFrame): The file's rows in the ZARR_COLUMNS layout (UTC).
+        start (pd.Timestamp): The file's period start (UTC), the time grid's origin.
+        step (pd.Timedelta): The time step, e.g. 1 hour.
+
+    Raises:
+        DataStructureError: If a row has no EGE ID, a timestamp is missing or off the
+            time grid, or an EGE's time step is given twice.
+    """
+    if (no_id := df_zarr["id"].isna()).any():
+        raise DataStructureError(
+            f"{int(no_id.sum())} rows without an EGE ID (neither a code nor a name)."
+        )
+
+    timestamps = df_zarr["timestamp"]
+    off_grid = ((timestamps - start) % step != pd.Timedelta(0)) | timestamps.isna()
+    if off_grid.any():
+        raise DataStructureError(
+            f"{int(off_grid.sum())} timestamps missing or off the time grid, e.g. "
+            f"{sorted(set(timestamps[off_grid].astype(str)))[:3]}."
+        )
+
+    if (twice := df_zarr.duplicated(subset=["id", "timestamp"])).any():
+        raise DataStructureError(
+            f"{int(twice.sum())} EGE time steps given twice, e.g. "
+            f"{df_zarr.loc[twice, ['id', 'timestamp']].head(3).to_dict('records')}."
+        )
 
 
 def log_unjoined_ids(zarr_ids: set[str], stac_ids: pd.Series) -> None:

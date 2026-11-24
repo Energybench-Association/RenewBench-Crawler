@@ -741,6 +741,33 @@ def test_skipped_hour_placeholders_kept_for_review(
     assert len(pd.read_csv(Path(review, "skipped_hour_placeholders_1h.csv"))) == 2
 
 
+def test_file_error_names_the_file(make_processor: Callable, tmp_path: Path) -> None:
+    """Failure path: an EGE's hour given twice stops processing and names the raw file.
+
+    Args:
+        make_processor (Callable): Factory for processors.
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+    prepare = CenProcessor._prepare_for_zarr
+
+    def twice(
+        self: CenProcessor, df: pd.DataFrame, day: str
+    ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+        out, kept_out = prepare(self, df, day)
+        return pd.concat([out, out.head(1)]), kept_out
+
+    _write_raw(Path(tmp_path, "raw", "cen", "1h"))  # 2024-01-01 and 2024-01-02
+    with (
+        patch.object(CenProcessor, "_prepare_for_zarr", twice),
+        patch.object(processing, "build_map"),
+        pytest.raises(DataStructureError, match="given twice") as error,
+    ):
+        make_processor(region_reg=_region_reg({})).process_data()
+    assert error.value.__notes__ == [
+        f"Raw file: {Path(tmp_path, 'raw', 'cen', '1h', '2024-01-01.csv')}"
+    ]
+
+
 def test_process_data_without_raw(make_processor: Callable, tmp_path: Path) -> None:
     """Failure path: with no raw data, processing stops instead of publishing nothing.
 

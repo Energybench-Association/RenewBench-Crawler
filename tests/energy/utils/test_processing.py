@@ -1,6 +1,7 @@
 # tests/energy/utils/test_processing.py
 """Tests for the energy processors' shared base and output layout."""
 
+from collections.abc import Sequence
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,9 +15,11 @@ from rbc.energy.utils.processing import (
     ZARR_COLUMNS,
     EnergyProcessor,
     check_totals_kept,
+    check_zarr_rows,
     log_unjoined_ids,
     to_layout,
 )
+from rbc.utils.errors import DataStructureError
 
 
 def test_to_layout_keeps_only_the_layouts_columns() -> None:
@@ -115,6 +118,60 @@ def test_global_ids_by_code_else_name(
         key (str): The key its global ID should derive from.
     """
     assert _ids("cen", [code], [name]).tolist() == _ids("cen", [key]).tolist()
+
+
+def _zarr_rows(ids: Sequence[str | None], times: Sequence[str | None]) -> pd.DataFrame:
+    """A raw file's rows in the Zarr layout.
+
+    Args:
+        ids (Sequence[str | None]): The rows' EGE IDs (None for missing).
+        times (Sequence[str | None]): Their UTC timestamps (None for missing).
+
+    Returns:
+        pd.DataFrame: The rows, with "value" 1.0 each.
+    """
+    return pd.DataFrame(
+        {"id": ids, "timestamp": pd.to_datetime(times, utc=True), "value": 1.0}
+    )
+
+
+START = pd.Timestamp("2024-01-01 03:00", tz="UTC")  # a local midnight, e.g. UTC-3
+
+
+def test_check_zarr_rows_passes_steps_on_the_grid() -> None:
+    """Happy path: each EGE's steps on the grid pass, also outside the file's period.
+
+    CEN reports the hour a DST change repeats in the next day's file, so the period is
+    left to the operator's own check.
+    """
+    times = ["2024-01-01 02:00", "2024-01-01 03:00", "2024-01-01 04:00"]
+    check_zarr_rows(
+        _zarr_rows(["a", "a", "b"], times), start=START, step=pd.Timedelta(hours=1)
+    )
+
+
+@pytest.mark.parametrize(
+    "ids, times, match",
+    [
+        ([None, "a"], ["2024-01-01 03:00", "2024-01-01 03:00"], "without an EGE ID"),
+        (["a", "a"], ["2024-01-01 03:00", "2024-01-01 03:30"], "off the time grid"),
+        (["a", "a"], ["2024-01-01 03:00", None], "missing"),
+        (["a", "a"], ["2024-01-01 04:00", "2024-01-01 04:00"], "given twice"),
+    ],
+    ids=["no_id", "off_grid", "missing", "twice"],
+)
+def test_check_zarr_rows_raises(
+    ids: list[str | None], times: list[str | None], match: str
+) -> None:
+    """Failure path: a missing ID, or a step off the grid, missing or twice raises.
+
+    Args:
+        ids (list[str | None]): The rows' EGE IDs.
+        times (list[str | None]): Their UTC timestamps.
+        match (str): The expected error message part.
+    """
+    with pytest.raises(DataStructureError, match=match):
+        check_zarr_rows(_zarr_rows(ids, times), start=START, step=pd.Timedelta(hours=1))
 
 
 def test_check_totals_kept_passes_equal_totals() -> None:
@@ -245,3 +302,24 @@ def test_review_files_written_only_with_rows(tmp_path: Path) -> None:
     review = Path(tmp_path, "processed", "review")
     assert [f.name for f in review.iterdir()] == ["repeated_hour_rows_1h.csv"]
     assert len(pd.read_csv(Path(review, "repeated_hour_rows_1h.csv"))) == 2
+
+
+def test_stac_fields_with_an_ege_twice_raise(tmp_path: Path) -> None:
+    """Failure path: fields giving an EGE two rows raise, rather than two Items one ID.
+
+    Args:
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+
+    class _Twice(_Processor):
+        def _get_stac_fields(
+            self, df_ege_locators, df_ege_sysop, active_periods, totals
+        ):  # noqa: D102
+            return pd.DataFrame({"fuel_type": ["solar", "wind"]}, index=["a", "a"])
+
+    df_ege_locators = pd.DataFrame({"id": ["a"], processing.SYSOP_NAME_COL: ["SOL A"]})
+    empty = pd.Series(dtype=object)
+    with pytest.raises(ValueError, match=r"1 EGEs more than one row, e.g. \['a'\]"):
+        _make(_Twice, tmp_path)._prepare_for_stac(
+            df_ege_locators, pd.DataFrame(), empty, empty
+        )

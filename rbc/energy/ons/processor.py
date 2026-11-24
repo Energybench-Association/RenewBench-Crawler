@@ -163,11 +163,11 @@ class OnsProcessor(EnergyProcessor):
         Returns:
             pd.DataFrame: The rows, unchanged (s. `_check_modes`).
         """
-        self._check_modes(df_eg[MODE_COL], month=period)
+        self._check_modes(df_eg[MODE_COL])
         return df_eg
 
     @staticmethod
-    def _check_modes(modes: pd.Series, month: str) -> None:
+    def _check_modes(modes: pd.Series) -> None:
         """Raise if a raw CSV has an operating mode the processor doesn't know.
 
         A mode decides an EGE's entity and measurement type (s. GROUP_MODES,
@@ -175,7 +175,6 @@ class OnsProcessor(EnergyProcessor):
 
         Args:
             modes (pd.Series): A raw CSV's 'cod_modalidadeoperacao' values.
-            month (str): The local month the CSV holds, e.g. '2025-07'.
 
         Raises:
             DataStructureError: If a mode is missing or neither a plant's nor a group's.
@@ -183,9 +182,7 @@ class OnsProcessor(EnergyProcessor):
         known = PLANT_MODES | GROUP_MODES
         unknown = sorted(set(modes.fillna("<missing>")) - known)
         if unknown:
-            raise DataStructureError(
-                f"{month}: ONS operating modes not classified: {unknown}"
-            )
+            raise DataStructureError(f"ONS operating modes not classified: {unknown}")
 
     def _prepare_for_zarr(
         self, df_eg: pd.DataFrame, month: str
@@ -207,16 +204,7 @@ class OnsProcessor(EnergyProcessor):
             tuple[pd.DataFrame, dict[str, pd.DataFrame]]: The generation data in the
                 ZARR_COLUMNS layout (UTC tz-aware), and ONS's rows for the hour the clocks
                 repeated, for review ("repeated_hour_rows").
-
-        Raises:
-            DataStructureError: If an EGE's hour is reported twice.
         """
-        if (twice := df_eg.duplicated(subset=["id", "timestamp"])).any():
-            raise DataStructureError(
-                f"{month}: {int(twice.sum())} EGE hours reported twice, e.g. "
-                f"{df_eg.loc[twice, ['id', 'timestamp']].head(3).to_dict('records')}."
-            )
-
         utc, repeated = self._hours_to_utc(df_eg["timestamp"], month)
         df_repeated = df_eg[repeated]
         if len(df_repeated):
@@ -247,14 +235,12 @@ class OnsProcessor(EnergyProcessor):
                 which rows are in the repeated hour.
 
         Raises:
-            DataStructureError: If a timestamp lies outside the month or off the hour.
+            DataStructureError: If a timestamp lies outside the month.
             ValueError: If a timestamp lies in an hour the clocks skipped (s. `to_utc`).
         """
         local = pd.to_datetime(timestamps)
         if (local.dt.strftime("%Y-%m") != month).any():
-            raise DataStructureError(f"{month}: 'din_instante' outside the month.")
-        if (local != local.dt.floor("h")).any():
-            raise DataStructureError(f"{month}: 'din_instante' not on the hour.")
+            raise DataStructureError("'din_instante' outside the month.")
 
         repeated = local.dt.tz_localize(
             self.TZ, ambiguous="NaT", nonexistent="shift_forward"
