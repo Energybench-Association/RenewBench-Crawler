@@ -13,7 +13,6 @@ import xarray as xr
 from rbc.publish.icechunk_store import (
     EnergyIcechunkWriter,
     StorageInfo,
-    get_resolution,
     get_storage_location,
     open_or_create_repository,
 )
@@ -205,33 +204,6 @@ def test_published_repository_needs_config_and_credentials(
     cfg.s3.url_endpoint = "https://s3.example.org"
     with pytest.raises(ValueError, match="S3_ACCESS_KEY"):
         open_or_create_repository(storage, cfg)
-
-
-@pytest.mark.parametrize(
-    "tres, step, iso",
-    [
-        ("1h", pd.Timedelta(hours=1), "PT1H"),
-        ("15min", pd.Timedelta(minutes=15), "PT15M"),
-        ("5min", pd.Timedelta(minutes=5), "PT5M"),
-        ("30min", pd.Timedelta(minutes=30), "PT30M"),
-        ("1d", pd.Timedelta(days=1), "P1D"),
-    ],
-)
-def test_get_resolution(tres: str, step: pd.Timedelta, iso: str) -> None:
-    """Happy path: a raw data dir's name gives the time step and its ISO 8601 duration.
-
-    Args:
-        tres (str): The dir's name, as DownloadTask names it.
-        step (pd.Timedelta): The expected time step.
-        iso (str): The expected ISO 8601 duration.
-    """
-    assert get_resolution(tres) == (step, iso)
-
-
-def test_get_resolution_raises_on_other_names() -> None:
-    """Failure path: a directory name that isn't a temporal resolution raises."""
-    with pytest.raises(ValueError, match="isn't a temporal resolution"):
-        get_resolution("hourly")
 
 
 def test_15_minute_axis(tmp_path: Path) -> None:

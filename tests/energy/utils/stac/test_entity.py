@@ -1,10 +1,12 @@
-# tests/energy/utils/test_stac_entity.py
-"""Tests for the energy extension's entity types (parts of a facility)."""
+# tests/energy/utils/stac/test_entity.py
+"""Tests for the energy extension's entity fields: entity types and IDs."""
+
+import json
 
 import pandas as pd
 import pytest
 
-from rbc.energy.utils.stac_entity import EntityTypeDefiner
+from rbc.energy.utils.stac.entity import EntityTypeDefiner, entity_ids
 
 EARLY = {"2020-01", "2020-02"}
 LATE = {"2025-07"}
@@ -147,3 +149,64 @@ def test_parts_join_through_others() -> None:
     )
     assert sorted(out.index) == ["a", "b", "c"]
     assert set(out["facility_name"]) == {"Mauá"}
+
+
+def _entity_ids(rows: list[dict]) -> list[dict | None]:
+    """Collect the entity IDs of EGEs given as coordinate finding's output rows.
+
+    Args:
+        rows (list[dict]): The EGEs' columns, "cen" for the operator's own ID.
+
+    Returns:
+        list[dict | None]: Each EGE's IDs, parsed from JSON.
+    """
+    df = pd.DataFrame(rows)
+    own = {"cen": df.pop("cen").astype("string")}
+    return [json.loads(ids) if ids else None for ids in entity_ids(df, own)]
+
+
+def test_entity_ids_name_the_source_that_located_the_ege() -> None:
+    """Happy path: the operator's own ID, plus the locating source's, fuzzy or not.
+
+    osm-powerplants' IDs (ppdb) are OSM's own, so they share the "osm" key.
+    """
+    out = _entity_ids(
+        [
+            {"cen": "1", "match_method": "official_id_exact"},
+            {"cen": "2", "match_method": "gem_name_fuzzy", "gem.id": "G1"},
+            {"cen": None, "match_method": "ppdb_id_parent_fuzzy", "ppdb.id": "way/5"},
+            {
+                "cen": "4",
+                "match_method": "osm_name_exact",
+                "osm.id": 7.0,
+                "osm.type": "node",
+            },
+        ]
+    )
+    assert out == [
+        {"cen": "1"},
+        {"cen": "2", "gem": "G1"},
+        {"osm": "way/5"},
+        {"cen": "4", "osm": "node/7"},
+    ]
+
+
+def test_entity_ids_skip_ids_that_name_another_ege() -> None:
+    """Failure path: no ID from a match that wasn't kept, nor from a sibling's donor.
+
+    A vetoed match keeps its locator columns in coordinate finding's output, a sibling
+    inherits its donor's: both IDs belong to another EGE. PPM's 'id' is a row number.
+    """
+    out = _entity_ids(
+        [
+            {"cen": None, "match_method": "unmatched", "ppdb.id": "way/9"},
+            {"cen": "2", "match_method": "gem_sibling", "gem.id": "G1"},
+            {"cen": None, "match_method": "ppdb_id_exact", "ppdb.id": "123"},
+        ]
+    )
+    assert out == [None, {"cen": "2"}, None]
+
+
+def test_entity_ids_without_any_locators_columns() -> None:
+    """Happy path: a run no locator matched in lacks their columns, which isn't an error."""
+    assert _entity_ids([{"cen": "1", "match_method": "unmatched"}]) == [{"cen": "1"}]

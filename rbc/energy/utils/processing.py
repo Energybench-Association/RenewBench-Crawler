@@ -11,16 +11,14 @@ Both identify an EGE by its global ID ('id', s. `EnergyProcessor._get_global_ids
 STAC item's ID. A column an operator doesn't provide stays empty, i.e. its value is unknown.
 """
 
-import json
 from abc import ABC, abstractmethod
 from dataclasses import replace
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
 from loguru import logger
-from shapely.geometry import mapping
 
 from rbc.config.schema import PublishConfig
 from rbc.coordinates.load import Run, load_runs
@@ -33,12 +31,12 @@ from rbc.coordinates.mappings import (
 )
 from rbc.coordinates.orchestrator import find_coordinates
 from rbc.coordinates.pipelines import SharedResources, build_shared_resources
-from rbc.coordinates.resources.natural_earth import RegionRegistry
 from rbc.coordinates.utils.values import normalize_name
-from rbc.energy.utils.downloading import DATE_PATTERN
+from rbc.energy.utils.stac.entity import entity_ids
+from rbc.energy.utils.stac.geometry import geometries
+from rbc.energy.utils.temporal import get_period_bounds, get_resolution
 from rbc.publish.icechunk_store import (
     EnergyIcechunkWriter,
-    get_resolution,
     get_storage_location,
     open_or_create_repository,
 )
@@ -256,8 +254,8 @@ class EnergyProcessor(ABC):
             repo=open_or_create_repository(storage, self.publish_cfg),
             tag=self.release,
             entities=entities,
-            start=local_period_in_utc(file_periods[0], self.TZ)[0],
-            end=local_period_in_utc(file_periods[-1], self.TZ)[1],
+            start=get_period_bounds(file_periods[0], self.TZ)[0],
+            end=get_period_bounds(file_periods[-1], self.TZ)[1],
             step=step,
             chunks=(
                 self.publish_cfg.chunks.entities,
@@ -586,83 +584,6 @@ def to_layout(
     return df.rename(columns=renames or {}).reindex(columns=layout)
 
 
-# ------------------------------------------------------------------
-# Zarr HELPERS
-# ------------------------------------------------------------------
-def to_utc(
-    timestamps: pd.Series,
-    tz: str,
-    dst: pd.Series,
-    skipped: Literal["raise", "NaT"] = "raise",
-) -> pd.Series:
-    """Convert local timestamps to UTC, keeping every hour.
-
-    The time zone applies its country's DST rules, past ones included. The hour a DST
-    change repeats (clocks set back) is told apart by `dst`. An hour a DST change skips
-    (clocks set forward) can't hold real data, so it raises instead of being guessed,
-    unless the caller handles such rows itself (`skipped="NaT"`).
-
-    Args:
-        timestamps (pd.Series): Naive local timestamps, e.g. '2024-01-01 00:00:00'.
-        tz (str): The operator's IANA time zone, e.g. "America/Santiago".
-        dst (pd.Series): Whether each timestamp is daylight saving time. Only read where
-            the local time is repeated, e.g. True for the first of its two rows.
-        skipped (Literal["raise", "NaT"], optional): What a timestamp in an hour a DST
-            change skips gets: an error, or NaT for the caller to handle. Defaults to
-            "raise".
-
-    Returns:
-        pd.Series: The timestamps in UTC (tz-aware), none missing (unless skipped).
-
-    Raises:
-        ValueError: If a timestamp is missing or (by default) lies in an hour a DST
-            change skips.
-    """
-    local = pd.to_datetime(timestamps)
-    if missing := int(local.isna().sum()):
-        raise ValueError(f"{missing} timestamps are missing.")
-
-    aware = local.dt.tz_localize(
-        tz, ambiguous=dst.to_numpy(dtype=bool), nonexistent="NaT"
-    )
-    if skipped == "raise" and (in_gap := aware.isna()).any():
-        raise ValueError(
-            f"{int(in_gap.sum())} timestamps lie in an hour a DST change skips ({tz}), "
-            f"e.g. {sorted(local[in_gap].astype(str).unique())[:5]}."
-        )
-    return aware.dt.tz_convert("UTC")
-
-
-def local_period_in_utc(period: str, tz: str) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Give a local year, month or day's start and end in UTC, e.g. a raw file's period.
-
-    Args:
-        period (str): The local period, e.g. '2025', '2018-11' or '2023-04-01' (s.
-            DATE_PATTERN).
-        tz (str): The operator's IANA time zone, e.g. "America/Santiago".
-
-    Returns:
-        tuple[pd.Timestamp, pd.Timestamp]: The period's first and the next period's first
-            instant in UTC. A midnight a DST change skips starts it an hour later.
-
-    Raises:
-        ValueError: If the period isn't a year, month or day.
-    """
-    if not DATE_PATTERN.match(period):
-        raise ValueError(f"'{period}' isn't a year, month or day (e.g. '2025-07').")
-    first = pd.Timestamp(period)
-    following = {
-        4: pd.offsets.YearBegin(1),
-        7: pd.offsets.MonthBegin(1),
-        10: pd.Timedelta(days=1),
-    }[len(period)]
-    start, end = (
-        d.tz_localize(tz, nonexistent="shift_forward").tz_convert("UTC")
-        for d in (first, first + following)
-    )
-    return start, end
-
-
 def check_totals_kept(before: pd.Series, after: pd.Series, what: str) -> None:
     """Raise if a reshaping step changed any EGE's total, so no value was lost or added.
 
@@ -682,127 +603,3 @@ def check_totals_kept(before: pd.Series, after: pd.Series, what: str) -> None:
             f"Totals changed for {int(changed.sum())} EGEs in {what}: "
             f"{diff.head(5).round(3).to_dict()}"
         )
-
-
-# ------------------------------------------------------------------
-# STAC HELPERS
-# ------------------------------------------------------------------
-def entity_ids(df_ege_locators: pd.DataFrame, own: dict[str, pd.Series]) -> pd.Series:
-    """Collect each EGE's IDs in other systems as JSON (STAC's energy:entity_ids).
-
-    Besides the operator's own IDs, an EGE gets the ID of the source that coordinate
-    finding located it by. Not a sibling, as that ID is its donor's.
-
-    Args:
-        df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them.
-        own (dict[str, pd.Series]): Map of the operator's ID system → each EGE's ID in it.
-
-    Returns:
-        pd.Series: Each EGE's IDs as a JSON object, missing where it has none.
-    """
-    # a locator's columns other than lat/lon/match_method exist only once it matched
-    df = df_ege_locators.reindex(
-        columns=["match_method", "gem.id", "ppdb.id", "osm.id", "osm.type"]
-    )
-    method = df["match_method"].astype("string").fillna("")
-    by = method.str.split("_").str[0].mask(method.str.endswith("_sibling"), "")
-    osm_ids = (
-        df["osm.type"].astype("string")
-        + "/"
-        + pd.to_numeric(df["osm.id"], errors="coerce").astype("Int64").astype("string")
-    )
-    # osm-powerplants' IDs are OSM's ('way/123'), PPM's a row number (todo: 'projectID')
-    ppdb_ids = df["ppdb.id"].astype("string")
-    ppdb_ids = ppdb_ids.where(
-        ppdb_ids.str.fullmatch(r"(node|way|relation)/\d+", na=False)
-    )
-
-    ids = pd.DataFrame(
-        {
-            **own,
-            "gem": df["gem.id"].astype("string").where(by == "gem"),
-            "osm": ppdb_ids.where(by == "ppdb").fillna(osm_ids.where(by == "osm")),
-        },
-        index=df.index,
-    )
-    return pd.Series(
-        [
-            json.dumps(row.dropna().to_dict()) if row.notna().any() else None
-            for _, row in ids.iterrows()
-        ],
-        index=df.index,
-        dtype=object,
-    )
-
-
-def combine_fuels(fuels: pd.DataFrame) -> pd.DataFrame:
-    """Combine each EGE's reported fuels into its STAC fuel fields.
-
-    Args:
-        fuels (pd.DataFrame): One row per EGE and reported fuel, with the columns "id",
-            "fuel_type" and "fuel_subtype" (in STAC's vocabulary).
-
-    Returns:
-        pd.DataFrame: Indexed by EGE ID, with "fuel_type", "fuel_subtype" and
-            "hybrid_fuel_types" (a list, only for hybrids).
-
-    Raises:
-        ValueError: If an EGE reports no fuel at all.
-    """
-    with_type = fuels.dropna(subset=["fuel_type"])
-    if missing := sorted(set(fuels["id"]) - set(with_type["id"])):
-        raise ValueError(f"{len(missing)} EGEs report no fuel type: {missing[:5]}")
-
-    rows: dict[str, tuple[str, str | None, list[str] | None]] = {}
-    for ege_id, group in with_type.groupby("id"):
-        types = sorted(set(group["fuel_type"]))
-        subtypes = sorted(set(group["fuel_subtype"].dropna()))
-        if len(types) == 1:
-            rows[ege_id] = (types[0], subtypes[0] if len(subtypes) == 1 else None, None)
-        else:
-            rows[ege_id] = ("hybrid", None, types)
-    return pd.DataFrame.from_dict(
-        rows,
-        orient="index",
-        columns=["fuel_type", "fuel_subtype", "hybrid_fuel_types"],
-    )
-
-
-def geometries(
-    df_stac: pd.DataFrame, country: str, region_reg: RegionRegistry | None
-) -> pd.Series:
-    """Give each EGE the smallest geometry its location is certain to, as GeoJSON.
-
-    A point where coordinates were found, else its region's polygon where the region is
-    known (s. Natural Earth), else its country's polygon.
-
-    Args:
-        df_stac (pd.DataFrame): EGEs in the STAC_COLUMNS layout ("lat", "lon", "region").
-        country (str): The operator's country, e.g. "Chile".
-        region_reg (RegionRegistry | None): Natural Earth region lookup for polygons.
-
-    Returns:
-        pd.Series: Each EGE's geometry (GeoJSON dict), in the index of `df_stac`.
-
-    Raises:
-        ValueError: If an EGE needs a polygon but none is found for its country.
-    """
-    shapes: dict = {}  # polygons are shared by many EGEs: look each up once
-
-    def polygon(region: str | None) -> dict | None:
-        if region not in shapes:
-            geom = region_reg.geometry(country, region) if region_reg else None
-            shapes[region] = mapping(geom) if geom is not None else None
-        return shapes[region]
-
-    out = []
-    for lat, lon, region in zip(df_stac["lat"], df_stac["lon"], df_stac["region"]):
-        if pd.notna(lat) and pd.notna(lon):
-            out.append({"type": "Point", "coordinates": [lon, lat]})
-        elif pd.notna(region) and (geom := polygon(region)) is not None:
-            out.append(geom)
-        elif (geom := polygon(None)) is not None:
-            out.append(geom)
-        else:
-            raise ValueError(f"No polygon found for '{country}' to place EGEs in.")
-    return pd.Series(out, index=df_stac.index, dtype=object)

@@ -16,14 +16,10 @@ from rbc.energy.ons.mappings import (
     STAC_HYBRID_FUELS,
     UNKNOWN_MEASUREMENT_MODES,
 )
-from rbc.energy.utils.processing import (
-    ZARR_COLUMNS,
-    EnergyProcessor,
-    combine_fuels,
-    to_layout,
-    to_utc,
-)
-from rbc.energy.utils.stac_entity import EntityTypeDefiner
+from rbc.energy.utils.processing import ZARR_COLUMNS, EnergyProcessor, to_layout
+from rbc.energy.utils.stac.entity import EntityTypeDefiner
+from rbc.energy.utils.stac.fuel import combine_fuels
+from rbc.energy.utils.temporal import to_utc
 from rbc.publish.stac import DatasetInfo
 
 SOURCE = "ons"

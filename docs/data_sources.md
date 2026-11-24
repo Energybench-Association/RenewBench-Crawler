@@ -475,7 +475,7 @@ Energy extension:
   - `'facility'` for single EGEs per default; for EGE groups if a single location was found
     for it.
   - `'group'` (with `energy:facility_name`) for single EGEs that belong to one facility
-    (s. [`EntityTypeDefiner.find_groups`](../rbc/energy/utils/stac_entity.py)); for EGE groups
+    (s. [`EntityTypeDefiner.find_groups`](../rbc/energy/utils/stac/entity.py)); for EGE groups
     never.
     - Requirements:
       - report in a common month under different names.

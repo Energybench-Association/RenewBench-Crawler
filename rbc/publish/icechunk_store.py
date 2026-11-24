@@ -18,10 +18,6 @@ import xarray as xr
 from loguru import logger
 
 from rbc.config.schema import PublishConfig
-from rbc.energy.utils.downloading import TRES_PATTERN
-
-# Map: the resolution's unit → its ISO 8601 duration, e.g. "15min" → "PT15M"
-ISO_DURATIONS = {"min": "PT{}M", "h": "PT{}H", "d": "P{}D"}
 
 
 @dataclass(frozen=True)
@@ -55,28 +51,6 @@ class StorageInfo:
         if self.local_dir is not None:
             return str(Path(self.local_dir, self.prefix))
         return f"{str(self.url_public).rstrip('/')}/{self.bucket}/{self.prefix}"
-
-
-def get_resolution(tres: str) -> tuple[pd.Timedelta, str]:
-    """Read a raw data directory's temporal resolution.
-
-    Args:
-        tres (str): The directory's name, as DownloadTask names it, e.g. "1h", "15min".
-
-    Returns:
-        tuple[pd.Timedelta, str]: The time step, and its ISO 8601 duration (e.g.
-            "PT1H", "PT15M"), as repository prefixes and STAC name it.
-
-    Raises:
-        ValueError: If the name isn't a temporal resolution.
-    """
-    if not (match := TRES_PATTERN.fullmatch(tres)):
-        raise ValueError(
-            f"'{tres}' isn't a temporal resolution such as '1h' or '15min'."
-        )
-    count, unit = match.groups()
-    step = pd.Timedelta(int(count), unit="D" if unit == "d" else unit)  # 'd' deprecated
-    return step, ISO_DURATIONS[unit].format(int(count))
 
 
 def get_storage_location(

@@ -1,9 +1,11 @@
-"""ENTITY TYPES.
+"""STAC ENTITY FIELDS.
 
-Operator-neutral rules for the STAC energy extension's entity types (energy:entity_type,
-energy:facility_name), applied to an operator's EGEs before they become STAC Items.
+Operator-neutral rules for the STAC energy extension's entity fields (energy:entity_ids,
+energy:entity_type, energy:facility_name), applied to an operator's EGEs before they become
+STAC Items.
 """
 
+import json
 import re
 from itertools import combinations
 from typing import cast
@@ -16,13 +18,59 @@ from rbc.coordinates.utils.tokenizer import NORM_GENERIC_UNIT_TOKENS, NameTokeni
 from rbc.coordinates.utils.values import normalize_name
 
 EARTH_RADIUS_KM = 6371.0
-UNIT_TOKENS = frozenset(
-    NORM_GENERIC_UNIT_TOKENS
-)  # e.g. "bloco" = never in facility_name
+UNIT_TOKENS = frozenset(NORM_GENERIC_UNIT_TOKENS)  # e.g. "bloco"=never in facility_name
+
+
+def entity_ids(df_ege_locators: pd.DataFrame, own: dict[str, pd.Series]) -> pd.Series:
+    """Collect each EGE's IDs in other systems as JSON (STAC's energy:entity_ids).
+
+    Besides the operator's own IDs, an EGE gets the ID of the source that coordinate
+    finding located it by. Not a sibling, as that ID is its donor's.
+
+    Args:
+        df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them.
+        own (dict[str, pd.Series]): Map of the operator's ID system → each EGE's ID in it.
+
+    Returns:
+        pd.Series: Each EGE's IDs as a JSON object, missing where it has none.
+    """
+    # a locator's columns other than lat/lon/match_method exist only once it matched
+    df = df_ege_locators.reindex(
+        columns=["match_method", "gem.id", "ppdb.id", "osm.id", "osm.type"]
+    )
+    method = df["match_method"].astype("string").fillna("")
+    by = method.str.split("_").str[0].mask(method.str.endswith("_sibling"), "")
+    osm_ids = (
+        df["osm.type"].astype("string")
+        + "/"
+        + pd.to_numeric(df["osm.id"], errors="coerce").astype("Int64").astype("string")
+    )
+    # osm-powerplants' IDs are OSM's ('way/123'), PPM's a row number (todo: 'projectID')
+    ppdb_ids = df["ppdb.id"].astype("string")
+    ppdb_ids = ppdb_ids.where(
+        ppdb_ids.str.fullmatch(r"(node|way|relation)/\d+", na=False)
+    )
+
+    ids = pd.DataFrame(
+        {
+            **own,
+            "gem": df["gem.id"].astype("string").where(by == "gem"),
+            "osm": ppdb_ids.where(by == "ppdb").fillna(osm_ids.where(by == "osm")),
+        },
+        index=df.index,
+    )
+    return pd.Series(
+        [
+            json.dumps(row.dropna().to_dict()) if row.notna().any() else None
+            for _, row in ids.iterrows()
+        ],
+        index=df.index,
+        dtype=object,
+    )
 
 
 class EntityTypeDefiner:
-    """For STAC, defines a sysop's EGEs' entity types using names and codes.
+    """For STAC, defines a sysop's EGEs' energy:entity_type using names and codes.
 
     Attributes:
         sysop (str): The energy system operator, e.g. "ons".

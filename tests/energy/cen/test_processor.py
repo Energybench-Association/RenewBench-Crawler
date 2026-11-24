@@ -25,7 +25,8 @@ from rbc.energy.cen.processor import (
     CenProcessor,
 )
 from rbc.energy.utils import processing
-from rbc.energy.utils.processing import combine_fuels
+from rbc.energy.utils.stac.fuel import combine_fuels
+from rbc.energy.utils.temporal import get_period_bounds
 
 RELEASE = "v0.1.0"
 PUBLISH_CFG = PublishConfig(
@@ -813,7 +814,7 @@ def test_local_day_in_utc(day: str, hours: int) -> None:
         day (str): A local date in Chile.
         hours (int): Its expected length in hours.
     """
-    start, end = processing.local_period_in_utc(day, CenProcessor.TZ)
+    start, end = get_period_bounds(day, CenProcessor.TZ)
     assert (end - start).total_seconds() / 3600 == hours
 
 

@@ -27,11 +27,10 @@ from rbc.energy.utils.processing import (
     ZARR_COLUMNS,
     EnergyProcessor,
     check_totals_kept,
-    combine_fuels,
-    local_period_in_utc,
     to_layout,
-    to_utc,
 )
+from rbc.energy.utils.stac.fuel import combine_fuels
+from rbc.energy.utils.temporal import get_period_bounds, to_utc
 from rbc.publish.stac import DatasetInfo
 
 SOURCE = "cen"
@@ -462,12 +461,11 @@ class CenProcessor(EnergyProcessor):
         if (pd.to_datetime(df_eg["timestamp"]) != clock).any():
             raise ValueError(f"{day}: 'fecha_hora' disagrees with 'hora'.")
 
-        start, end = local_period_in_utc(day, self.TZ)
+        start, end = get_period_bounds(day, self.TZ)
         repeated = hour == 25
         if repeated.any():
-            prev_start, prev_end = local_period_in_utc(
-                str((pd.Timestamp(day) - pd.Timedelta(days=1)).date()), self.TZ
-            )
+            prev_day = str((pd.Timestamp(day) - pd.Timedelta(days=1)).date())
+            prev_start, prev_end = get_period_bounds(prev_day, self.TZ)
             if prev_end - prev_start != pd.Timedelta(hours=25):
                 raise ValueError(
                     f"{day}: 'hora' 25 without a clock change the day before."
