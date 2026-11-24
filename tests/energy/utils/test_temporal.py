@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from rbc.energy.utils.temporal import get_period_bounds, get_resolution, to_utc
+from rbc.utils.errors import InvalidError
 
 
 @pytest.mark.parametrize(
@@ -80,7 +81,7 @@ def test_get_period_bounds(period: str, start: str, end: str) -> None:
 
 def test_get_period_bounds_rejects_other_formats() -> None:
     """Failure path: a period that isn't a year, month or day raises."""
-    with pytest.raises(ValueError, match="year, month or day"):
+    with pytest.raises(InvalidError, match="year, month or day"):
         get_period_bounds("2025-W07", "America/Sao_Paulo")
 
 
@@ -107,5 +108,5 @@ def test_get_resolution(tres: str, step: pd.Timedelta, iso: str) -> None:
 
 def test_get_resolution_raises_on_other_names() -> None:
     """Failure path: a directory name that isn't a temporal resolution raises."""
-    with pytest.raises(ValueError, match="isn't a temporal resolution"):
+    with pytest.raises(InvalidError, match="isn't a temporal resolution"):
         get_resolution("hourly")

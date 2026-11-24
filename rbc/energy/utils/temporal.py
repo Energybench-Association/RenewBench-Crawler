@@ -8,6 +8,7 @@ from typing import Literal
 import pandas as pd
 
 from rbc.energy.utils.downloading import DATE_PATTERN, TRES_PATTERN
+from rbc.utils.errors import InvalidError
 
 # Map: the resolution's unit → its ISO 8601 duration, e.g. "15min" → "PT15M"
 ISO_DURATIONS = {"min": "PT{}M", "h": "PT{}H", "d": "P{}D"}
@@ -70,10 +71,10 @@ def get_period_bounds(period: str, tz: str) -> tuple[pd.Timestamp, pd.Timestamp]
             to 01:00), that boundary is 01:00, the first local time that exists.
 
     Raises:
-        ValueError: If the period isn't a year, month or day.
+        InvalidError: If the period isn't a year, month or day.
     """
     if not DATE_PATTERN.match(period):
-        raise ValueError(f"'{period}' isn't a year, month or day (e.g. '2025-07').")
+        raise InvalidError(f"'{period}' isn't a year, month or day (e.g. '2025-07').")
 
     first = pd.Timestamp(period)
     following = {
@@ -100,10 +101,10 @@ def get_resolution(tres: str) -> tuple[pd.Timedelta, str]:
             repository prefixes and STAC name it.
 
     Raises:
-        ValueError: If the name isn't a temporal resolution.
+        InvalidError: If the name isn't a temporal resolution.
     """
     if not (match := TRES_PATTERN.fullmatch(tres)):
-        raise ValueError(
+        raise InvalidError(
             f"'{tres}' isn't a temporal resolution such as '1h' or '15min'."
         )
     count, unit = match.groups()

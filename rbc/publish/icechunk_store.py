@@ -18,6 +18,7 @@ import xarray as xr
 from loguru import logger
 
 from rbc.config.schema import PublishConfig
+from rbc.utils.errors import InvalidError
 
 
 @dataclass(frozen=True)
@@ -91,22 +92,22 @@ def open_or_create_repository(
         ic.Repository: The opened repository.
 
     Raises:
-        ValueError: If a published repository has no config, no S3 endpoint and bucket,
-            or the S3 credentials are not set.
+        InvalidError: If a published repository has no config, no S3 endpoint and
+            bucket, or the S3 credentials are not set.
     """
     if storage.local_dir is not None:
         path = Path(storage.local_dir, storage.prefix)
     elif publish_cfg is None:
-        raise ValueError(f"Publishing '{storage.prefix}' needs the publish config.")
+        raise InvalidError(f"Publishing '{storage.prefix}' needs the publish config.")
     elif publish_cfg.route == "lsdf":
         path = Path(publish_cfg.lsdf.dst_dir_data, publish_cfg.bucket, storage.prefix)
     else:
         endpoint, bucket = publish_cfg.s3.url_endpoint, publish_cfg.bucket
         if not (endpoint and bucket):
-            raise ValueError("An S3 repository needs an endpoint and a bucket.")
+            raise InvalidError("An S3 repository needs an endpoint and a bucket.")
         key, secret = os.environ.get("S3_ACCESS_KEY"), os.environ.get("S3_SECRET_KEY")
         if not (key and secret):
-            raise ValueError("Set S3_ACCESS_KEY and S3_SECRET_KEY to write to S3.")
+            raise InvalidError("Set S3_ACCESS_KEY and S3_SECRET_KEY to write to S3.")
         s3 = ic.s3_storage(
             bucket=bucket,
             prefix=storage.prefix,
@@ -165,8 +166,8 @@ class EnergyIcechunkWriter:
             chunks (tuple[int, int]): Chunk shape (EGEs, time steps).
 
         Raises:
-            ValueError: If the EGE IDs repeat, or an existing tag holds other EGEs or
-                another time axis.
+            ValueError: If the EGE IDs repeat.
+            InvalidError: If an existing tag holds other EGEs or another time axis.
         """
         if len(set(entities)) != len(entities):
             raise ValueError("EGE IDs along 'entity_id' must be unique.")
@@ -375,16 +376,16 @@ class EnergyIcechunkWriter:
         (e.g. until 2025 vs until 2026) is caught.
 
         Raises:
-            ValueError: If the tag's EGEs or time axis differ from this run's.
+            InvalidError: If the tag's EGEs or time axis differ from this run's.
         """
         session = self.repo.readonly_session(tag=self.tag)
         stored = xr.open_zarr(session.store, consolidated=False)
         if [str(e) for e in stored["entity_id"].values] != self.entities:
-            raise ValueError(
+            raise InvalidError(
                 f"Release '{self.tag}' exists with other EGEs: raise the release."
             )
         if not pd.DatetimeIndex(stored["time"].values).equals(self.times):
-            raise ValueError(
+            raise InvalidError(
                 f"Release '{self.tag}' exists with another time axis: raise the release."
             )
 

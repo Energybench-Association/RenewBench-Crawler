@@ -21,6 +21,7 @@ from rbc.energy.utils.stac.entity import EntityTypeDefiner
 from rbc.energy.utils.stac.fuel import combine_fuels
 from rbc.energy.utils.temporal import to_utc
 from rbc.publish.stac import DatasetInfo
+from rbc.utils.errors import DataStructureError
 
 SOURCE = "ons"
 
@@ -177,12 +178,14 @@ class OnsProcessor(EnergyProcessor):
             month (str): The local month the CSV holds, e.g. '2025-07'.
 
         Raises:
-            ValueError: If a mode is missing or neither a plant's nor a group's.
+            DataStructureError: If a mode is missing or neither a plant's nor a group's.
         """
         known = PLANT_MODES | GROUP_MODES
         unknown = sorted(set(modes.fillna("<missing>")) - known)
         if unknown:
-            raise ValueError(f"{month}: ONS operating modes not classified: {unknown}")
+            raise DataStructureError(
+                f"{month}: ONS operating modes not classified: {unknown}"
+            )
 
     def _prepare_for_zarr(
         self, df_eg: pd.DataFrame, month: str
@@ -206,10 +209,10 @@ class OnsProcessor(EnergyProcessor):
                 repeated, for review ("repeated_hour_rows").
 
         Raises:
-            ValueError: If an EGE's hour is reported twice.
+            DataStructureError: If an EGE's hour is reported twice.
         """
         if (twice := df_eg.duplicated(subset=["id", "timestamp"])).any():
-            raise ValueError(
+            raise DataStructureError(
                 f"{month}: {int(twice.sum())} EGE hours reported twice, e.g. "
                 f"{df_eg.loc[twice, ['id', 'timestamp']].head(3).to_dict('records')}."
             )
@@ -244,14 +247,14 @@ class OnsProcessor(EnergyProcessor):
                 which rows are in the repeated hour.
 
         Raises:
-            ValueError: If a timestamp lies outside the month, off the hour, or in an
-                hour the clocks skipped (s. `to_utc`).
+            DataStructureError: If a timestamp lies outside the month or off the hour.
+            ValueError: If a timestamp lies in an hour the clocks skipped (s. `to_utc`).
         """
         local = pd.to_datetime(timestamps)
         if (local.dt.strftime("%Y-%m") != month).any():
-            raise ValueError(f"{month}: 'din_instante' outside the month.")
+            raise DataStructureError(f"{month}: 'din_instante' outside the month.")
         if (local != local.dt.floor("h")).any():
-            raise ValueError(f"{month}: 'din_instante' not on the hour.")
+            raise DataStructureError(f"{month}: 'din_instante' not on the hour.")
 
         repeated = local.dt.tz_localize(
             self.TZ, ambiguous="NaT", nonexistent="shift_forward"
@@ -376,7 +379,8 @@ class OnsProcessor(EnergyProcessor):
                 "fuel_subtype" in STAC's vocabulary.
 
         Raises:
-            ValueError: If a combination has no mapping, listing all such combinations.
+            DataStructureError: If a combination has no mapping, listing all such
+                combinations.
         """
         fuels = {
             (normalize_name(main), normalize_name(sub)): [fuel]
@@ -401,7 +405,7 @@ class OnsProcessor(EnergyProcessor):
                 unknown.add((main, sub))  # as ONS spells it
 
         if unknown:
-            raise ValueError(
+            raise DataStructureError(
                 f"ONS plant and fuel types without a STAC fuel: "
                 f"{sorted(unknown, key=str)}"
             )

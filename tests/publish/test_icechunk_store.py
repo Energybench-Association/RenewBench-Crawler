@@ -16,6 +16,7 @@ from rbc.publish.icechunk_store import (
     get_storage_location,
     open_or_create_repository,
 )
+from rbc.utils.errors import InvalidError
 
 START = pd.Timestamp("2024-01-01 00:00", tz="UTC")
 END = pd.Timestamp("2024-01-01 10:00", tz="UTC")
@@ -153,7 +154,7 @@ def test_existing_release_is_reused(tmp_path: Path) -> None:
 def test_existing_release_with_other_eges_raises(tmp_path: Path) -> None:
     """Failure path: reusing a release that holds other EGEs raises."""
     _writer(tmp_path).finish("first")
-    with pytest.raises(ValueError, match="other EGEs"):
+    with pytest.raises(InvalidError, match="other EGEs"):
         _writer(tmp_path, entities=("a", "c"))
 
 
@@ -164,7 +165,7 @@ def test_existing_release_with_another_time_axis_raises(tmp_path: Path) -> None:
     would claim the years the tag doesn't hold.
     """
     _writer(tmp_path).finish("first")
-    with pytest.raises(ValueError, match="another time axis"):
+    with pytest.raises(InvalidError, match="another time axis"):
         _writer(tmp_path, end=END + pd.Timedelta(hours=5))
 
 
@@ -196,13 +197,13 @@ def test_published_repository_needs_config_and_credentials(
 ) -> None:
     """Failure path: publishing without the config or S3 credentials raises."""
     storage = StorageInfo("p", bucket="b")
-    with pytest.raises(ValueError, match="needs the publish config"):
+    with pytest.raises(InvalidError, match="needs the publish config"):
         open_or_create_repository(storage)
 
     monkeypatch.delenv("S3_ACCESS_KEY", raising=False)
     cfg = MagicMock(route="s3", bucket="b")
     cfg.s3.url_endpoint = "https://s3.example.org"
-    with pytest.raises(ValueError, match="S3_ACCESS_KEY"):
+    with pytest.raises(InvalidError, match="S3_ACCESS_KEY"):
         open_or_create_repository(storage, cfg)
 
 

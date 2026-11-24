@@ -27,6 +27,7 @@ from rbc.energy.cen.processor import (
 from rbc.energy.utils import processing
 from rbc.energy.utils.stac.fuel import combine_fuels
 from rbc.energy.utils.temporal import get_period_bounds
+from rbc.utils.errors import DataStructureError, MissingDataError
 
 RELEASE = "v0.1.0"
 PUBLISH_CFG = PublishConfig(
@@ -748,7 +749,7 @@ def test_process_data_without_raw(make_processor: Callable, tmp_path: Path) -> N
         tmp_path (Path): Pytest-provided temporary directory.
     """
     Path(tmp_path, "raw", "cen").mkdir(parents=True)
-    with pytest.raises(ValueError, match="No raw 'cen' data"):
+    with pytest.raises(MissingDataError, match="No raw 'cen' data"):
         make_processor().process_data()
 
 
@@ -762,7 +763,7 @@ def test_process_data_without_raw_for_the_periods(
         tmp_path (Path): Pytest-provided temporary directory.
     """
     _write_raw(Path(tmp_path, "raw", "cen", "1h"))  # 2024-01-01 and 2024-01-02
-    with pytest.raises(ValueError, match=r"No raw 'cen' data .* for \['2023'\]"):
+    with pytest.raises(MissingDataError, match=r"No raw 'cen' data .* for \['2023'\]"):
         make_processor(periods=["2023"]).process_data()
 
 
@@ -897,7 +898,7 @@ def test_hours_that_cant_be_placed_raise(
         rows (list[tuple[str, int]]): The rows' local time and 'hora'.
     """
     df = _day(day, rows).assign(value=[1.0, 2.0][: len(rows)])
-    with pytest.raises(ValueError):
+    with pytest.raises(DataStructureError):
         make_processor()._prepare_for_zarr(df, day)
 
 
@@ -1008,7 +1009,7 @@ def test_unmapped_vocabulary_raises() -> None:
             "fuel_subtype": None,
         }
     )
-    with pytest.raises(ValueError, match="Mareomotriz"):
+    with pytest.raises(DataStructureError, match="Mareomotriz"):
         CenProcessor._stac_fuels(df)
     # a cogeneration plant without its own fuel defined names none: combining raises
     cogen = pd.DataFrame(
@@ -1022,9 +1023,9 @@ def test_unmapped_vocabulary_raises() -> None:
     with pytest.raises(ValueError, match="no fuel type"):
         combine_fuels(CenProcessor._stac_fuels(cogen))
     no_terms = pd.Series([None, None, None])
-    with pytest.raises(ValueError, match="En Limbo"):
+    with pytest.raises(DataStructureError, match="En Limbo"):
         CenProcessor._stac_status(no_terms, pd.Series(["Operativa", "En Limbo", None]))
-    with pytest.raises(ValueError, match="OCULTO"):
+    with pytest.raises(DataStructureError, match="OCULTO"):
         CenProcessor._stac_status(pd.Series(["OCULTO"]), pd.Series(["Operativa"]))
 
 

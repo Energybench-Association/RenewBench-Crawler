@@ -32,6 +32,7 @@ from rbc.energy.utils.processing import (
 from rbc.energy.utils.stac.fuel import combine_fuels
 from rbc.energy.utils.temporal import get_period_bounds, to_utc
 from rbc.publish.stac import DatasetInfo
+from rbc.utils.errors import DataStructureError
 
 SOURCE = "cen"
 
@@ -397,8 +398,8 @@ class CenProcessor(EnergyProcessor):
                 hour the clocks skipped, for review ("skipped_hour_placeholders").
 
         Raises:
-            ValueError: If an hour can't be placed in UTC exactly once, or if any EGE's
-                total changed on the way.
+            DataStructureError: If an hour can't be placed in UTC exactly once.
+            ValueError: If any EGE's total changed on the way.
         """
         utc, placeholder = self._hours_to_utc(df_eg, day)
         df_placeholders = df_eg[placeholder]
@@ -415,7 +416,7 @@ class CenProcessor(EnergyProcessor):
             {CONFIG_COL: df_eg[CONFIG_COL].to_numpy(), "timestamp": utc.to_numpy()}
         )
         if (twice := config_hours.duplicated()).any():
-            raise ValueError(
+            raise DataStructureError(
                 f"{day}: {int(twice.sum())} configuration hours fall on the same UTC "
                 f"hour, e.g. {config_hours[twice].head(3).to_dict('records')}."
             )
@@ -450,15 +451,15 @@ class CenProcessor(EnergyProcessor):
                 placeholder), and which rows are placeholders for a skipped hour.
 
         Raises:
-            ValueError: If 'hour' lies outside 1-25 or disagrees with 'fecha_hora', or a
+            DataStructureError: If 'hour' lies outside 1-25 or disagrees with 'fecha_hora', or a
                 row of a DST change appears on a day without that change.
         """
         hour = df_eg["hour"].astype(int)
         if not hour.between(1, 25).all():
-            raise ValueError(f"{day}: 'hora' outside 1-25: {sorted(set(hour))}")
+            raise DataStructureError(f"{day}: 'hora' outside 1-25: {sorted(set(hour))}")
         clock = pd.Timestamp(day) + pd.to_timedelta((hour - 1) % 24, unit="h")
         if (pd.to_datetime(df_eg["timestamp"]) != clock).any():
-            raise ValueError(f"{day}: 'fecha_hora' disagrees with 'hora'.")
+            raise DataStructureError(f"{day}: 'fecha_hora' disagrees with 'hora'.")
 
         start, end = get_period_bounds(day, self.TZ)
         repeated = hour == 25
@@ -466,7 +467,7 @@ class CenProcessor(EnergyProcessor):
             prev_day = str((pd.Timestamp(day) - pd.Timedelta(days=1)).date())
             prev_start, prev_end = get_period_bounds(prev_day, self.TZ)
             if prev_end - prev_start != pd.Timedelta(hours=25):
-                raise ValueError(
+                raise DataStructureError(
                     f"{day}: 'hora' 25 without a clock change the day before."
                 )
 
@@ -478,7 +479,7 @@ class CenProcessor(EnergyProcessor):
         utc = utc.mask(repeated, start - pd.Timedelta(hours=1))
         placeholder = utc.isna()
         if placeholder.any() and end - start != pd.Timedelta(hours=23):
-            raise ValueError(
+            raise DataStructureError(
                 f"{day}: hours the clocks skipped on a day without a change."
             )
 
@@ -487,7 +488,7 @@ class CenProcessor(EnergyProcessor):
             .between(start, end, inclusive="left")
             .all()
         ):
-            raise ValueError(f"{day}: hours outside the local day.")
+            raise DataStructureError(f"{day}: hours outside the local day.")
         return utc, placeholder
 
     def _get_stac_fields(
@@ -594,7 +595,8 @@ class CenProcessor(EnergyProcessor):
                 "fuel_type" and "fuel_subtype" in STAC's vocabulary.
 
         Raises:
-            ValueError: If a combination has no mapping, listing all such combinations.
+            DataStructureError: If a combination has no mapping, listing all such
+                combinations.
         """
         fuels = {
             (normalize_name(main), normalize_name(sub)): fuel
@@ -624,7 +626,7 @@ class CenProcessor(EnergyProcessor):
                 unknown.add((main, sub))  # as CEN spells it
 
         if unknown:
-            raise ValueError(
+            raise DataStructureError(
                 f"CEN technology types without a STAC fuel: {sorted(unknown, key=str)}"
             )
         # an EGE reported in two spellings maps to the same fuel twice: keep it once
@@ -646,7 +648,8 @@ class CenProcessor(EnergyProcessor):
             pd.Series: The STAC status, missing where neither gives one.
 
         Raises:
-            ValueError: If a term or status has no mapping, listing all such values.
+            DataStructureError: If a term or status has no mapping, listing all such
+                values.
         """
         from_name = name_terms.map(STAC_NAME_STATUSES)
         from_registry = estado.map(STAC_STATUSES)
@@ -655,7 +658,7 @@ class CenProcessor(EnergyProcessor):
             | set(estado[estado.notna() & from_registry.isna()])
         )
         if unknown:
-            raise ValueError(f"CEN statuses without STAC status: {unknown}")
+            raise DataStructureError(f"CEN statuses without STAC status: {unknown}")
         return from_name.where(from_name.notna(), from_registry)  # where vs depr fillna
 
     def _join_registry(

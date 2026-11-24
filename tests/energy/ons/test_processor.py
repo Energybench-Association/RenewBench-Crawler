@@ -9,6 +9,7 @@ import pytest
 
 from rbc.energy.ons.processor import OnsProcessor
 from rbc.energy.utils import processing
+from rbc.utils.errors import DataStructureError
 
 
 @pytest.fixture
@@ -57,7 +58,7 @@ def test_unknown_or_missing_mode_raises(proc: OnsProcessor) -> None:
         proc (OnsProcessor): The processor.
     """
     df = pd.DataFrame({"cod_modalidadeoperacao": ["TIPO I", "TIPO IV", None]})
-    with pytest.raises(ValueError, match=r"\['<missing>', 'TIPO IV'\]"):
+    with pytest.raises(DataStructureError, match=r"\['<missing>', 'TIPO IV'\]"):
         proc._clean_file(df, "2025-07")
 
 
@@ -80,15 +81,20 @@ def test_clocks_back_hour_is_left_out_for_review(proc: OnsProcessor) -> None:
 
 
 @pytest.mark.parametrize(
-    "times, month, match",
+    "times, month, error, match",
     [
-        (["2018-03-01 00:00"], "2018-02", "outside the month"),
-        (["2018-02-01 00:30"], "2018-02", "not on the hour"),
-        (["2018-11-04 00:00"], "2018-11", "DST change skips"),  # clocks forward
+        (["2018-03-01 00:00"], "2018-02", DataStructureError, "outside the month"),
+        (["2018-02-01 00:30"], "2018-02", DataStructureError, "not on the hour"),
+        # clocks forward: `to_utc` is generic, so a plain ValueError
+        (["2018-11-04 00:00"], "2018-11", ValueError, "DST change skips"),
     ],
 )
 def test_hours_that_cant_be_placed_raise(
-    proc: OnsProcessor, times: list[str], month: str, match: str
+    proc: OnsProcessor,
+    times: list[str],
+    month: str,
+    error: type[Exception],
+    match: str,
 ) -> None:
     """Failure path: hours outside the file's month, off the hour or skipped raise.
 
@@ -96,9 +102,10 @@ def test_hours_that_cant_be_placed_raise(
         proc (OnsProcessor): The processor.
         times (list[str]): The rows' local 'din_instante'.
         month (str): The month the file holds.
+        error (type[Exception]): The expected error type.
         match (str): The expected error message part.
     """
-    with pytest.raises(ValueError, match=match):
+    with pytest.raises(error, match=match):
         proc._prepare_for_zarr(_rows(times), month)
 
 
@@ -108,7 +115,7 @@ def test_hour_reported_twice_raises(proc: OnsProcessor) -> None:
     Args:
         proc (OnsProcessor): The processor.
     """
-    with pytest.raises(ValueError, match="reported twice"):
+    with pytest.raises(DataStructureError, match="reported twice"):
         proc._prepare_for_zarr(_rows(["2020-01-01 00:00"] * 2), "2020-01")
 
 
@@ -132,7 +139,7 @@ def test_stac_fuels_hybrid_and_unknown() -> None:
     ]
 
     df.loc[1, "fuel_subtype"] = "Unknown fuel"
-    with pytest.raises(ValueError, match="Unknown fuel"):
+    with pytest.raises(DataStructureError, match="Unknown fuel"):
         OnsProcessor._stac_fuels(df)
 
 

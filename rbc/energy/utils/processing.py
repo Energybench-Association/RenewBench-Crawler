@@ -48,6 +48,7 @@ from rbc.publish.stac import (
     validate,
     write_stac,
 )
+from rbc.utils.errors import MissingDataError
 from rbc.utils.io import load_df_from_file, write_df_to_csv
 
 # Columns of the Zarr data: one row per EGE and timestamp
@@ -174,14 +175,14 @@ class EnergyProcessor(ABC):
         """Process previously downloaded, raw energy generation data, run by run.
 
         Raises:
-            ValueError: If there is no raw data (for the identified periods).
+            MissingDataError: If there is no raw data (for the identified periods).
         """
         runs = list(
             load_runs([self.input_dir], sysop=self.DATASET.sysop, periods=self.periods)
         )
         if not runs:
             for_periods = f" for {self.periods}" if self.periods else ""
-            raise ValueError(
+            raise MissingDataError(
                 f"No raw '{self.DATASET.sysop}' data found in {self.input_dir}{for_periods}."
             )
 
