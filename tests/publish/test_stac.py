@@ -84,19 +84,9 @@ def _built(df: pd.DataFrame | None = None) -> tuple[dict, list[dict]]:
     Returns:
         tuple[dict, list[dict]]: The Collection and the Items.
     """
-    items = stac.build_items(
-        _rows() if df is None else df, SPANS, INFO, "v0.1.0", STORAGE, "SNAP", "PT1H"
-    )
-    coll = stac.build_collection(
-        INFO,
-        "v0.1.0",
-        items,
-        STORAGE,
-        "SNAP",
-        entities=ENTITIES,
-        times=TIMES,
-        step="PT1H",
-    )
+    builder = stac.EnergyStacBuilder(INFO, "v0.1.0", STORAGE, "SNAP", "PT1H")
+    items = builder.build_items(_rows() if df is None else df, SPANS)
+    coll = builder.build_collection(items, entities=ENTITIES, times=TIMES)
     return coll, items
 
 
@@ -254,9 +244,9 @@ def test_collection_without_processor_raises() -> None:
     """Failure path: without a processor provider, the lineage has nowhere to go."""
     info = replace(INFO, providers=INFO.providers[:1])
     with pytest.raises(ValueError, match="processor"):
-        stac.build_collection(
-            info, "v0.1.0", _built()[1], STORAGE, "SNAP", ENTITIES, TIMES, "PT1H"
-        )
+        stac.EnergyStacBuilder(
+            info, "v0.1.0", STORAGE, "SNAP", "PT1H"
+        ).build_collection(_built()[1], ENTITIES, TIMES)
 
 
 @pytest.mark.parametrize(
@@ -279,9 +269,8 @@ def test_collection_links_the_license_notice(
         licenses (list[str]): The Collection's license links expected.
     """
     info = replace(INFO, license_notice_url=notice)
-    coll = stac.build_collection(
-        info, "v0.1.0", _built()[1], STORAGE, "SNAP", ENTITIES, TIMES, "PT1H"
-    )
+    builder = stac.EnergyStacBuilder(info, "v0.1.0", STORAGE, "SNAP", "PT1H")
+    coll = builder.build_collection(_built()[1], ENTITIES, TIMES)
 
     assert [ln["href"] for ln in coll["links"] if ln["rel"] == "license"] == licenses
 
@@ -302,7 +291,7 @@ def test_texts_name_the_resolution(step: str, word: str) -> None:
     assert info.description == f"{word.capitalize()} test data."
     assert info.values == f"{word.capitalize()} gross generation (MW)"
     assert info.keywords == ["Somewhere", word]
-    assert stac.collection_id("op", step, "v0.1.0") == f"op-{step.lower()}__v0.1.0"
+    assert stac._collection_id("op", step, "v0.1.0") == f"op-{step.lower()}__v0.1.0"
 
 
 def test_texts_reject_other_durations() -> None:
@@ -335,7 +324,8 @@ def test_validate_names_the_invalid_record() -> None:
 def test_ege_without_values_gets_no_item() -> None:
     """Happy path: an EGE with no value at all has no span, so no Item."""
     df = _rows(id=["op_a", "op_c"])
-    items = stac.build_items(df, SPANS, INFO, "v0.1.0", STORAGE, "SNAP", "PT1H")
+    builder = stac.EnergyStacBuilder(INFO, "v0.1.0", STORAGE, "SNAP", "PT1H")
+    items = builder.build_items(df, SPANS)
     assert [it["id"] for it in items] == ["op_a"]
 
 

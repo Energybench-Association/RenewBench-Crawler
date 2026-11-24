@@ -42,8 +42,7 @@ from rbc.publish.icechunk_store import (
 )
 from rbc.publish.stac import (
     DatasetInfo,
-    build_collection,
-    build_items,
+    EnergyStacBuilder,
     drop_stac,
     publish_stac,
     validate,
@@ -250,7 +249,7 @@ class EnergyProcessor(ABC):
         entities = sorted(df_ege_locators["id"].dropna().unique())
         file_periods = [path.stem for path in run.files]  # a year, month or day each
 
-        writer = EnergyIcechunkWriter(
+        ic_writer = EnergyIcechunkWriter(
             repo=open_or_create_repository(storage, self.publish_cfg),
             tag=self.release,
             entities=entities,
@@ -284,7 +283,7 @@ class EnergyProcessor(ABC):
 
             # Build Icechunk (Zarr) dataframe with 3 columns (id, timestamp, value)
             df_zarr, kept_out = self._prepare_for_zarr(df_eg, period)
-            writer.add(df_zarr["id"], df_zarr["timestamp"], df_zarr["value"])
+            ic_writer.add(df_zarr["id"], df_zarr["timestamp"], df_zarr["value"])
             zarr_ids.update(df_zarr["id"].dropna())
             totals = totals.add(df_zarr.groupby("id")["value"].sum(), fill_value=0.0)
             for ege_id in df_zarr.dropna(subset=["value"])["id"].unique():
@@ -293,10 +292,10 @@ class EnergyProcessor(ABC):
             for name, rows in kept_out.items():
                 review.setdefault(name, []).append(rows)
 
-        snapshot = writer.finish(
+        snapshot = ic_writer.finish(
             message=f"{self.SYSOP} {self.release}: {file_periods[0]} to {file_periods[-1]}"
         )
-        if self.publish and not writer.reused:
+        if self.publish and not ic_writer.reused:
             logger.warning(
                 f"Release '{self.release}' wrote new objects: readers reach them through "
                 f"{storage.href} only once new temporary links are signed for them."
@@ -311,24 +310,16 @@ class EnergyProcessor(ABC):
             totals,
         )
         log_unjoined_ids(zarr_ids, df_stac["id"])
-        items = build_items(
-            df_stac,
-            writer.spans(),
-            self.DATASET,
-            self.release,
-            storage,
-            snapshot,
-            step_iso,
-        )
-        collection = build_collection(
-            self.DATASET,
-            self.release,
-            items,
-            storage,
-            snapshot,
-            entities=writer.entities,
-            times=writer.times,
+        stac_builder = EnergyStacBuilder(
+            dataset=self.DATASET,
+            release=self.release,
+            storage=storage,
+            snapshot=snapshot,
             step=step_iso,
+        )
+        items = stac_builder.build_items(df_stac, ic_writer.spans())
+        collection = stac_builder.build_collection(
+            items, entities=ic_writer.entities, times=ic_writer.times
         )
         validate(collection, items)
         write_stac(Path(self.output_dir, "stac"), collection, items)

@@ -1,6 +1,9 @@
 """STAC RECORDS.
 
-Describe a release as a STAC Collection with one Item per energy generating entity (EGE)..
+Describe a release as STAC records: a Collection's dataset-level fields, which any kind of
+data has (s. `build_collection_base`), the energy datasets' Collection with one Item per
+energy generating entity (EGE, s. `EnergyStacBuilder`), and checking, writing and
+publishing them.
 """
 
 import json
@@ -40,7 +43,7 @@ PROCESSING_EXT = "https://stac-extensions.github.io/processing/v1.2.0/schema.jso
 # The project's metadata: name and version of the software that processes the data
 PYPROJECT = Path(Path(__file__).resolve().parents[2], "pyproject.toml")
 
-# The energy extension's Item properties, as columns of the STAC data (without "energy:")
+# The energy extension's Item properties (= df_stac columns), written by `EnergyStacBuilder`
 ENERGY_FIELDS = [
     "entity_name",
     "entity_type",
@@ -83,8 +86,8 @@ class DatasetInfo:
             generation (MW)".
         system_operator (str): The system operator's name, e.g. "Coordinador
             Eléctrico Nacional (CEN)".
-        countries (dict[str, str]): The countries it covers: ISO 3166-1 alpha-2 code
-            → name, e.g. {"CL": "Chile"}.
+        countries (dict[str, str]): The countries it covers: ISO 3166-1 alpha-2 code → name,
+            e.g. {"CL": "Chile"}.
         continents (list[str]): The continents it covers, e.g. ["South America"].
         keywords (list[str]): Extra keywords, e.g. the country; the resolution is
             added to them.
@@ -177,103 +180,29 @@ def get_software() -> dict[str, str]:
     return {name: f"{package}+g{commit}" if commit else package}
 
 
-def collection_id(dataset: str, step: str, release: str) -> str:
-    """Give a dataset's Collection ID for one temporal resolution and release.
-
-    Args:
-        dataset (str): ID of the dataset, e.g. "cen".
-        step (str): The time step as an ISO 8601 duration, e.g. "PT1H".
-        release (str): The release, e.g. "v0.1.0".
-
-    Returns:
-        str: The release collection ID, e.g. "cen-pt1h__v0.1.0".
-    """
-    return f"{dataset}-{step.lower()}__{release}"
-
-
 # ------------------------------------------------------------------
-# BUILDING
+# BUILDING (general)
 # ------------------------------------------------------------------
-def build_items(
-    df_stac: pd.DataFrame,
-    spans: pd.DataFrame,
-    info: DatasetInfo,
-    release: str,
-    storage: StorageInfo,
-    snapshot: str,
-    step: str,
-) -> list[JSON]:
-    """Build one Item per EGE that has any value in the release.
+def build_collection_base(info: DatasetInfo, release: str, cid: str) -> JSON:
+    """Build a Collection's dataset-level fields, the same for any kind of data.
 
-    An EGE without a single value has no time span to describe, so it gets no Item; it
-    is logged by ID.
+    What the dataset says about itself: title, description (incl. lineage), license and
+    license links, providers (processing extension), version, citation.
+    What the data looks like (extent, summaries, datacube, assets, Item links)
+    is added by a builder for the specific kind of data (e.g. `EnergyStacBuilder` for EG).
 
     Args:
-        df_stac (pd.DataFrame): One row per EGE: "id", "geometry" (GeoJSON) and the
-            energy fields (s. ENERGY_FIELDS) it has; empty values are left out.
-        spans (pd.DataFrame): Each EGE's "start" and "end" (UTC), indexed by its ID.
-        info (DatasetInfo): The dataset the Items belong to.
+        info (DatasetInfo): The dataset, its texts filled in (s. `for_resolution`).
         release (str): The release, e.g. "v0.1.0".
-        storage (StorageInfo): Where the release's repository lives.
-        snapshot (str): The release tag's snapshot ID.
-        step (str): The repository's time step as an ISO 8601 duration, e.g. "PT1H".
+        cid (str): The Collection's ID (s. `_collection_id`).
 
     Returns:
-        list[JSON]: The Items, in the order of `df_stac`, linked as files of a static
-            catalog (s. `write_stac`).
-
-    Raises:
-        ValueError: If an EGE has no geometry.
-    """
-    df = df_stac.join(spans, on="id")
-    if (empty := df["start"].isna()).any():
-        logger.warning(
-            f"{int(empty.sum())} EGEs have no value at all, so no Item: "
-            f"{df.loc[empty, 'id'].tolist()[:10]}"
-        )
-        df = df[~empty]
-    if (no_geom := df["geometry"].isna()).any():
-        raise ValueError(f"EGEs without geometry: {df.loc[no_geom, 'id'].tolist()[:5]}")
-
-    cid = collection_id(info.dataset, step, release)
-    info = info.for_resolution(step)
-    created = _iso(pd.Timestamp.now(tz="UTC"))
-    return [
-        _item(row, cid, release, storage, snapshot, info, created)
-        for _, row in df.iterrows()
-    ]
-
-
-def build_collection(
-    info: DatasetInfo,
-    release: str,
-    items: list[JSON],
-    storage: StorageInfo,
-    snapshot: str,
-    entities: list[str],
-    times: pd.DatetimeIndex,
-    step: str,
-) -> JSON:
-    """Build the release's Collection, summarizing its Items and describing its data.
-
-    Args:
-        info (DatasetInfo): The dataset.
-        release (str): The release, e.g. "v0.1.0".
-        items (list[JSON]): The release's Items.
-        storage (StorageInfo): Where the release's repository lives.
-        snapshot (str): The release tag's snapshot ID.
-        entities (list[str]): The repository's `entity_id` values, in order.
-        times (pd.DatetimeIndex): The repository's `time` axis (UTC, naive).
-        step (str): The axis' time step as an ISO 8601 duration, e.g. "PT15M".
-
-    Returns:
-        JSON: The Collection, linked as the root of a static catalog (s. `write_stac`).
+        JSON: The Collection's fields, with the extensions they use and the license
+            links.
 
     Raises:
         ValueError: If no provider is a "processor", to hold the lineage.
     """
-    info = info.for_resolution(step)
-
     processing = {
         "processing:lineage": info.lineage,  # for "processor" provider (= EnergyBench)
         "processing:software": get_software(),
@@ -304,131 +233,311 @@ def build_collection(
                 "title": "License notice of the source",
             }
         )
-    props = [it["properties"] for it in items]
-    summaries: JSON = {}
-    for f in SUMMARY_FIELDS:  # only those any Item has (STAC forbids empty lists)
-        if values := sorted({p[f"energy:{f}"] for p in props if f"energy:{f}" in p}):
-            summaries[f"energy:{f}"] = values
-    capacities = [
-        p["energy:generation_capacity"]
-        for p in props
-        if "energy:generation_capacity" in p
-    ]
-    if capacities:
-        summaries["energy:generation_capacity"] = {
-            "minimum": min(capacities),
-            "maximum": max(capacities),
-        }
-
-    bboxes = [it["bbox"] for it in items]
-    bbox = [
-        min(b[0] for b in bboxes),
-        min(b[1] for b in bboxes),
-        max(b[2] for b in bboxes),
-        max(b[3] for b in bboxes),
-    ]
-    interval = [
-        min(p["start_datetime"] for p in props),
-        max(p["end_datetime"] for p in props),
-    ]
-    cid = collection_id(info.dataset, step, release)
     return {
         "type": "Collection",
         "id": cid,
         "stac_version": STAC_VERSION,
-        "stac_extensions": [
-            VERSION_EXT,
-            THEMES_EXT,
-            ENERGY_EXT,
-            ITEM_ASSETS_EXT,
-            DATACUBE_EXT,
-            SCIENTIFIC_EXT,
-            PROCESSING_EXT,
-        ],
+        "stac_extensions": [VERSION_EXT, SCIENTIFIC_EXT, PROCESSING_EXT],
         "title": f"{info.title} — release {release}",
         "description": f"{info.description.rstrip()}\n\n{info.lineage}",
         "license": info.license,
-        "keywords": ["generation", release, *info.keywords],
-        # the domain, then what the website's Browse filters offer (s. STAC contract)
-        "themes": [
-            {
-                "scheme": "https://energybench.org/domains",
-                "concepts": [{"id": "generation"}],
-            },
-            {
-                "scheme": "https://energybench.org/system-operators",
-                "concepts": [{"id": info.dataset, "title": info.system_operator}],
-            },
-            {
-                "scheme": "https://energybench.org/countries",  # ISO 3166-1 alpha-2
-                "concepts": [
-                    {"id": code, "title": name} for code, name in info.countries.items()
-                ],
-            },
-            {
-                "scheme": "https://energybench.org/continents",
-                "concepts": [  # e.g. "south-america", "South America"
-                    {"id": name.lower().replace(" ", "-"), "title": name}
-                    for name in info.continents
-                ],
-            },
-        ],
         "providers": providers,
         "version": release,
         "deprecated": False,
         "sci:citation": info.citation,
-        "extent": {"spatial": {"bbox": [bbox]}, "temporal": {"interval": [interval]}},
-        "summaries": summaries,
-        "cube:dimensions": {
-            "entity_id": {
-                "type": "entity",
-                "description": "Energy generating entity: its STAC Item's ID.",
-                "values": entities,
-            },
-            "time": {
-                "type": "temporal",
-                "description": "Start of the time step (UTC).",
-                "extent": [_iso(times[0]), _iso(times[-1])],
-                "step": step,
-            },
-        },
-        "cube:variables": {
-            "values": {
-                "type": "data",
-                "dimensions": ["entity_id", "time"],
-                "unit": "MW",
-                "description": f"{info.values}; missing where not reported.",
-            }
-        },
-        "item_assets": {
-            "data": {
-                "type": "application/vnd.icechunk",
-                "roles": ["data"],
-                "title": "Icechunk repository",
-                "description": "The release's repository: the Item's entity's data is "
-                "'values' at its 'icechunk:entity_id'.",
-            }
-        },
-        "assets": {
-            "data": {
-                **_repository_asset(storage, release, snapshot),
-                "description": f"All entities' data: 'values[entity_id, time]', "
-                f"{info.values.lower()}.",
-            }
-        },
-        "links": [
-            *license_links,
-            {"rel": "root", "href": "./collection.json", "type": "application/json"},
-            *(
-                {
-                    "rel": "item",
-                    "href": f"./items/{it['id']}.json",
-                    "type": "application/geo+json",
-                }
-                for it in items
-            ),
-        ],
+        "links": license_links,
     }
+
+
+# ------------------------------------------------------------------
+# BUILDING (energy)
+# ------------------------------------------------------------------
+class EnergyStacBuilder:
+    """Builds the STAC records of one release of an energy dataset, in one resolution.
+
+    One Item per EGE with the energy extension's fields, and one Collection summarizing
+    them and describing the release's Icechunk repository ('values[entity_id, time]' in
+    MW). The Collection's dataset-level fields come from `build_collection_base`.
+
+    Attributes:
+        dataset (DatasetInfo): The dataset, its texts filled in for the resolution.
+        release (str): The release, e.g. "v0.1.0".
+        storage (StorageInfo): Where the release's repository lives.
+        snapshot (str): The release tag's snapshot ID.
+        step (str): The repository's time step as an ISO 8601 duration, e.g. "PT1H".
+        cid (str): The Collection's ID, e.g. "cen-pt1h__v0.1.0".
+    """
+
+    def __init__(
+        self,
+        dataset: DatasetInfo,
+        release: str,
+        storage: StorageInfo,
+        snapshot: str,
+        step: str,
+    ) -> None:
+        """Initialize the builder.
+
+        Args:
+            dataset (DatasetInfo): The dataset (s. `DatasetInfo.for_resolution`).
+            release (str): The release, e.g. "v0.1.0".
+            storage (StorageInfo): Where the release's repository lives.
+            snapshot (str): The release tag's snapshot ID.
+            step (str): The repository's time step as an ISO 8601 duration, e.g. "PT1H".
+        """
+        self.dataset = dataset.for_resolution(step)
+        self.release = release
+        self.storage = storage
+        self.snapshot = snapshot
+        self.step = step
+        self.cid = _collection_id(dataset.dataset, step, release)
+
+    def build_items(self, df_stac: pd.DataFrame, spans: pd.DataFrame) -> list[JSON]:
+        """Build one Item per EGE that has any value in the release.
+
+        An EGE without a single value has no time span to describe, so it gets no Item;
+        it is logged by ID.
+
+        Args:
+            df_stac (pd.DataFrame): One row per EGE: "id", "geometry" (GeoJSON) and the
+                energy fields (s. ENERGY_FIELDS) it has; empty values are left out.
+            spans (pd.DataFrame): Each EGE's "start" and "end" (UTC), indexed by its ID.
+
+        Returns:
+            list[JSON]: The Items, in the order of `df_stac`, linked as files of a static
+                catalog (s. `write_stac`).
+
+        Raises:
+            ValueError: If an EGE has no geometry.
+        """
+        df = df_stac.join(spans, on="id")
+        if (empty := df["start"].isna()).any():
+            logger.warning(
+                f"{int(empty.sum())} EGEs have no value at all, so no Item: "
+                f"{df.loc[empty, 'id'].tolist()[:10]}"
+            )
+            df = df[~empty]
+        if (no_geom := df["geometry"].isna()).any():
+            raise ValueError(
+                f"EGEs without geometry: {df.loc[no_geom, 'id'].tolist()[:5]}"
+            )
+
+        created = _utc_to_iso(pd.Timestamp.now(tz="UTC"))
+        return [self._build_item(row, created) for _, row in df.iterrows()]
+
+    def build_collection(
+        self, items: list[JSON], entities: list[str], times: pd.DatetimeIndex
+    ) -> JSON:
+        """Build the release's Collection, summarizing its Items and describing its data.
+
+        Args:
+            items (list[JSON]): The release's Items (s. `build_items`).
+            entities (list[str]): The repository's `entity_id` values, in order.
+            times (pd.DatetimeIndex): The repository's `time` axis (UTC, naive).
+
+        Returns:
+            JSON: The Collection, linked as the root of a static catalog (s.
+                `write_stac`).
+
+        Raises:
+            ValueError: If no provider is a "processor", to hold the lineage.
+        """
+        base = build_collection_base(self.dataset, self.release, self.cid)
+
+        props = [it["properties"] for it in items]
+        summaries: JSON = {}
+        for f in SUMMARY_FIELDS:  # only those any Item has (STAC forbids empty lists)
+            if values := sorted(
+                {p[f"energy:{f}"] for p in props if f"energy:{f}" in p}
+            ):
+                summaries[f"energy:{f}"] = values
+        capacities = [
+            p["energy:generation_capacity"]
+            for p in props
+            if "energy:generation_capacity" in p
+        ]
+        if capacities:
+            summaries["energy:generation_capacity"] = {
+                "minimum": min(capacities),
+                "maximum": max(capacities),
+            }
+
+        bboxes = [it["bbox"] for it in items]
+        bbox = [
+            min(b[0] for b in bboxes),
+            min(b[1] for b in bboxes),
+            max(b[2] for b in bboxes),
+            max(b[3] for b in bboxes),
+        ]
+        interval = [
+            min(p["start_datetime"] for p in props),
+            max(p["end_datetime"] for p in props),
+        ]
+        return {
+            **base,
+            "stac_extensions": [
+                *base["stac_extensions"],
+                THEMES_EXT,
+                ENERGY_EXT,
+                ITEM_ASSETS_EXT,
+                DATACUBE_EXT,
+            ],
+            "keywords": ["generation", self.release, *self.dataset.keywords],
+            # the domain, then what the website's Browse filters offer (s. STAC contract)
+            "themes": [
+                {
+                    "scheme": "https://energybench.org/domains",
+                    "concepts": [{"id": "generation"}],
+                },
+                {
+                    "scheme": "https://energybench.org/system-operators",
+                    "concepts": [
+                        {
+                            "id": self.dataset.dataset,
+                            "title": self.dataset.system_operator,
+                        }
+                    ],
+                },
+                {
+                    "scheme": "https://energybench.org/countries",  # ISO 3166-1 alpha-2
+                    "concepts": [
+                        {"id": code, "title": name}
+                        for code, name in self.dataset.countries.items()
+                    ],
+                },
+                {
+                    "scheme": "https://energybench.org/continents",
+                    "concepts": [  # e.g. "south-america", "South America"
+                        {"id": name.lower().replace(" ", "-"), "title": name}
+                        for name in self.dataset.continents
+                    ],
+                },
+            ],
+            "extent": {
+                "spatial": {"bbox": [bbox]},
+                "temporal": {"interval": [interval]},
+            },
+            "summaries": summaries,
+            "cube:dimensions": {
+                "entity_id": {
+                    "type": "entity",
+                    "description": "Energy generating entity: its STAC Item's ID.",
+                    "values": entities,
+                },
+                "time": {
+                    "type": "temporal",
+                    "description": "Start of the time step (UTC).",
+                    "extent": [_utc_to_iso(times[0]), _utc_to_iso(times[-1])],
+                    "step": self.step,
+                },
+            },
+            "cube:variables": {
+                "values": {
+                    "type": "data",
+                    "dimensions": ["entity_id", "time"],
+                    "unit": "MW",
+                    "description": f"{self.dataset.values}; missing where not reported.",
+                }
+            },
+            "item_assets": {
+                "data": {
+                    "type": "application/vnd.icechunk",
+                    "roles": ["data"],
+                    "title": "Icechunk repository",
+                    "description": "The release's repository: the Item's entity's data "
+                    "is 'values' at its 'icechunk:entity_id'.",
+                }
+            },
+            "assets": {
+                "data": {
+                    **_icechunk_repo_as_asset(
+                        self.storage, self.release, self.snapshot
+                    ),
+                    "description": f"All entities' data: 'values[entity_id, time]', "
+                    f"{self.dataset.values.lower()}.",
+                }
+            },
+            "links": [
+                *base["links"],
+                {
+                    "rel": "root",
+                    "href": "./collection.json",
+                    "type": "application/json",
+                },
+                *(
+                    {
+                        "rel": "item",
+                        "href": f"./items/{it['id']}.json",
+                        "type": "application/geo+json",
+                    }
+                    for it in items
+                ),
+            ],
+        }
+
+    def _build_item(self, row: pd.Series, created: str) -> JSON:
+        """Build one EGE's Item.
+
+        Args:
+            row (pd.Series): The EGE's STAC data, with its "start" and "end".
+            created (str): When the Item was created (ISO 8601, UTC).
+
+        Returns:
+            JSON: The Item.
+        """
+        geometry = row["geometry"]
+        props: JSON = {
+            "datetime": None,
+            "start_datetime": _utc_to_iso(row["start"]),
+            "end_datetime": _utc_to_iso(row["end"]),
+            "created": created,
+            "title": row["entity_name"],
+            "version": self.release,
+        }
+        for name in ENERGY_FIELDS:
+            value = row.get(name)
+            if name == "entity_ids" and isinstance(value, str):
+                value = json.loads(value)
+
+            # leave out what's not given (None, NaN, empty list/dict)
+            if value is None or value is pd.NA:
+                continue
+            if isinstance(value, float) and math.isnan(value):
+                continue
+            if isinstance(value, (list, tuple, dict)) and not value:
+                continue
+
+            # define as plain JSON values (not np/pd scalars or tuples)
+            if isinstance(value, tuple):
+                value = list(value)
+            elif hasattr(value, "item"):  # np scalar
+                value = value.item()
+
+            props[f"energy:{name}"] = value
+
+        data: JSON = {
+            **_icechunk_repo_as_asset(self.storage, self.release, self.snapshot),
+            "description": f"{self.dataset.values} of this entity: 'values' at entity_id "
+            f"'{row['id']}', time in UTC.",
+            "icechunk:entity_id": row["id"],
+        }
+        collection = {"href": "../collection.json", "type": "application/json"}
+        return {
+            "type": "Feature",
+            "stac_version": STAC_VERSION,
+            "stac_extensions": [VERSION_EXT, ENERGY_EXT],
+            "id": row["id"],
+            "collection": self.cid,
+            "geometry": geometry,
+            "bbox": list(shape(geometry).bounds),
+            "properties": props,
+            "assets": {"data": data},
+            "links": [
+                {"rel": "collection", **collection},
+                {"rel": "parent", **collection},
+                {"rel": "root", **collection},
+            ],
+        }
 
 
 # ------------------------------------------------------------------
@@ -539,83 +648,22 @@ def publish_stac(api_url: str, collection: JSON, items: list[JSON]) -> None:
 # ------------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------------
-def _item(
-    row: pd.Series,
-    cid: str,
-    release: str,
-    storage: StorageInfo,
-    snapshot: str,
-    info: DatasetInfo,
-    created: str,
-) -> JSON:
-    """Build one EGE's Item.
+def _collection_id(dataset: str, step: str, release: str) -> str:
+    """Specify a dataset's Collection ID based on the temporal resolution and release.
 
     Args:
-        row (pd.Series): The EGE's STAC data, with its "start" and "end".
-        cid (str): The Collection's ID.
-        release (str): The release.
-        storage (StorageInfo): Where the release's repository lives.
-        snapshot (str): The release tag's snapshot ID.
-        info (DatasetInfo): The dataset.
-        created (str): When the Item was created (ISO 8601, UTC).
+        dataset (str): ID of the dataset, e.g. "cen".
+        step (str): The time step as an ISO 8601 duration, e.g. "PT1H".
+        release (str): The release, e.g. "v0.1.0".
 
     Returns:
-        JSON: The Item.
+        str: The release collection ID, e.g. "cen-pt1h__v0.1.0".
     """
-    geometry = row["geometry"]
-    props: JSON = {
-        "datetime": None,
-        "start_datetime": _iso(row["start"]),
-        "end_datetime": _iso(row["end"]),
-        "created": created,
-        "title": row["entity_name"],
-        "version": release,
-    }
-    for name in ENERGY_FIELDS:
-        value = row.get(name)
-        if name == "entity_ids" and isinstance(value, str):
-            value = json.loads(value)
-        # leave out what isn't given: None, NaN or an empty list/dict
-        if value is None or value is pd.NA:
-            continue
-        if isinstance(value, float) and math.isnan(value):
-            continue
-        if isinstance(value, (list, tuple, dict)) and not value:
-            continue
-        # as plain JSON values (not numpy/pandas scalars or tuples)
-        if isinstance(value, tuple):
-            value = list(value)
-        elif hasattr(value, "item"):  # numpy scalar
-            value = value.item()
-        props[f"energy:{name}"] = value
-
-    data: JSON = {
-        **_repository_asset(storage, release, snapshot),
-        "description": f"{info.values} of this entity: 'values' at entity_id "
-        f"'{row['id']}', time in UTC.",
-        "icechunk:entity_id": row["id"],
-    }
-    collection = {"href": "../collection.json", "type": "application/json"}
-    return {
-        "type": "Feature",
-        "stac_version": STAC_VERSION,
-        "stac_extensions": [VERSION_EXT, ENERGY_EXT],
-        "id": row["id"],
-        "collection": cid,
-        "geometry": geometry,
-        "bbox": list(shape(geometry).bounds),
-        "properties": props,
-        "assets": {"data": data},
-        "links": [
-            {"rel": "collection", **collection},
-            {"rel": "parent", **collection},
-            {"rel": "root", **collection},
-        ],
-    }
+    return f"{dataset}-{step.lower()}__{release}"
 
 
-def _repository_asset(storage: StorageInfo, release: str, snapshot: str) -> JSON:
-    """Describe the release's repository as a STAC asset.
+def _icechunk_repo_as_asset(storage: StorageInfo, release: str, snapshot: str) -> JSON:
+    """Describe the release's Icechunk repository as a STAC asset.
 
     Args:
         storage (StorageInfo): Where the repository lives.
@@ -636,7 +684,7 @@ def _repository_asset(storage: StorageInfo, release: str, snapshot: str) -> JSON
     }
 
 
-def _iso(ts: pd.Timestamp) -> str:
+def _utc_to_iso(ts: pd.Timestamp) -> str:
     """Write a UTC timestamp as STAC wants it, e.g. '2024-01-01T03:00:00Z'.
 
     Args:
