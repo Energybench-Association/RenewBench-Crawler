@@ -86,7 +86,7 @@ def test_get_period_bounds_rejects_other_formats() -> None:
 
 
 @pytest.mark.parametrize(
-    "tres, step, iso",
+    "tres, step, tres_iso",
     [
         ("1h", pd.Timedelta(hours=1), "PT1H"),
         ("15min", pd.Timedelta(minutes=15), "PT15M"),
@@ -95,15 +95,15 @@ def test_get_period_bounds_rejects_other_formats() -> None:
         ("1d", pd.Timedelta(days=1), "P1D"),
     ],
 )
-def test_get_resolution(tres: str, step: pd.Timedelta, iso: str) -> None:
+def test_get_resolution(tres: str, step: pd.Timedelta, tres_iso: str) -> None:
     """Happy path: a raw data dir's name gives the time step and its ISO 8601 duration.
 
     Args:
         tres (str): The dir's name, as DownloadTask names it.
         step (pd.Timedelta): The expected time step.
-        iso (str): The expected ISO 8601 duration.
+        tres_iso (str): The expected ISO 8601 duration.
     """
-    assert get_resolution(tres) == (step, iso)
+    assert get_resolution(tres) == (step, tres_iso)
 
 
 def test_get_resolution_raises_on_other_names() -> None:

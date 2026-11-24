@@ -10,41 +10,8 @@ import pytest
 from loguru import logger
 
 from rbc.energy.utils import processing
-from rbc.energy.utils.processing import (
-    STAC_COLUMNS,
-    ZARR_COLUMNS,
-    EnergyProcessor,
-    check_totals_kept,
-    check_zarr_rows,
-    log_unjoined_ids,
-    to_layout,
-)
+from rbc.energy.utils.processing import STAC_COLS, EnergyProcessor
 from rbc.utils.errors import DataStructureError
-
-
-def test_to_layout_keeps_only_the_layouts_columns() -> None:
-    """Happy path: renamed columns are kept in the layout's order, all others dropped."""
-    df = pd.DataFrame({"gen_real_mw": [1.0], "fecha_hora": ["2024-01-01"], "hora": [1]})
-
-    out = to_layout(
-        df,
-        layout=ZARR_COLUMNS,
-        renames={"fecha_hora": "timestamp", "gen_real_mw": "value"},
-    )
-
-    assert list(out.columns) == ZARR_COLUMNS
-    assert out.loc[0, ["timestamp", "value"]].tolist() == ["2024-01-01", 1.0]
-
-
-def test_to_layout_leaves_what_isnt_provided_unknown() -> None:
-    """Happy path: a layout column the operator doesn't provide exists, but stays empty.
-
-    So every operator's output has the same columns, whatever it reports.
-    """
-    out = to_layout(pd.DataFrame({"central": ["HE ANTUCO"]}), STAC_COLUMNS)
-
-    assert list(out.columns) == STAC_COLUMNS
-    assert out.loc[0].isna().all()
 
 
 def _ids(sysop: str, codes: list, names: list | None = None) -> pd.Series:
@@ -120,6 +87,13 @@ def test_global_ids_by_code_else_name(
     assert _ids("cen", [code], [name]).tolist() == _ids("cen", [key]).tolist()
 
 
+def test_global_ids_by_name_without_codes() -> None:
+    """Happy path: an operator without codes gets IDs by its EGEs' names alone."""
+    names = pd.Series(["BESS Beta", "HE Antuco"], dtype="string")
+    ids = _Processor._get_global_ids(codes=None, names=names)
+    assert ids.tolist() == ["aemo-bess-beta", "aemo-he-antuco"]
+
+
 def _zarr_rows(ids: Sequence[str | None], times: Sequence[str | None]) -> pd.DataFrame:
     """A raw file's rows in the Zarr layout.
 
@@ -145,7 +119,7 @@ def test_check_zarr_rows_passes_steps_on_the_grid() -> None:
     left to the operator's own check.
     """
     times = ["2024-01-01 02:00", "2024-01-01 03:00", "2024-01-01 04:00"]
-    check_zarr_rows(
+    EnergyProcessor._check_zarr_rows(
         _zarr_rows(["a", "a", "b"], times), start=START, step=pd.Timedelta(hours=1)
     )
 
@@ -171,21 +145,23 @@ def test_check_zarr_rows_raises(
         match (str): The expected error message part.
     """
     with pytest.raises(DataStructureError, match=match):
-        check_zarr_rows(_zarr_rows(ids, times), start=START, step=pd.Timedelta(hours=1))
+        EnergyProcessor._check_zarr_rows(
+            _zarr_rows(ids, times), start=START, step=pd.Timedelta(hours=1)
+        )
 
 
-def test_check_totals_kept_passes_equal_totals() -> None:
+def test_check_totals_passes_equal_totals() -> None:
     """Happy path: totals equal up to float rounding pass silently."""
-    check_totals_kept(
-        pd.Series({"a": 0.1 + 0.2, "b": 5.0}), pd.Series({"a": 0.3, "b": 5.0}), "x"
+    EnergyProcessor._check_totals(
+        pd.Series({"a": 0.1 + 0.2, "b": 5.0}), pd.Series({"a": 0.3, "b": 5.0})
     )
 
 
-def test_check_totals_kept_raises_on_lost_values() -> None:
+def test_check_totals_raises_on_lost_values() -> None:
     """Failure path: an EGE whose values shrank or vanished raises with its ID."""
-    with pytest.raises(ValueError, match="2 EGEs in day.csv"):
-        check_totals_kept(
-            pd.Series({"a": 3.0, "b": 5.0}), pd.Series({"a": 2.0}), "day.csv"
+    with pytest.raises(ValueError, match="2 EGEs"):
+        EnergyProcessor._check_totals(
+            pd.Series({"a": 3.0, "b": 5.0}), pd.Series({"a": 2.0})
         )
 
 
@@ -210,7 +186,7 @@ def test_log_unjoined_ids(
     captured_logs: list[str] = []
     sink_id = logger.add(lambda msg: captured_logs.append(msg.record["message"]))
     try:
-        log_unjoined_ids(zarr_ids, pd.Series(stac_ids))
+        EnergyProcessor._log_unjoined_ids(zarr_ids, pd.Series(stac_ids))
     finally:
         logger.remove(sink_id)
 
@@ -323,3 +299,38 @@ def test_stac_fields_with_an_ege_twice_raise(tmp_path: Path) -> None:
         _make(_Twice, tmp_path)._prepare_for_stac(
             df_ege_locators, pd.DataFrame(), empty, empty
         )
+
+
+def test_stac_layout_is_the_same_for_every_operator(tmp_path: Path) -> None:
+    """Happy path: STAC data has the layout's columns, empty where not provided.
+
+    So every operator's output has the same columns, whatever it reports; columns
+    outside the layout (e.g. one only `_get_own_ids` reads) are dropped.
+
+    Args:
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+
+    class _Fields(_Processor):
+        def _get_stac_fields(
+            self, df_ege_locators, df_ege_sysop, active_periods, totals
+        ):  # noqa: D102
+            return pd.DataFrame({"fuel_type": ["solar"], "ceg": ["X"]}, index=["a"])
+
+    df_ege_locators = pd.DataFrame(
+        {
+            "id": ["a"],
+            processing.SYSOP_NAME_COL: ["SOL A"],
+            processing.SYSOP_CODE_COL: ["1"],
+        }
+    )
+    empty = pd.Series(dtype=object)
+    with patch.object(processing, "geometries", return_value=pd.Series([None])):
+        df_stac = _make(_Fields, tmp_path)._prepare_for_stac(
+            df_ege_locators, pd.DataFrame(), empty, empty
+        )
+
+    assert list(df_stac.columns) == STAC_COLS
+    row = df_stac.loc[0]
+    assert row[["id", "entity_name", "fuel_type"]].tolist() == ["a", "SOL A", "solar"]
+    assert pd.isna(row["operator"])

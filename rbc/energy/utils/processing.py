@@ -52,10 +52,10 @@ from rbc.utils.errors import DataStructureError, MissingDataError
 from rbc.utils.io import load_df_from_file, write_df_to_csv
 
 # Columns of the Zarr data: one row per EGE and timestamp
-ZARR_COLUMNS = ["id", "timestamp", "value"]
+ZARR_COLS = ["id", "timestamp", "value"]
 
 # Columns of the STAC data: one row per EGE (all but 'id' from STAC energy extension)
-STAC_COLUMNS = [
+STAC_COLS = [
     "id",
     "entity_ids",
     "entity_name",
@@ -77,7 +77,7 @@ STAC_COLUMNS = [
 ]
 
 # Map: coordinate finding's output columns → the EGE table's (the same for every operator)
-LOCATION_COLUMNS = {SYSOP_REGION_COL: "region"}
+LOCATION_COLS = {SYSOP_REGION_COL: "region"}
 
 
 # ------------------------------------------------------------------
@@ -160,6 +160,9 @@ class EnergyProcessor(ABC):
             publish_cfg.check_publishable()
 
         self.meta = OPERATOR_METADATA[self.DATASET.sysop]
+        self.name_col = self.meta["name_col"]
+        self.code_col = self.meta.get("code_col")
+
         self.run_coordinate_finding_pipeline = self.meta["name_matchable"]
         self.shared: SharedResources | None = None
 
@@ -203,7 +206,7 @@ class EnergyProcessor(ABC):
            b) coordinate finding pipeline for rest (if the operator is `name_matchable`).
         2. Generation data: one raw file at a time
            a) load, rename cols to the shared layout (COLUMNS), clean (`_clean_file`),
-           b) bring into Zarr layout (`_prepare_for_zarr`) & check rows (`check_zarr_rows`),
+           b) bring into Zarr layout (`_prepare_for_zarr`), check (`_check_zarr_rows`),
            c) write to the release's Icechunk repository.
         3. STAC:
            a) build one Item per EGE (via `_get_stac_fields`)
@@ -219,7 +222,7 @@ class EnergyProcessor(ABC):
             ValueError: If coordinate finding returns no EGEs for the run.
         """
         # Step 1: find coordinates and store info in a dataframe (one row per EGE)
-        df_ege_locators = self._get_own_coordinates(run.df)
+        df_ege_locators = self._get_own_coordinates(run.df)  # HOOK!
         if self.run_coordinate_finding_pipeline:
             df_ege_locators = find_coordinates(
                 replace(run, df=df_ege_locators),
@@ -235,7 +238,8 @@ class EnergyProcessor(ABC):
         )
         df_ege_locators = df_ege_locators.assign(
             id=self._get_global_ids(
-                df_ege_locators[SYSOP_CODE_COL], df_ege_locators[SYSOP_NAME_COL]
+                codes=df_ege_locators[SYSOP_CODE_COL],
+                names=df_ege_locators[SYSOP_NAME_COL],
             )
         )  # without coordinate finding, this is simply run.df
 
@@ -273,18 +277,22 @@ class EnergyProcessor(ABC):
         for path in run.files:
             period = path.stem
             try:
-                # Build dataframe of energy generation values with "layout" columns
+                # Build dataframe of energy generation values
                 df_eg = load_df_from_file(path).rename(columns=self.COLUMNS)
-                df_eg["id"] = self._get_global_ids_of_rows(df_eg)
-                df_eg = self._clean_file(df_eg, period)
+                df_eg["id"] = self._get_global_ids(
+                    codes=df_eg[self.code_col] if self.code_col else None,
+                    names=df_eg[self.name_col],
+                )
+                df_eg = self._clean_file(df_eg, period)  # HOOK!
+
                 # Collect EGEs' info from df_eg (distinct values only, latest last) - for STAC
                 df_ege_sysop_file = df_eg[["id", *self.EGE_COLUMNS]]
                 df_ege_sysop = pd.concat([df_ege_sysop, df_ege_sysop_file])
                 df_ege_sysop = df_ege_sysop.drop_duplicates(keep="last")
 
                 # Build Icechunk (Zarr) dataframe with 3 columns (id, timestamp, value)
-                df_zarr, kept_out = self._prepare_for_zarr(df_eg, period)
-                check_zarr_rows(
+                df_zarr, kept_out = self._prepare_for_zarr(df_eg, period)  # HOOK!
+                self._check_zarr_rows(
                     df_zarr, start=get_period_bounds(period, self.TZ)[0], step=step
                 )
                 ic_writer.add(df_zarr["id"], df_zarr["timestamp"], df_zarr["value"])
@@ -318,7 +326,7 @@ class EnergyProcessor(ABC):
             pd.Series(active_periods, dtype=object),
             totals,
         )
-        log_unjoined_ids(zarr_ids, df_stac["id"])
+        self._log_unjoined_ids(zarr_ids=zarr_ids, stac_ids=df_stac["id"])
         stac_builder = EnergyStacBuilder(
             dataset=self.DATASET,
             release=self.release,
@@ -370,7 +378,10 @@ class EnergyProcessor(ABC):
     def _prepare_for_zarr(
         self, df_eg: pd.DataFrame, period: str
     ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-        """Bring a raw file's rows into ZARR_COLUMNS layout ("id", UTC "timestamp", "value").
+        """Bring a raw file's rows into ZARR_COLS layout ("id", UTC "timestamp", "value").
+
+        After it, the base class checks df_zarr's time steps & IDs (`_check_zarr_rows`).
+        Child classes need to check if time steps lie in the file's period themselves.
 
         Args:
             df_eg (pd.DataFrame): A raw file's cleaned rows (s. `_clean_file`).
@@ -378,12 +389,69 @@ class EnergyProcessor(ABC):
 
         Returns:
             tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-                df_zarr: The generation data, and
-                kept_out: the rows kept out of it for review, by review file name (e.g.
-                {"repeated_hour_rows": ...}).
-                The base class checks df_zarr's time steps (s. `check_zarr_rows`); that
-                they lie in the file's period is the operator's check.
+                df_zarr: The generation data in Zarr format, and
+                kept_out: the rows kept out of it for review, by review file name
+                    (e.g. {"repeated_hour_rows": ...}).
         """
+
+    def _prepare_for_stac(
+        self,
+        df_ege_locators: pd.DataFrame,
+        df_ege_sysop: pd.DataFrame,
+        active_periods: pd.Series,
+        totals: pd.Series,
+    ) -> pd.DataFrame:
+        """Bring the EGEs into the STAC_COLS layout, with the operator's fields.
+
+        Shared by all operators: "id" and "entity_name" from coordinate finding's output,
+        one row per EGE, "entity_ids" (the operator's own, s. `_get_own_ids`, and the
+        locator's that located it), "lat", "lon", "region" and "geometry" (a point, else
+        the region's/country's polygon). The rest comes from `_get_stac_fields`.
+
+        Args:
+            df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returns them, with
+                their "id".
+            df_ege_sysop (pd.DataFrame): The EGEs' own values from the raw files.
+            active_periods (pd.Series): The periods each EGE reports values in, by its ID.
+            totals (pd.Series): Each EGE's total generation, by its ID.
+
+        Returns:
+            pd.DataFrame: The EGEs in the STAC_COLS layout.
+
+        Raises:
+            ValueError: If `_get_stac_fields` gives an EGE more than one row.
+        """
+        df_ege_l = df_ege_locators.copy()  # short name here to avoid lines breaks...
+        df_ege_l = df_ege_l.assign(entity_name=df_ege_l[SYSOP_NAME_COL])
+        df_ege_l = df_ege_l.drop_duplicates(subset="id")  # an EGE in several res
+
+        # HOOK!
+        fields = self._get_stac_fields(
+            df_ege_locators=df_ege_l,
+            df_ege_sysop=df_ege_sysop,
+            active_periods=active_periods,
+            totals=totals,
+        )
+        if (twice := fields.index.duplicated()).any():
+            raise ValueError(
+                f"`_get_stac_fields` gives {int(twice.sum())} EGEs more than one row, "
+                f"e.g. {sorted(set(fields.index[twice]))[:5]}: one Item each expected."
+            )
+
+        drop_cols = [c for c in fields.columns if c in df_ege_l]
+        df_ege_l = df_ege_l.drop(columns=drop_cols)
+        df_ege_l = df_ege_l.merge(fields, left_on="id", right_index=True, how="left")
+        df_ege_l["entity_ids"] = entity_ids(df_ege_l, own=self._get_own_ids(df_ege_l))
+
+        # reformat to proper layout (only STAC columns, empty where sysop provides none)
+        df_stac = df_ege_l.rename(columns=LOCATION_COLS).reindex(columns=STAC_COLS)
+
+        # define geometry
+        region_reg = self.shared.region_reg if self.shared else None
+        df_stac["geometry"] = geometries(
+            df_stac, country=self.meta["country"], region_reg=region_reg
+        )
+        return df_stac
 
     @abstractmethod
     def _get_stac_fields(
@@ -404,7 +472,7 @@ class EnergyProcessor(ABC):
             totals (pd.Series): Each EGE's total generation, by its ID.
 
         Returns:
-            pd.DataFrame: Indexed by EGE ID (one row each), with any STAC_COLUMNS
+            pd.DataFrame: Indexed by EGE ID (one row each), with any STAC_COLS
                 (e.g. "fuel_type"); "entity_name" replaces the default. Further columns
                 are available to `_get_own_ids`.
         """
@@ -420,26 +488,15 @@ class EnergyProcessor(ABC):
             dict[str, pd.Series]: Map of ID system → each EGE's ID in it; by default
                 the operator's code (e.g. {"cen": ...}).
         """
-        return {self.DATASET.sysop: codes_as_text(df_ege_locators[SYSOP_CODE_COL])}
+        return {
+            self.DATASET.sysop: self._codes_as_text(df_ege_locators[SYSOP_CODE_COL])
+        }
 
     # ------------------------------------------------------------------
     # HELPERS
     # ------------------------------------------------------------------
-    def _get_global_ids_of_rows(self, df_eg: pd.DataFrame) -> pd.Series:
-        """Give a raw file's rows their EGE's global ID, by its code or else its name.
-
-        Args:
-            df_eg (pd.DataFrame): A raw file's rows, with the operator's name/code columns.
-
-        Returns:
-            pd.Series: Each row's EGE ID (s. `_get_global_ids`).
-        """
-        code_col = self.meta.get("code_col")
-        codes = df_eg[code_col] if code_col else pd.Series(pd.NA, index=df_eg.index)
-        return self._get_global_ids(codes=codes, names=df_eg[self.meta["name_col"]])
-
     @classmethod
-    def _get_global_ids(cls, codes: pd.Series, names: pd.Series) -> pd.Series:
+    def _get_global_ids(cls, codes: pd.Series | None, names: pd.Series) -> pd.Series:
         """Give EGEs a readable ID unique across operators: '<sysop>-<code, else name>'.
 
         The key (its code as text, else its name) is written in lowercase ASCII with dashes,
@@ -448,7 +505,8 @@ class EnergyProcessor(ABC):
         so Zarr and STAC are joined correctly and a new EGE won't take an existing one's key.
 
         Args:
-            codes (pd.Series): The EGEs' codes (missing for some).
+            codes (pd.Series | None): The EGEs' codes (missing for some), None if the
+                operator has none.
             names (pd.Series): The EGEs' names.
 
         Returns:
@@ -457,7 +515,9 @@ class EnergyProcessor(ABC):
         Raises:
             ValueError: If two keys give the same ID (e.g. "BESS Andes", "BESS-ANDES").
         """
-        keys = codes_as_text(codes).fillna(names.astype("string"))
+        if codes is None:  # an operator without codes: by name only
+            codes = pd.Series(pd.NA, index=names.index)
+        keys = cls._codes_as_text(codes).fillna(names.astype("string"))
         lookup = {
             key: f"{cls.DATASET.sysop}-{normalize_name(str(key)).replace(' ', '-')}"
             for key in keys.dropna().unique()
@@ -472,61 +532,58 @@ class EnergyProcessor(ABC):
             seen[gid] = key
         return keys.map(lookup)
 
-    def _prepare_for_stac(
-        self,
-        df_ege_locators: pd.DataFrame,
-        df_ege_sysop: pd.DataFrame,
-        active_periods: pd.Series,
-        totals: pd.Series,
-    ) -> pd.DataFrame:
-        """Bring the EGEs into the STAC_COLUMNS layout, with the operator's fields.
-
-        Shared by all operators: "id" and "entity_name" from coordinate finding's output,
-        one row per EGE, "entity_ids" (the operator's own, s. `_get_own_ids`, and the
-        locator's that located it), "lat", "lon", "region" and "geometry" (a point, else
-        the region's/country's polygon). The rest comes from `_get_stac_fields`.
+    @staticmethod
+    def _codes_as_text(codes: pd.Series) -> pd.Series:
+        """Write codes as text, however numbers were read (116, 116.0, '116' -> '116').
 
         Args:
-            df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returns them, with
-                their "id".
-            df_ege_sysop (pd.DataFrame): The EGEs' own values from the raw files.
-            active_periods (pd.Series): The periods each EGE reports values in, by its ID.
-            totals (pd.Series): Each EGE's total generation, by its ID.
+            codes (pd.Series): The EGEs' IDs (missing for some), e.g. 116.0 or 'AMBA'.
 
         Returns:
-            pd.DataFrame: The EGEs in the STAC_COLUMNS layout.
+            pd.Series: The IDs as text, missing where an EGE has none.
+        """
+        num = pd.to_numeric(codes, errors="coerce")
+        whole = num.where(num % 1 == 0).astype("Int64").astype("string")
+        return whole.fillna(codes.astype("string"))  # e.g. 'AMBA', '48W000000ABC1234'
+
+    @staticmethod
+    def _check_zarr_rows(
+        df_zarr: pd.DataFrame, start: pd.Timestamp, step: pd.Timedelta
+    ) -> None:
+        """Raise if a file's Zarr rows lack IDs, or steps are off the grid or twice.
+
+        Shared by all operators, after `_prepare_for_zarr`. Whether the rows lie in
+        the file's period is left to the operator: CEN reports one hour in the next
+        day's file.
+
+        Args:
+            df_zarr (pd.DataFrame): The file's rows in the ZARR_COLS layout (UTC).
+            start (pd.Timestamp): The file's period start (UTC), the time grid's origin.
+            step (pd.Timedelta): The time step, e.g. 1 hour.
 
         Raises:
-            ValueError: If `_get_stac_fields` gives an EGE more than one row.
+            DataStructureError: If a row has no EGE ID, a timestamp is missing or off
+                the time grid, or an EGE's time step is given twice.
         """
-        df_ege_locators = df_ege_locators.assign(
-            entity_name=df_ege_locators[SYSOP_NAME_COL]
-        ).drop_duplicates(subset="id")  # an EGE in several resolutions
-
-        fields = self._get_stac_fields(
-            df_ege_locators=df_ege_locators,
-            df_ege_sysop=df_ege_sysop,
-            active_periods=active_periods,
-            totals=totals,
-        )
-        if (twice := fields.index.duplicated()).any():
-            raise ValueError(
-                f"`_get_stac_fields` gives {int(twice.sum())} EGEs more than one row, "
-                f"e.g. {sorted(set(fields.index[twice]))[:5]}: one Item each expected."
+        if (no_id := df_zarr["id"].isna()).any():
+            raise DataStructureError(
+                f"{int(no_id.sum())} rows without an EGE ID "
+                "(neither a code nor a name)."
             )
-        df_ege_locators = df_ege_locators.drop(
-            columns=[c for c in fields.columns if c in df_ege_locators]
-        ).merge(fields, left_on="id", right_index=True, how="left")
-        df_ege_locators["entity_ids"] = entity_ids(
-            df_ege_locators, own=self._get_own_ids(df_ege_locators)
-        )
 
-        df_stac = to_layout(df_ege_locators, STAC_COLUMNS, renames=LOCATION_COLUMNS)
-        region_reg = self.shared.region_reg if self.shared else None
-        df_stac["geometry"] = geometries(
-            df_stac, country=self.meta["country"], region_reg=region_reg
-        )
-        return df_stac
+        timestamps = df_zarr["timestamp"]
+        off_grid = ((timestamps - start) % step != pd.Timedelta(0)) | timestamps.isna()
+        if off_grid.any():
+            raise DataStructureError(
+                f"{int(off_grid.sum())} timestamps missing or off the time grid, e.g. "
+                f"{sorted(set(timestamps[off_grid].astype(str)))[:3]}."
+            )
+
+        if (twice := df_zarr.duplicated(subset=["id", "timestamp"])).any():
+            raise DataStructureError(
+                f"{int(twice.sum())} EGE time steps given twice, e.g. "
+                f"{df_zarr.loc[twice, ['id', 'timestamp']].head(3).to_dict('records')}."
+            )
 
     def _write_review(self, review: dict[str, list[pd.DataFrame]], run: str) -> None:
         """Write the rows kept out of the data to `<output_dir>/review/<name>_<run>.csv`.
@@ -540,113 +597,44 @@ class EnergyProcessor(ABC):
             if not rows.empty:  # only files with content
                 write_df_to_csv(rows, Path(self.output_dir, "review", f"{name}_{run}"))
 
+    @staticmethod
+    def _log_unjoined_ids(zarr_ids: set[str], stac_ids: pd.Series) -> None:
+        """Log the EGE IDs only one of Zarr and STAC has, as both must have them all.
 
-# ------------------------------------------------------------------
-# GENERAL HELPERS
-# ------------------------------------------------------------------
-def codes_as_text(codes: pd.Series) -> pd.Series:
-    """Write codes as text, numbers however they were read (116, 116.0, '116' -> '116').
+        Args:
+            zarr_ids (set[str]): The distinct IDs in the Zarr data.
+            stac_ids (pd.Series): The IDs in the STAC data.
+        """
+        stac_ids = set(stac_ids.dropna())
+        for unjoined, lacking in (
+            (zarr_ids - stac_ids, "STAC"),
+            (stac_ids - zarr_ids, "Zarr"),
+        ):
+            if unjoined:
+                logger.error(
+                    f"{len(unjoined)} EGE IDs have no {lacking} data, e.g. "
+                    f"{sorted(unjoined)[:5]}"
+                )
 
-    Args:
-        codes (pd.Series): The EGEs' IDs (missing for some), e.g. 116.0 or 'AMBA'.
+    # ------------------------------------------------------------------
+    # HELPERS FOR CHILD CLASSES
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _check_totals(before: pd.Series, after: pd.Series) -> None:
+        """Raise if a reshaping step changed an EGE's total: no value lost or added.
 
-    Returns:
-        pd.Series: The IDs as text, missing where an EGE has none.
-    """
-    num = pd.to_numeric(codes, errors="coerce")
-    whole = num.where(num % 1 == 0).astype("Int64").astype("string")
-    return whole.fillna(codes.astype("string"))  # e.g. 'AMBA', '48W000000ABC1234'
+        Args:
+            before (pd.Series): Each EGE's total before the step, indexed by its ID.
+            after (pd.Series): Each EGE's total after the step, indexed by its ID.
 
-
-def check_zarr_rows(
-    df_zarr: pd.DataFrame, start: pd.Timestamp, step: pd.Timedelta
-) -> None:
-    """Raise if a file's Zarr rows lack IDs, or time steps are off the grid or twice.
-
-    Shared by all operators, after `_prepare_for_zarr`. Whether the rows lie in the
-    file's period is left to the operator: CEN reports one hour in the next day's file.
-
-    Args:
-        df_zarr (pd.DataFrame): The file's rows in the ZARR_COLUMNS layout (UTC).
-        start (pd.Timestamp): The file's period start (UTC), the time grid's origin.
-        step (pd.Timedelta): The time step, e.g. 1 hour.
-
-    Raises:
-        DataStructureError: If a row has no EGE ID, a timestamp is missing or off the
-            time grid, or an EGE's time step is given twice.
-    """
-    if (no_id := df_zarr["id"].isna()).any():
-        raise DataStructureError(
-            f"{int(no_id.sum())} rows without an EGE ID (neither a code nor a name)."
-        )
-
-    timestamps = df_zarr["timestamp"]
-    off_grid = ((timestamps - start) % step != pd.Timedelta(0)) | timestamps.isna()
-    if off_grid.any():
-        raise DataStructureError(
-            f"{int(off_grid.sum())} timestamps missing or off the time grid, e.g. "
-            f"{sorted(set(timestamps[off_grid].astype(str)))[:3]}."
-        )
-
-    if (twice := df_zarr.duplicated(subset=["id", "timestamp"])).any():
-        raise DataStructureError(
-            f"{int(twice.sum())} EGE time steps given twice, e.g. "
-            f"{df_zarr.loc[twice, ['id', 'timestamp']].head(3).to_dict('records')}."
-        )
-
-
-def log_unjoined_ids(zarr_ids: set[str], stac_ids: pd.Series) -> None:
-    """Log the EGE IDs only one of the Zarr and STAC data has, as both must have them all.
-
-    Args:
-        zarr_ids (set[str]): The distinct IDs in the Zarr data.
-        stac_ids (pd.Series): The IDs in the STAC data.
-    """
-    stac_ids = set(stac_ids.dropna())
-    for unjoined, lacking in (
-        (zarr_ids - stac_ids, "STAC"),
-        (stac_ids - zarr_ids, "Zarr"),
-    ):
-        if unjoined:
-            logger.error(
-                f"{len(unjoined)} EGE IDs have no {lacking} data, e.g. "
-                f"{sorted(unjoined)[:5]}"
+        Raises:
+            ValueError: If an EGE's totals differ (beyond float rounding).
+        """
+        before, after = before.align(after, fill_value=0.0)
+        changed = ~np.isclose(before.to_numpy(float), after.to_numpy(float))
+        if changed.any():
+            diff = (after - before)[changed]
+            raise ValueError(
+                f"Totals changed for {int(changed.sum())} EGEs: "
+                f"{diff.head(5).round(3).to_dict()}"
             )
-
-
-def to_layout(
-    df: pd.DataFrame, layout: list[str], renames: dict[str, str] | None = None
-) -> pd.DataFrame:
-    """Bring data into a layout's columns, dropping all others.
-
-    Args:
-        df (pd.DataFrame): The operator's data.
-        layout (list[str]): The layout's columns, in order (e.g. STAC_COLUMNS).
-        renames (dict[str, str], optional): Map of a column → layout column, for any not
-            named after the layout yet. Defaults to None.
-
-    Returns:
-        pd.DataFrame: The data in the layout's columns, empty where not provided.
-    """
-    return df.rename(columns=renames or {}).reindex(columns=layout)
-
-
-def check_totals_kept(before: pd.Series, after: pd.Series, what: str) -> None:
-    """Raise if a reshaping step changed any EGE's total, so no value was lost or added.
-
-    Args:
-        before (pd.Series): Each EGE's total before the step, indexed by its ID.
-        after (pd.Series): Each EGE's total after the step, indexed by its ID.
-        what (str): The data the totals are of, for the error, e.g. a file name.
-
-    Raises:
-        ValueError: If an EGE's totals differ (beyond float rounding).
-    """
-    before, after = before.align(after, fill_value=0.0)
-    changed = ~np.isclose(before.to_numpy(float), after.to_numpy(float))
-    if changed.any():
-        diff = (after - before)[changed]
-        raise ValueError(
-            f"Totals changed for {int(changed.sum())} EGEs in {what}: "
-            f"{diff.head(5).round(3).to_dict()}"
-        )

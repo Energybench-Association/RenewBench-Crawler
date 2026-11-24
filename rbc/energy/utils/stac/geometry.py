@@ -19,7 +19,7 @@ def geometries(
     known (s. Natural Earth), else its country's polygon.
 
     Args:
-        df_stac (pd.DataFrame): EGEs in the STAC_COLUMNS layout ("lat", "lon", "region").
+        df_stac (pd.DataFrame): EGEs in the STAC_COLS layout ("lat", "lon", "region").
         country (str): The operator's country, e.g. "Chile".
         region_reg (RegionRegistry | None): Natural Earth region lookup for polygons.
 

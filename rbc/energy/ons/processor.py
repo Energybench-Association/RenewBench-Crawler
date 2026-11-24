@@ -16,7 +16,7 @@ from rbc.energy.ons.mappings import (
     STAC_HYBRID_FUELS,
     UNKNOWN_MEASUREMENT_MODES,
 )
-from rbc.energy.utils.processing import ZARR_COLUMNS, EnergyProcessor, to_layout
+from rbc.energy.utils.processing import ZARR_COLS, EnergyProcessor
 from rbc.energy.utils.stac.entity import EntityTypeDefiner
 from rbc.energy.utils.stac.fuel import combine_fuels
 from rbc.energy.utils.temporal import to_utc
@@ -189,7 +189,7 @@ class OnsProcessor(EnergyProcessor):
     ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         """Bring one raw CSV (one local month) into the shared layout for the repository.
 
-        Return a df with columns ZARR_COLUMNS ("id", "timestamp", and "value"):
+        Return a df with columns ZARR_COLS ("id", "timestamp", and "value"):
         - "id": get from global helper
         - "timestamp": "din_instante" in UTC (s. `_hours_to_utc`)
         - "value": "val_geracao" (MWmed: the hour's average in MW), missing ones kept
@@ -202,7 +202,7 @@ class OnsProcessor(EnergyProcessor):
 
         Returns:
             tuple[pd.DataFrame, dict[str, pd.DataFrame]]: The generation data in the
-                ZARR_COLUMNS layout (UTC tz-aware), and ONS's rows for the hour the clocks
+                ZARR_COLS layout (UTC tz-aware), and ONS's rows for the hour the clocks
                 repeated, for review ("repeated_hour_rows").
         """
         utc, repeated = self._hours_to_utc(df_eg["timestamp"], month)
@@ -213,8 +213,11 @@ class OnsProcessor(EnergyProcessor):
                 f"the data, as it can't tell which of the two hours it is "
                 f"({len(df_repeated)} rows, at {sorted(set(df_repeated['timestamp']))})."
             )
-        df_zarr = df_eg[~repeated].assign(timestamp=utc)
-        return to_layout(df_zarr, ZARR_COLUMNS), {"repeated_hour_rows": df_repeated}
+
+        # define outputs
+        df_zarr = df_eg[~repeated].assign(timestamp=utc).reindex(columns=ZARR_COLS)
+        kept_out = {"repeated_hour_rows": df_repeated}
+        return (df_zarr, kept_out)
 
     def _hours_to_utc(
         self, timestamps: pd.Series, month: str

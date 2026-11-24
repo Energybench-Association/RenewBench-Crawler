@@ -97,7 +97,7 @@ def test_hours_that_cant_be_placed_raise(
 ) -> None:
     """Failure path: hours outside the file's month or skipped raise.
 
-    Off the hour or twice is checked for every operator (s. `check_zarr_rows`).
+    Off the hour or twice is checked for every operator (s. `_check_zarr_rows`).
 
     Args:
         proc (OnsProcessor): The processor.

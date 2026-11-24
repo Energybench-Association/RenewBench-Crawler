@@ -23,12 +23,7 @@ from rbc.energy.cen.mappings import (
     STAC_STATUSES,
 )
 from rbc.energy.cen.registry import CenCoordinateRegistry
-from rbc.energy.utils.processing import (
-    ZARR_COLUMNS,
-    EnergyProcessor,
-    check_totals_kept,
-    to_layout,
-)
+from rbc.energy.utils.processing import ZARR_COLS, EnergyProcessor
 from rbc.energy.utils.stac.fuel import combine_fuels
 from rbc.energy.utils.temporal import get_period_bounds, to_utc
 from rbc.publish.stac import DatasetInfo
@@ -306,43 +301,28 @@ class CenProcessor(EnergyProcessor):
         )  # served their purpose
 
     def _clean_file(self, df_eg: pd.DataFrame, period: str) -> pd.DataFrame:
-        """Remove the rows a raw CSV repeats, identical ones and repeated hours.
+        """Clean raw CSVs by removing repeated rows (identical rows, then repeated hours).
+
+        Some raw CSVs repeat rows: the *-12-31.csv files of several years hold hours 2-24
+        a second (or third) time. Those rows mostly have the same generation, but the EGE
+        details from later years (e.g. newer names, capacities, owners).
+        If the ID, hour and generation value are identical, the first copy of a row is kept
+        (complete with its own period's details). If the generation values differ, none of the
+        rows is known to be right - the hour is deleted for the whole EGE (incl. all of
+        its configurations), so that its total is missing (NaN) rather than wrong.
+
+        Repeats are matched on the configuration and 'hour', not 'fecha_hora': on the day
+        the clocks go back, 'hour' 25 shares its label with 'hour' 1 (s. `_hours_to_utc`).
 
         Args:
             df_eg (pd.DataFrame): A raw CSV's rows, in layout names, with their "id".
             period (str): The local date the CSV holds, e.g. '2009-12-31'.
 
         Returns:
-            pd.DataFrame: The rows, each configuration's hour once (s.
-                `_drop_repeated_hours`).
-        """
-        return self._drop_repeated_hours(df_eg.drop_duplicates(), day=period)
-
-    @staticmethod
-    def _drop_repeated_hours(df_eg: pd.DataFrame, day: str) -> pd.DataFrame:
-        """Keep a configuration's first row for an hour CEN's raw CSV holds more than once.
-
-        Some raw CSVs repeat rows: the *-12-31.csv files of several years hold hours 2-24
-        a second (or third) time. Those rows mostly have the same generation, but the EGE
-        details from later years (e.g. newer names, capacities, owners). Specific logic is
-        needed to remove these duplicate rows. If the ID, hour and generation value are
-        identical, the first copy of a row is chosen (complete, with its own period's
-        details). If the generation values differ, none of the rows is known to be right -
-        the hour is deleted for the whole EGE (incl. all of its  configurations), so that
-        its total is missing (NaN) rather than wrong.
-
-        Repeats are matched on the configuration and 'hour', not 'fecha_hora': on the day
-        the clocks go back, 'hour' 25 shares its label with 'hour' 1 (s. `_hours_to_utc`).
-
-        Args:
-            df_eg (pd.DataFrame): A raw CSV's rows, in the shared layout's names, with
-                their EGE's global 'id'.
-            day (str): The local date the CSV holds, e.g. '2009-12-31'.
-
-        Returns:
             pd.DataFrame: The rows, each configuration's hour once, and none for an
                 EGE's hour whose copies disagree.
         """
+        df_eg = df_eg.drop_duplicates()
         key = [CONFIG_COL, "hour"]
         repeated = df_eg.duplicated(subset=key)
         if not repeated.any():
@@ -361,14 +341,14 @@ class CenProcessor(EnergyProcessor):
         )
         if left_out.any():
             logger.warning(
-                f"{day}: copies of {int(differ.sum())} repeated configuration hours "
+                f"{period}: copies of {int(differ.sum())} repeated configuration hours "
                 f"report different values, so these EGEs' hours are left out (NaN): "
                 f"{ege_hours.groupby('id')['hour'].apply(sorted).to_dict()}."
             )
 
         logger.warning(
-            f"{day}: {int(repeated.sum())} repeated configuration hours dropped (other "
-            f"plant details), each one's first row kept unless left out."
+            f"{period}: {int(repeated.sum())} repeated configuration hours dropped "
+            f"(other plant details), each one's first row kept unless left out."
         )
         return df_eg[~repeated.to_numpy() & ~left_out]
 
@@ -377,7 +357,7 @@ class CenProcessor(EnergyProcessor):
     ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         """Bring one raw CSV (one local day) into the shared layout for the repository.
 
-        Return a df with columns ZARR_COLUMNS ("id", "timestamp", and "value"):
+        Return a df with columns ZARR_COLS ("id", "timestamp", and "value"):
         - "id": get from global helper
         - "timestamp": the row's hour in UTC, every real hour kept (s. `_hours_to_utc`)
         - "value": "gen_real_mw" summed for each physical EGE (s. below)
@@ -394,7 +374,7 @@ class CenProcessor(EnergyProcessor):
 
         Returns:
             tuple[pd.DataFrame, dict[str, pd.DataFrame]]: The generation data in the
-                ZARR_COLUMNS layout (UTC tz-aware), and CEN's placeholder rows for an
+                ZARR_COLS layout (UTC tz-aware), and CEN's placeholder rows for an
                 hour the clocks skipped, for review ("skipped_hour_placeholders").
 
         Raises:
@@ -423,19 +403,20 @@ class CenProcessor(EnergyProcessor):
 
         # net output: charging ('Retiro', batteries only) is reported positive as well
         net = df_eg["value"].where(df_eg["fuel_subtype"] != "Retiro", -df_eg["value"])
+        before = net.groupby(df_eg["id"]).sum()
 
         summed = (
             df_eg.assign(value=net, timestamp=utc)
             .groupby(["timestamp", "id"], as_index=False)["value"]
-            .sum(min_count=1)  # all values missing stays missing, not 0
+            .sum(min_count=1)  # all missing values stay missing (instead of 0)
         )
-        check_totals_kept(
-            net.groupby(df_eg["id"]).sum(), summed.groupby("id")["value"].sum(), day
-        )
-        return (
-            to_layout(summed, ZARR_COLUMNS),
-            {"skipped_hour_placeholders": df_placeholders},
-        )
+        after = summed.groupby("id")["value"].sum()
+        self._check_totals(before, after)
+
+        # define outputs
+        df_zarr = summed.reindex(columns=ZARR_COLS)
+        kept_out = {"skipped_hour_placeholders": df_placeholders}
+        return (df_zarr, kept_out)
 
     def _hours_to_utc(
         self, df_eg: pd.DataFrame, day: str

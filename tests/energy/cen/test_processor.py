@@ -932,36 +932,48 @@ def test_hours_that_cant_be_placed_raise(
 # ----------------------------------
 # Tests: repeated hours
 # ----------------------------------
-def test_repeated_hours_keep_the_first_rows() -> None:
+def test_repeated_hours_keep_the_first_rows(make_processor: Callable) -> None:
     """Happy path: a configuration's hour held again with the same value is dropped.
 
     As in CEN's 31 December files, the repeat carries the plant details of a later
     download, so dropping identical rows leaves it in. The first copy's rows stay.
+
+    Args:
+        make_processor (Callable): Factory for processors.
     """
     day = "2009-12-31"
     first = _day(day, _clock(day, [1, 2, 3])).assign(operator="GEN SA")
     again = _day(day, _clock(day, [2, 3])).assign(operator="GEN SPA")
     df = pd.concat([first, again], ignore_index=True)
 
-    out = CenProcessor._drop_repeated_hours(df, day)
+    out = make_processor()._clean_file(df, day)
 
     assert out["hour"].tolist() == [1, 2, 3]
     assert (out["operator"] == "GEN SA").all()
 
 
-def test_fall_back_hour_25_is_not_a_repeat() -> None:
-    """Happy path: 'hora' 25 shares its 00:00 label with 'hora' 1, but is its own hour."""
+def test_fall_back_hour_25_is_not_a_repeat(make_processor: Callable) -> None:
+    """Happy path: 'hora' 25 shares its 00:00 label with 'hora' 1, but is its own hour.
+
+    Args:
+        make_processor (Callable): Factory for processors.
+    """
     day = "2023-04-02"
     df = _day(day, _clock(day, list(range(1, 26))))
 
-    assert len(CenProcessor._drop_repeated_hours(df, day)) == 25
+    assert len(make_processor()._clean_file(df, day)) == 25
 
 
-def test_repeated_hour_in_doubt_leaves_the_eges_hour_out() -> None:
+def test_repeated_hour_in_doubt_leaves_the_eges_hour_out(
+    make_processor: Callable,
+) -> None:
     """Happy path: copies that disagree, even by rounding, leave the EGE's hour out.
 
     Neither copy is known to be right. The EGE's other configurations go too, so its
     total for the hour is missing rather than too low; other EGEs keep the hour.
+
+    Args:
+        make_processor (Callable): Factory for processors.
     """
     day = "2017-12-31"
     first = _day(day, _clock(day, [1, 2]))
@@ -970,7 +982,7 @@ def test_repeated_hour_in_doubt_leaves_the_eges_hour_out() -> None:
     other_ege = _day(day, _clock(day, [1, 2])).assign(id="cen_y", id_opreal=3)
     df = pd.concat([first, again, other_config, other_ege], ignore_index=True)
 
-    out = CenProcessor._drop_repeated_hours(df, day)
+    out = make_processor()._clean_file(df, day)
 
     assert sorted(zip(out["id"], out["id_opreal"], out["hour"])) == [
         ("cen_x", 1, 1),
