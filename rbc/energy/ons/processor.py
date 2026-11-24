@@ -49,11 +49,12 @@ UNKNOWN_MEASUREMENT_TYPE = "unknown"  # all groups with unknown output
 # STAC Collection details for ONS, its license and our processing
 ONS_DATA_URL = "https://dados.ons.org.br/dataset/geracao-usina-2"
 ONS_DATASET = DatasetInfo(
-    dataset=SOURCE,
-    title="ONS (Brazil) {tres} generation per plant",
+    sysop=SOURCE,
+    sysop_long="Operador Nacional do Sistema Elétrico (ONS)",
+    title="ONS (Brazil) {tres_verbose} generation per plant",
     description=(
-        "{Tres} generation in MW (the hour's average, MWmed) of each power plant, plant "
-        "group ('Conjunto de Usinas') and group of small plants ('Pequenas Usinas') of "
+        "{Tres_verbose} generation in MW (the hour's average, MWmed) of each power plant, "
+        "plant group ('Conjunto de Usinas') and group of small plants ('Pequenas Usinas') of "
         "Brazil's National Interconnected System (SIN), as published by the Operador "
         "Nacional do Sistema Elétrico (ONS) on its open data portal. Tipo III plants and "
         "their groups hold ONS's generation forecasts, not measurements.\n\n"
@@ -92,8 +93,7 @@ ONS_DATASET = DatasetInfo(
         "- Locations: found by matching plant names to open plant databases (GEM, "
         "osm-powerplants, OpenStreetMap)."
     ),
-    values="{Tres} generation (MW)",
-    system_operator="Operador Nacional do Sistema Elétrico (ONS)",
+    values="{Tres_verbose} generation (MW)",
     countries={"BR": "Brazil"},
     continents=["South America"],
     keywords=["Brazil", "ONS"],
@@ -109,7 +109,6 @@ class OnsProcessor(EnergyProcessor):
         entity_types (EntityTypeDefiner): Finds the EGEs that are parts of a facility.
     """
 
-    SYSOP = SOURCE
     DATASET = ONS_DATASET
     TZ = "America/Sao_Paulo"  # Brazil time (ONS reports local clock w DST until 2019)
     COLUMNS = ONS_COLUMNS

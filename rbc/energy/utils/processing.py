@@ -91,7 +91,6 @@ class EnergyProcessor(ABC):
     `_prepare_for_zarr` and `_get_stac_fields`. Other hooks are optional.
 
     Attributes:
-        SYSOP (str): The system operator, e.g. "cen".
         DATASET (DatasetInfo): What the operator's Collections say about the dataset.
         TZ (str): The IANA time zone the raw files' periods are local to.
         COLUMNS (dict[str, str]): Map of raw columns → the shared layout's, renamed on
@@ -110,7 +109,6 @@ class EnergyProcessor(ABC):
         shared (SharedResources | None): Coordinate finding's resources, None without it.
     """
 
-    SYSOP: ClassVar[str]
     DATASET: ClassVar[DatasetInfo]
     TZ: ClassVar[str]
     COLUMNS: ClassVar[dict[str, str]]
@@ -145,7 +143,7 @@ class EnergyProcessor(ABC):
             ValueError: If publishing while a URL is still the config's placeholder (s.
                 `PublishConfig.check_publishable`).
         """
-        required = ("SYSOP", "DATASET", "TZ", "COLUMNS", "EGE_COLUMNS")
+        required = ("DATASET", "TZ", "COLUMNS", "EGE_COLUMNS")
         if missing := [a for a in required if not hasattr(self, a)]:
             raise TypeError(f"{type(self).__name__} doesn't set {missing}.")
 
@@ -160,13 +158,13 @@ class EnergyProcessor(ABC):
         if publish:
             publish_cfg.check_publishable()
 
-        self.meta = OPERATOR_METADATA[self.SYSOP]
+        self.meta = OPERATOR_METADATA[self.DATASET.sysop]
         self.run_coordinate_finding_pipeline = self.meta["name_matchable"]
         self.shared: SharedResources | None = None
 
         if self.run_coordinate_finding_pipeline:
             self.shared = build_shared_resources(
-                sysop=self.SYSOP, resources_dir=self.resources_dir
+                sysop=self.DATASET.sysop, resources_dir=self.resources_dir
             )
 
     # ------------------------------------------------------------------
@@ -178,11 +176,13 @@ class EnergyProcessor(ABC):
         Raises:
             ValueError: If there is no raw data (for the identified periods).
         """
-        runs = list(load_runs([self.input_dir], sysop=self.SYSOP, periods=self.periods))
+        runs = list(
+            load_runs([self.input_dir], sysop=self.DATASET.sysop, periods=self.periods)
+        )
         if not runs:
             for_periods = f" for {self.periods}" if self.periods else ""
             raise ValueError(
-                f"No raw '{self.SYSOP}' data found in {self.input_dir}{for_periods}."
+                f"No raw '{self.DATASET.sysop}' data found in {self.input_dir}{for_periods}."
             )
 
         for run in runs:
@@ -239,9 +239,9 @@ class EnergyProcessor(ABC):
         )  # without coordinate finding, this is simply run.df
 
         # Step 2: get raw EG data and build Icechunk repo for release
-        step, step_iso = get_resolution(run.name)  # the raw data dir's, e.g. "1h"
+        step, tres_iso = get_resolution(run.name)  # the raw data dir's, e.g. "1h"
         storage = get_storage_location(
-            f"energy/{self.SYSOP}/{step_iso}/repository",
+            f"energy/{self.DATASET.sysop}/{tres_iso}/repository",
             self.publish_cfg,
             publish=self.publish,
             local_dir=Path(self.output_dir, "icechunk"),
@@ -293,7 +293,7 @@ class EnergyProcessor(ABC):
                 review.setdefault(name, []).append(rows)
 
         snapshot = ic_writer.finish(
-            message=f"{self.SYSOP} {self.release}: {file_periods[0]} to {file_periods[-1]}"
+            message=f"{self.DATASET.sysop} {self.release}: {file_periods[0]} to {file_periods[-1]}"
         )
         if self.publish and not ic_writer.reused:
             logger.warning(
@@ -315,7 +315,7 @@ class EnergyProcessor(ABC):
             release=self.release,
             storage=storage,
             snapshot=snapshot,
-            step=step_iso,
+            tres_iso=tres_iso,
         )
         items = stac_builder.build_items(df_stac, ic_writer.spans())
         collection = stac_builder.build_collection(
@@ -409,7 +409,7 @@ class EnergyProcessor(ABC):
             dict[str, pd.Series]: Map of ID system → each EGE's ID in it; by default
                 the operator's code (e.g. {"cen": ...}).
         """
-        return {self.SYSOP: codes_as_text(df_ege_locators[SYSOP_CODE_COL])}
+        return {self.DATASET.sysop: codes_as_text(df_ege_locators[SYSOP_CODE_COL])}
 
     # ------------------------------------------------------------------
     # HELPERS
@@ -429,7 +429,7 @@ class EnergyProcessor(ABC):
 
     @classmethod
     def _get_global_ids(cls, codes: pd.Series, names: pd.Series) -> pd.Series:
-        """Give EGEs a readable ID unique across operators: '<SYSOP>-<code, else name>'.
+        """Give EGEs a readable ID unique across operators: '<sysop>-<code, else name>'.
 
         The key (its code as text, else its name) is written in lowercase ASCII with dashes,
         e.g. a CEN EGE with ID 1907 -> "cen-1907", a CEN EGE with only a name "BESS Andes"
@@ -448,14 +448,14 @@ class EnergyProcessor(ABC):
         """
         keys = codes_as_text(codes).fillna(names.astype("string"))
         lookup = {
-            key: f"{cls.SYSOP}-{normalize_name(str(key)).replace(' ', '-')}"
+            key: f"{cls.DATASET.sysop}-{normalize_name(str(key)).replace(' ', '-')}"
             for key in keys.dropna().unique()
         }
         seen: dict[str, object] = {}
         for key, gid in lookup.items():
             if gid in seen:
                 raise ValueError(
-                    f"'{cls.SYSOP}' EGE keys '{seen[gid]}' and '{key}' share the ID "
+                    f"'{cls.DATASET.sysop}' EGE keys '{seen[gid]}' and '{key}' share the ID "
                     f"'{gid}'."
                 )
             seen[gid] = key

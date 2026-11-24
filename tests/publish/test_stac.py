@@ -16,9 +16,9 @@ from rbc.publish import stac
 from rbc.publish.icechunk_store import StorageInfo
 
 INFO = stac.DatasetInfo(
-    dataset="op",
-    title="Operator {tres} generation",
-    description="{Tres} test data.",
+    sysop="op",
+    title="Operator {tres_verbose} generation",
+    description="{Tres_verbose} test data.",
     license="proprietary",
     license_url="https://example.org/terms",
     providers=[
@@ -26,9 +26,9 @@ INFO = stac.DatasetInfo(
         {"name": "Processor", "roles": ["processor", "host"]},
     ],
     citation="Operator: generation data.",
-    lineage="{Tres} values converted to UTC.",
-    values="{Tres} gross generation (MW)",
-    system_operator="Grid Operator",
+    lineage="{Tres_verbose} values converted to UTC.",
+    values="{Tres_verbose} gross generation (MW)",
+    sysop_long="Grid Operator",
     countries={"CL": "Chile", "AR": "Argentina"},
     continents=["South America"],
     keywords=["Somewhere"],
@@ -276,26 +276,27 @@ def test_collection_links_the_license_notice(
 
 
 @pytest.mark.parametrize(
-    "step, word",
+    "tres_iso, tres_verbose",
     [("PT1H", "hourly"), ("PT15M", "15-minute"), ("P1D", "daily"), ("PT3H", "3-hour")],
 )
-def test_texts_name_the_resolution(step: str, word: str) -> None:
-    """Happy path: the dataset's texts and keywords name the time step in words.
+def test_texts_name_the_resolution(tres_iso: str, tres_verbose: str) -> None:
+    """Happy path: the dataset's texts and keywords name the resolution in words.
 
     Args:
-        step (str): The time step as an ISO 8601 duration.
-        word (str): How the texts name it.
+        tres_iso (str): The resolution as an ISO 8601 duration.
+        tres_verbose (str): How the texts name it.
     """
-    info = INFO.for_resolution(step)
-    assert info.title == f"Operator {word} generation"
-    assert info.description == f"{word.capitalize()} test data."
-    assert info.values == f"{word.capitalize()} gross generation (MW)"
-    assert info.keywords == ["Somewhere", word]
-    assert stac._collection_id("op", step, "v0.1.0") == f"op-{step.lower()}__v0.1.0"
+    info = INFO.for_resolution(tres_iso)
+    assert info.title == f"Operator {tres_verbose} generation"
+    assert info.description == f"{tres_verbose.capitalize()} test data."
+    assert info.values == f"{tres_verbose.capitalize()} gross generation (MW)"
+    assert info.keywords == ["Somewhere", tres_verbose]
+    cid = stac._collection_id("op", tres_iso, "v0.1.0")
+    assert cid == f"op-{tres_iso.lower()}__v0.1.0"
 
 
 def test_texts_reject_other_durations() -> None:
-    """Failure path: a month (ISO 8601 "P1M") isn't a time step the texts can name."""
+    """Failure path: a month (ISO 8601 "P1M") isn't a resolution the texts can name."""
     with pytest.raises(ValueError, match="P1M"):
         INFO.for_resolution("P1M")
 

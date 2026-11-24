@@ -68,12 +68,15 @@ class DatasetInfo:
     """What a dataset's Collections say about its source, license and processing.
 
     A dataset can come in several temporal resolutions, so its title, description,
-    lineage and values name the resolution as `{tres}`, e.g. "hourly" or "15-minute", or
-    as `{Tres}` at the start of a sentence (s. `for_resolution`).
+    lineage and values name the resolution as `{tres_verbose}`, e.g. "hourly" or
+    "15-minute", or as `{Tres_verbose}` at the start of a sentence (s. `for_resolution`).
 
     Attributes:
-        dataset (str): ID of the dataset, e.g. "cen".
-        title (str): Its title, e.g. "CEN (Chile) {tres} generation per plant".
+        sysop (str): The system operator's short name, e.g. "cen".
+        sysop_long (str): The system operator's long name, e.g. "Coordinador Eléctrico
+            Nacional (CEN)".
+        title (str): Its title, e.g. "CEN (Chile) {tres_verbose} generation per
+            plant".
         description (str): Its description, incl. license terms.
         license (str): The STAC license value, e.g. "proprietary" for terms of use.
         license_url (str): Link to the license's terms.
@@ -82,10 +85,8 @@ class DatasetInfo:
         citation (str): How to cite the data (the scientific extension's citation).
         lineage (str): How the source's data was changed: the processing extension's
             lineage, on the "processor" provider, also closing the description.
-        values (str): What the repository's `values` hold, e.g. "{Tres} gross
-            generation (MW)".
-        system_operator (str): The system operator's name, e.g. "Coordinador
-            Eléctrico Nacional (CEN)".
+        values (str): What the repository's `values` hold, e.g. "{Tres_verbose}
+            gross generation (MW)".
         countries (dict[str, str]): The countries it covers: ISO 3166-1 alpha-2 code → name,
             e.g. {"CL": "Chile"}.
         continents (list[str]): The continents it covers, e.g. ["South America"].
@@ -95,7 +96,8 @@ class DatasetInfo:
             if not at `license_url`. Defaults to None.
     """
 
-    dataset: str
+    sysop: str
+    sysop_long: str
     title: str
     description: str
     license: str
@@ -104,43 +106,47 @@ class DatasetInfo:
     citation: str
     lineage: str
     values: str
-    system_operator: str
     countries: dict[str, str]
     continents: list[str]
     keywords: list[str] = field(default_factory=list)
     license_notice_url: str | None = None
 
-    def for_resolution(self, step: str) -> "DatasetInfo":
+    def for_resolution(self, tres_iso: str) -> "DatasetInfo":
         """Fill the texts in for one temporal resolution.
 
         Args:
-            step (str): The time step as an ISO 8601 duration, e.g. "PT1H", "PT15M".
+            tres_iso (str): The resolution as an ISO 8601 duration, e.g. "PT1H", "PT15M".
 
         Returns:
             DatasetInfo: A copy whose texts name the resolution in words, e.g.
                 "hourly" or "15-minute", and whose keywords end with it.
 
         Raises:
-            ValueError: If the time step isn't a number of minutes, hours or days.
+            ValueError: If the resolution isn't a number of minutes, hours or days.
         """
-        if match := re.fullmatch(r"PT(\d+)([HM])", step):
+        if match := re.fullmatch(r"PT(\d+)([HM])", tres_iso):
             count, unit = int(match[1]), {"H": "hour", "M": "minute"}[match[2]]
-        elif match := re.fullmatch(r"P(\d+)D", step):
+        elif match := re.fullmatch(r"P(\d+)D", tres_iso):
             count, unit = int(match[1]), "day"
         else:
-            raise ValueError(f"'{step}' isn't a time step such as 'PT1H' or 'PT15M'.")
+            raise ValueError(
+                f"'{tres_iso}' isn't a resolution such as 'PT1H' or 'PT15M'."
+            )
         if count == 1 and unit != "minute":
-            word = "hourly" if unit == "hour" else "daily"
+            tres_verbose = "hourly" if unit == "hour" else "daily"
         else:
-            word = f"{count}-{unit}"  # as in "15-minute generation"
-        words = {"tres": word, "Tres": word.capitalize()}
+            tres_verbose = f"{count}-{unit}"  # as in "15-minute generation"
+        words = {
+            "tres_verbose": tres_verbose,
+            "Tres_verbose": tres_verbose.capitalize(),
+        }
         return replace(
             self,
             title=self.title.format(**words),
             description=self.description.format(**words),
             lineage=self.lineage.format(**words),
             values=self.values.format(**words),
-            keywords=[*self.keywords, word],
+            keywords=[*self.keywords, tres_verbose],
         )
 
 
@@ -183,7 +189,7 @@ def get_software() -> dict[str, str]:
 # ------------------------------------------------------------------
 # BUILDING (general)
 # ------------------------------------------------------------------
-def build_collection_base(info: DatasetInfo, release: str, cid: str) -> JSON:
+def build_collection_base(dataset: DatasetInfo, release: str, cid: str) -> JSON:
     """Build a Collection's dataset-level fields, the same for any kind of data.
 
     What the dataset says about itself: title, description (incl. lineage), license and
@@ -192,7 +198,7 @@ def build_collection_base(info: DatasetInfo, release: str, cid: str) -> JSON:
     is added by a builder for the specific kind of data (e.g. `EnergyStacBuilder` for EG).
 
     Args:
-        info (DatasetInfo): The dataset, its texts filled in (s. `for_resolution`).
+        dataset (DatasetInfo): The dataset, its texts filled in (s. `for_resolution`).
         release (str): The release, e.g. "v0.1.0".
         cid (str): The Collection's ID (s. `_collection_id`).
 
@@ -204,31 +210,31 @@ def build_collection_base(info: DatasetInfo, release: str, cid: str) -> JSON:
         ValueError: If no provider is a "processor", to hold the lineage.
     """
     processing = {
-        "processing:lineage": info.lineage,  # for "processor" provider (= EnergyBench)
+        "processing:lineage": dataset.lineage,  # for "processor" provider (= EnergyBench)
         "processing:software": get_software(),
     }
     providers = [
         {**p, **processing} if "processor" in p.get("roles", []) else p
-        for p in info.providers
+        for p in dataset.providers
     ]
-    if providers == info.providers:
+    if providers == dataset.providers:
         raise ValueError(
-            f"'{info.dataset}' has no 'processor' provider for its lineage."
+            f"'{dataset.sysop}' has no 'processor' provider for its lineage."
         )
 
     license_links = [
         {
             "rel": "license",
-            "href": info.license_url,
+            "href": dataset.license_url,
             "type": "text/html",
             "title": "License",
         }
     ]
-    if info.license_notice_url:
+    if dataset.license_notice_url:
         license_links.append(
             {
                 "rel": "license",
-                "href": info.license_notice_url,
+                "href": dataset.license_notice_url,
                 "type": "text/html",
                 "title": "License notice of the source",
             }
@@ -238,13 +244,13 @@ def build_collection_base(info: DatasetInfo, release: str, cid: str) -> JSON:
         "id": cid,
         "stac_version": STAC_VERSION,
         "stac_extensions": [VERSION_EXT, SCIENTIFIC_EXT, PROCESSING_EXT],
-        "title": f"{info.title} — release {release}",
-        "description": f"{info.description.rstrip()}\n\n{info.lineage}",
-        "license": info.license,
+        "title": f"{dataset.title} — release {release}",
+        "description": f"{dataset.description.rstrip()}\n\n{dataset.lineage}",
+        "license": dataset.license,
         "providers": providers,
         "version": release,
         "deprecated": False,
-        "sci:citation": info.citation,
+        "sci:citation": dataset.citation,
         "links": license_links,
     }
 
@@ -264,7 +270,7 @@ class EnergyStacBuilder:
         release (str): The release, e.g. "v0.1.0".
         storage (StorageInfo): Where the release's repository lives.
         snapshot (str): The release tag's snapshot ID.
-        step (str): The repository's time step as an ISO 8601 duration, e.g. "PT1H".
+        tres_iso (str): The repository's resolution as an ISO 8601 duration, e.g. "PT1H".
         cid (str): The Collection's ID, e.g. "cen-pt1h__v0.1.0".
     """
 
@@ -274,7 +280,7 @@ class EnergyStacBuilder:
         release: str,
         storage: StorageInfo,
         snapshot: str,
-        step: str,
+        tres_iso: str,
     ) -> None:
         """Initialize the builder.
 
@@ -283,14 +289,15 @@ class EnergyStacBuilder:
             release (str): The release, e.g. "v0.1.0".
             storage (StorageInfo): Where the release's repository lives.
             snapshot (str): The release tag's snapshot ID.
-            step (str): The repository's time step as an ISO 8601 duration, e.g. "PT1H".
+            tres_iso (str): The repository's resolution as an ISO 8601 duration, e.g.
+                "PT1H".
         """
-        self.dataset = dataset.for_resolution(step)
+        self.dataset = dataset.for_resolution(tres_iso)
         self.release = release
         self.storage = storage
         self.snapshot = snapshot
-        self.step = step
-        self.cid = _collection_id(dataset.dataset, step, release)
+        self.tres_iso = tres_iso
+        self.cid = _collection_id(dataset.sysop, tres_iso, release)
 
     def build_items(self, df_stac: pd.DataFrame, spans: pd.DataFrame) -> list[JSON]:
         """Build one Item per EGE that has any value in the release.
@@ -392,10 +399,7 @@ class EnergyStacBuilder:
                 {
                     "scheme": "https://energybench.org/system-operators",
                     "concepts": [
-                        {
-                            "id": self.dataset.dataset,
-                            "title": self.dataset.system_operator,
-                        }
+                        {"id": self.dataset.sysop, "title": self.dataset.sysop_long}
                     ],
                 },
                 {
@@ -428,7 +432,7 @@ class EnergyStacBuilder:
                     "type": "temporal",
                     "description": "Start of the time step (UTC).",
                     "extent": [_utc_to_iso(times[0]), _utc_to_iso(times[-1])],
-                    "step": self.step,
+                    "step": self.tres_iso,  # the datacube's name for it
                 },
             },
             "cube:variables": {
@@ -648,18 +652,18 @@ def publish_stac(api_url: str, collection: JSON, items: list[JSON]) -> None:
 # ------------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------------
-def _collection_id(dataset: str, step: str, release: str) -> str:
+def _collection_id(sysop: str, tres_iso: str, release: str) -> str:
     """Specify a dataset's Collection ID based on the temporal resolution and release.
 
     Args:
-        dataset (str): ID of the dataset, e.g. "cen".
-        step (str): The time step as an ISO 8601 duration, e.g. "PT1H".
+        sysop (str): The system operator's short name, e.g. "cen".
+        tres_iso (str): The resolution as an ISO 8601 duration, e.g. "PT1H".
         release (str): The release, e.g. "v0.1.0".
 
     Returns:
         str: The release collection ID, e.g. "cen-pt1h__v0.1.0".
     """
-    return f"{dataset}-{step.lower()}__{release}"
+    return f"{sysop}-{tres_iso.lower()}__{release}"
 
 
 def _icechunk_repo_as_asset(storage: StorageInfo, release: str, snapshot: str) -> JSON:

@@ -88,8 +88,8 @@ systems, bash scripts ending in `.sbatch`.
 Flags include:
 - `-r`/`--release` (required): the release written and published, as
   `v<major>.<minor>.<patch>`. It becomes the repositories' tag and the Collection's
-  suffix (`<source>-<tres>__<release>`). Initial full runs use `v0.1.0`; raise it to
-  publish new data, as a reused release writes nothing new.
+  suffix (`<sysop>-<tres_iso>__<release>`, e.g. `cen-pt1h__v0.1.0`). Initial full runs use
+  `v0.1.0`; raise it to publish new data, as a reused release writes nothing new.
 - `-p`/`--periods`: years or months of raw data to process, e.g. `-p 2024 2025-03`
   (default: all raw files in `dst_dir_raw`). The time axis spans the first to the last
   selected day, so periods with a gap between them leave it empty there.

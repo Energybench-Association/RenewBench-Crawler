@@ -153,7 +153,7 @@ class EnergyIcechunkWriter:
         step: pd.Timedelta,
         chunks: tuple[int, int],
     ):
-        """Create the release's empty array, or find its existing tag.
+        """Initialize Icechunk writer, creating the release's empty array or finding its tag.
 
         Args:
             repo (ic.Repository): The repository to write to.
@@ -176,7 +176,7 @@ class EnergyIcechunkWriter:
         self.entities = list(entities)
         self.step = step
         self.times = pd.date_range(
-            _utc_naive(start), _utc_naive(end), freq=step, inclusive="left"
+            _to_utc_naive(start), _to_utc_naive(end), freq=step, inclusive="left"
         )
         self._chunk_steps = chunks[1]
         self._entity_index = pd.Index(self.entities)
@@ -252,7 +252,7 @@ class EnergyIcechunkWriter:
             raise ValueError(
                 f"EGE IDs not in the release: {sorted(set(ids[unknown]))[:5]}"
             )
-        steps = self.times.get_indexer(_utc_naive(timestamps))
+        steps = self.times.get_indexer(_to_utc_naive(timestamps))
         if (outside := steps < 0).any():
             raise ValueError(
                 f"Timestamps not on the release's time axis: "
@@ -389,8 +389,13 @@ class EnergyIcechunkWriter:
             )
 
 
-def _utc_naive(timestamps: pd.Series | pd.Timestamp) -> pd.DatetimeIndex | pd.Timestamp:
-    """Give UTC timestamps without their time zone, as the Zarr time axis stores them.
+def _to_utc_naive(
+    timestamps: pd.Series | pd.Timestamp,
+) -> pd.DatetimeIndex | pd.Timestamp:
+    """Convert tz-aware timestamps to naive UTC, as the Zarr time axis stores them.
+
+    Any zone works; naive input counts as UTC already. `temporal.to_utc` goes the other
+    way: naive local times to tz-aware UTC.
 
     Args:
         timestamps (pd.Series | pd.Timestamp): tz-aware (any zone) or naive UTC times.

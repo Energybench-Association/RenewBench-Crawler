@@ -19,7 +19,7 @@ def to_utc(
     dst: pd.Series,
     skipped: Literal["raise", "NaT"] = "raise",
 ) -> pd.Series:
-    """Convert local timestamps to UTC, keeping every hour.
+    """Convert naive local timestamps to tz-aware UTC, keeping every hour.
 
     The time zone applies its country's DST rules, past ones included. The hour a DST
     change repeats (clocks set back) is told apart by `dst`. An hour a DST change skips
@@ -95,8 +95,9 @@ def get_resolution(tres: str) -> tuple[pd.Timedelta, str]:
         tres (str): The directory's name, as DownloadTask names it, e.g. "1h", "15min".
 
     Returns:
-        tuple[pd.Timedelta, str]: The time step, and its ISO 8601 duration (e.g.
-            "PT1H", "PT15M"), as repository prefixes and STAC name it.
+        tuple[pd.Timedelta, str]: The time step (`step`) to compute with, and the
+            resolution as an ISO 8601 duration (`tres_iso`, e.g. "PT1H", "PT15M"), as
+            repository prefixes and STAC name it.
 
     Raises:
         ValueError: If the name isn't a temporal resolution.

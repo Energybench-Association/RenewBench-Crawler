@@ -65,10 +65,11 @@ MEASUREMENT_TYPE = "gross_output"
 
 # STAC Collection details for CEN, its license and our processing
 CEN_DATASET = DatasetInfo(
-    dataset=SOURCE,
-    title="CEN (Chile) {tres} generation per plant",
+    sysop=SOURCE,
+    sysop_long="Coordinador Eléctrico Nacional (CEN)",
+    title="CEN (Chile) {tres_verbose} generation per plant",
     description=(
-        "{Tres} gross generation in MW of each power plant of Chile's National "
+        "{Tres_verbose} gross generation in MW of each power plant of Chile's National "
         "Electric System (SEN), as reported by the Coordinador Eléctrico Nacional "
         "(CEN) through its public information system (SIP) API.\n\nFor academic, "
         "non-commercial use only, citing the source, as CEN's terms of use allow "
@@ -107,8 +108,7 @@ CEN_DATASET = DatasetInfo(
         "- Locations: from CEN's plant registry, else from matching plant names to open "
         "plant databases (GEM, osm-powerplants, OpenStreetMap)."
     ),
-    values="{Tres} gross generation (MW)",
-    system_operator="Coordinador Eléctrico Nacional (CEN)",
+    values="{Tres_verbose} gross generation (MW)",
     countries={"CL": "Chile"},
     continents=["South America"],
     keywords=["Chile", "CEN"],
@@ -125,7 +125,6 @@ class CenProcessor(EnergyProcessor):
         df_registry (pd.DataFrame): The dataframe of EGE info from CEN API registry.
     """
 
-    SYSOP = SOURCE
     DATASET = CEN_DATASET
     TZ = "America/Santiago"  # Chile's time zone (CEN reports local time w DST changes)
     COLUMNS = CEN_COLUMNS

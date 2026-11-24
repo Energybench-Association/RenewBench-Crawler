@@ -57,7 +57,7 @@ def _ids(sysop: str, codes: list, names: list | None = None) -> pd.Series:
     """
 
     class _OfSysop(_Processor):
-        SYSOP = sysop
+        DATASET = MagicMock(sysop=sysop)
 
     names = names or [None] * len(codes)
     return _OfSysop._get_global_ids(pd.Series(codes), pd.Series(names, dtype="string"))
@@ -166,8 +166,7 @@ def test_log_unjoined_ids(
 class _Processor(EnergyProcessor):
     """The least a processor needs: its class attributes and the two required hooks."""
 
-    SYSOP = "aemo"  # not name_matchable: no coordinate finding
-    DATASET = MagicMock()
+    DATASET = MagicMock(sysop="aemo")  # not name_matchable: no coordinate finding
     TZ = "America/Sao_Paulo"
     COLUMNS = {}
     EGE_COLUMNS = []
