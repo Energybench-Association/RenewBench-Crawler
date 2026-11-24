@@ -199,6 +199,6 @@ def utm_to_latlon(easting, northing, zone) -> tuple[float | None, float | None]:
 
 
 if __name__ == "__main__":
-    reg = CenCoordinateRegistry(
+    registry = CenCoordinateRegistry(
         token="<cen_token>", cache_dir=Path("my/path/cen/coordinates")
     )

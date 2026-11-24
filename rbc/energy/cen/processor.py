@@ -175,10 +175,10 @@ class CenProcessor(EnergyProcessor):
             periods=periods,
         )
         # load EGE coordinate information from CEN registry API endpoint
-        reg = CenCoordinateRegistry(
+        registry = CenCoordinateRegistry(
             token=token, cache_dir=Path(self.resources_dir, "cen_portal")
         )
-        self.df_registry = reg.df_registry.rename(columns=REGISTRY_RENAMES)
+        self.df_registry = registry.df_registry.rename(columns=REGISTRY_RENAMES)
 
     # ------------------------------------------------------------------
     # HOOKS (s. EnergyProcessor)
@@ -204,17 +204,18 @@ class CenProcessor(EnergyProcessor):
         Returns:
             df_ege_locators (pd.DataFrame): The EGE rows, with the 'official.*' columns added.
         """
-        # 1. look up all EGE IDs in the registry (the name only for the check in step 2)
-        off = OFFICIAL_LOCATOR
+        # 1. look up all EGE IDs in the official CEN registry (incl name for check in 2.)
         df_ege_locators = self._join_registry(
             df_ege_sysop, code_col=CODE_COL, cols=["name", "lat", "lon", "region"]
         )
-        df_ege_locators[f"{off}.match_method"] = (
-            df_ege_locators[f"{off}.lat"].notna().map({True: f"{off}_id_exact"})
+        df_ege_locators[f"{OFFICIAL_LOCATOR}.match_method"] = (
+            df_ege_locators[f"{OFFICIAL_LOCATOR}.lat"]
+            .notna()
+            .map({True: f"{OFFICIAL_LOCATOR}_id_exact"})
         )
 
         codes = pd.to_numeric(df_ege_locators[CODE_COL], errors="coerce")
-        found = df_ege_locators[f"{off}.id"].notna()
+        found = df_ege_locators[f"{OFFICIAL_LOCATOR}.id"].notna()
         not_found = sorted(
             df_ege_locators.loc[codes.notna() & ~found, NAME_COL].unique()
         )
@@ -230,7 +231,7 @@ class CenProcessor(EnergyProcessor):
                 fuzz.ratio(strip_square_brackets(a) or a, strip_square_brackets(b) or b)
                 for a, b in zip(
                     df_ege_locators.loc[named, NAME_COL],
-                    df_ege_locators.loc[named, f"{off}.name"],
+                    df_ege_locators.loc[named, f"{OFFICIAL_LOCATOR}.name"],
                 )
             ],
             index=df_ege_locators.index[named],
@@ -238,33 +239,36 @@ class CenProcessor(EnergyProcessor):
         )
         # doubt the ID match only if none of its name variants is alike enough
         best = ratios.groupby(codes[named]).transform("max")
-        doubtful = best.index[
-            best < 90.0
-        ]  # must be alike (allow tiny errors 'PVF'->'PFV')
+        doubtful = best.index[best < 90.0]  # be alike (allow tiny errors 'PVF'->'PFV')
         for idx in doubtful:
             logger.warning(
                 f"ID {df_ege_locators.at[idx, CODE_COL]}: CEN name "
                 f"'{df_ege_locators.at[idx, NAME_COL]}' differs from registry name "
-                f"'{df_ege_locators.at[idx, f'{off}.name']}' (ratio {ratios[idx]:.0f})"
-                f" - left to the pipeline to match."
+                f"'{df_ege_locators.at[idx, f'{OFFICIAL_LOCATOR}.name']}' "
+                f"(ratio {ratios[idx]:.0f}) - left to the pipeline to match."
             )
         doubtful_ids = codes.isin(codes[doubtful])  # all its rows, named or not
         df_ege_locators.loc[
-            doubtful_ids, [f"{off}.lat", f"{off}.lon", f"{off}.match_method"]
+            doubtful_ids,
+            [
+                f"{OFFICIAL_LOCATOR}.lat",
+                f"{OFFICIAL_LOCATOR}.lon",
+                f"{OFFICIAL_LOCATOR}.match_method",
+            ],
         ] = None
 
         # 3. sanity check: the registry point should lie in the registry's own region
         off_region = pd.Index([])
         region_reg = self.shared.region_reg if self.shared else None
         if region_reg is not None:
-            located = df_ege_locators[f"{off}.lat"].notna()
+            located = df_ege_locators[f"{OFFICIAL_LOCATOR}.lat"].notna()
             levels = pd.Series(
                 [
                     region_reg.classify_match(COUNTRY, region, (lat, lon))
                     for region, lat, lon in zip(
-                        df_ege_locators.loc[located, f"{off}.region"],
-                        df_ege_locators.loc[located, f"{off}.lat"],
-                        df_ege_locators.loc[located, f"{off}.lon"],
+                        df_ege_locators.loc[located, f"{OFFICIAL_LOCATOR}.region"],
+                        df_ege_locators.loc[located, f"{OFFICIAL_LOCATOR}.lat"],
+                        df_ege_locators.loc[located, f"{OFFICIAL_LOCATOR}.lon"],
                     )
                 ],
                 index=df_ege_locators.index[located],
@@ -272,7 +276,9 @@ class CenProcessor(EnergyProcessor):
             )
             off_region = levels.index[levels == "mismatch"]  # not "within_bounds"
             for code, name, region in (
-                df_ege_locators.loc[off_region, [CODE_COL, NAME_COL, f"{off}.region"]]
+                df_ege_locators.loc[
+                    off_region, [CODE_COL, NAME_COL, f"{OFFICIAL_LOCATOR}.region"]
+                ]
                 .drop_duplicates(subset=CODE_COL)
                 .itertuples(index=False)
             ):
@@ -282,10 +288,14 @@ class CenProcessor(EnergyProcessor):
                 )
             df_ege_locators.loc[
                 codes.isin(codes[off_region]),
-                [f"{off}.lat", f"{off}.lon", f"{off}.match_method"],
+                [
+                    f"{OFFICIAL_LOCATOR}.lat",
+                    f"{OFFICIAL_LOCATOR}.lon",
+                    f"{OFFICIAL_LOCATOR}.match_method",
+                ],
             ] = None
 
-        has_coords = df_ege_locators[f"{off}.lat"].notna()
+        has_coords = df_ege_locators[f"{OFFICIAL_LOCATOR}.lat"].notna()
         logger.info(
             f"Found coordinates for {codes[has_coords].nunique()} of {codes.nunique()} EGE "
             f"IDs (left to the pipeline: {codes[doubtful].nunique()} as names differ, "
@@ -293,7 +303,7 @@ class CenProcessor(EnergyProcessor):
         )
 
         return df_ege_locators.drop(
-            columns=[f"{off}.id", f"{off}.name"]
+            columns=[f"{OFFICIAL_LOCATOR}.id", f"{OFFICIAL_LOCATOR}.name"]
         )  # served their purpose
 
     def _clean_file(self, df_eg: pd.DataFrame, period: str) -> pd.DataFrame:
@@ -393,21 +403,23 @@ class CenProcessor(EnergyProcessor):
                 total changed on the way.
         """
         utc, placeholder = self._hours_to_utc(df_eg, day)
-        placeholders = df_eg[placeholder]
-        if len(placeholders):
+        df_placeholders = df_eg[placeholder]
+        if len(df_placeholders):
             logger.info(
                 f"{day}: CEN's placeholder for the hour the clocks skipped kept out of "
-                f"the data ({len(placeholders)} rows, "
-                f"{int((placeholders['value'] != 0).sum())} non-zero, "
-                f"{placeholders['value'].sum():.1f} MW in total)."
+                f"the data ({len(df_placeholders)} rows, "
+                f"{int((df_placeholders['value'] != 0).sum())} non-zero, "
+                f"{df_placeholders['value'].sum():.1f} MW in total)."
             )
         df_eg, utc = df_eg[~placeholder], utc[~placeholder]
 
-        hours = pd.DataFrame({"c": df_eg[CONFIG_COL].values, "t": utc.values})
-        if (twice := hours.duplicated()).any():
+        config_hours = pd.DataFrame(
+            {CONFIG_COL: df_eg[CONFIG_COL].to_numpy(), "timestamp": utc.to_numpy()}
+        )
+        if (twice := config_hours.duplicated()).any():
             raise ValueError(
                 f"{day}: {int(twice.sum())} configuration hours fall on the same UTC "
-                f"hour, e.g. {hours[twice].head(3).to_dict('records')}."
+                f"hour, e.g. {config_hours[twice].head(3).to_dict('records')}."
             )
 
         # net output: charging ('Retiro', batteries only) is reported positive as well
@@ -423,7 +435,7 @@ class CenProcessor(EnergyProcessor):
         )
         return (
             to_layout(summed, ZARR_COLUMNS),
-            {"skipped_hour_placeholders": placeholders},
+            {"skipped_hour_placeholders": df_placeholders},
         )
 
     def _hours_to_utc(
@@ -485,7 +497,7 @@ class CenProcessor(EnergyProcessor):
         self,
         df_ege_locators: pd.DataFrame,
         df_ege_sysop: pd.DataFrame,
-        active: pd.Series,
+        active_periods: pd.Series,
         totals: pd.Series,
     ) -> pd.DataFrame:
         """Give each EGE's CEN-specific STAC fields (the rest: s. `EnergyProcessor`).
@@ -514,10 +526,10 @@ class CenProcessor(EnergyProcessor):
         name (e.g. "[NO_MOSTRAR]") is the EGE's true status, else the registry's "estado".
 
         Args:
-            df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them, once per
-                "id".
+            df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them,
+                once per "id".
             df_ege_sysop (pd.DataFrame): The EGE information from raw generation data.
-            active (pd.Series): The days each EGE reports values in (unused).
+            active_periods (pd.Series): The days each EGE reports values in (unused).
             totals (pd.Series): Each EGE's total generation (unused).
 
         Returns:
@@ -526,19 +538,21 @@ class CenProcessor(EnergyProcessor):
         latest = df_ege_sysop.drop_duplicates(subset=["id", CONFIG_COL], keep="last")
         fields_sysop = latest.groupby("id").agg(operator=("operator", "last"))
         fields_sysop = fields_sysop.join(combine_fuels(self._stac_fuels(latest)))
-        # a battery charges and discharges through one unit: only generating configurations
-        # count, and with several of them no row holds the EGE's own capacity
+        # A battery charges and discharges through one unit: only generating configs counts,
+        # and with several of them no row holds the EGE's own capacity
         generating = latest[latest["fuel_subtype"] != "Retiro"].groupby("id")
         capacity = (
             generating["generation_capacity"]
             .last()
             .where(generating[CONFIG_COL].nunique() == 1)
         )
-        storage = fields_sysop["fuel_type"] == "storage"
+        is_storage = fields_sysop["fuel_type"] == "storage"
         fields_sysop["generation_capacity"] = capacity.where(
-            ~storage.reindex(capacity.index)
+            ~is_storage.reindex(capacity.index)
         )
-        fields_sysop["storage_power"] = capacity.where(storage.reindex(capacity.index))
+        fields_sysop["storage_power"] = capacity.where(
+            is_storage.reindex(capacity.index)
+        )
 
         df_ege_locators = self._join_registry(
             df_ege_locators, code_col=SYSOP_CODE_COL, cols=["status"]
@@ -650,7 +664,7 @@ class CenProcessor(EnergyProcessor):
     def _join_registry(
         self, df: pd.DataFrame, code_col: str, cols: list[str]
     ) -> pd.DataFrame:
-        """Join the given registry columns onto the rows by EGE ID, as 'official.<col>'.
+        """Join the official CEN registry columns to the rows by EGE ID, as 'official.<col>'.
 
         Args:
             df (pd.DataFrame): Rows of EGEs, with their CEN ID in `code_col`.
@@ -661,12 +675,14 @@ class CenProcessor(EnergyProcessor):
             pd.DataFrame: The rows with "official.id" and the 'official.<col>' columns added.
         """
         key = pd.to_numeric(df[code_col], errors="coerce").astype("Int64")  # '28.0'=28
-        reg = self.df_registry[["id", *cols]].rename(
+        registry = self.df_registry[["id", *cols]].rename(
             columns=lambda c: f"{OFFICIAL_LOCATOR}.{c}"
         )
         # left join, so EGEs not in the registry (or without an ID) keep empty values.
         return (
             df.assign(_key=key)  # the code column itself is left as is
-            .merge(reg, left_on="_key", right_on=f"{OFFICIAL_LOCATOR}.id", how="left")
+            .merge(
+                registry, left_on="_key", right_on=f"{OFFICIAL_LOCATOR}.id", how="left"
+            )
             .drop(columns="_key")
         )

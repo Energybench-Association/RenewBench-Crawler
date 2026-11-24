@@ -58,7 +58,7 @@ class EntityTypeDefiner:
     # Public API
     # ------------------------------------------------------------------
     def find_groups(
-        self, df_ege: pd.DataFrame, active: pd.Series, totals: pd.Series
+        self, df_ege: pd.DataFrame, active_periods: pd.Series, totals: pd.Series
     ) -> pd.DataFrame:
         """Find the EGEs that are parts ('group') of one facility, and name the facility.
 
@@ -75,8 +75,8 @@ class EntityTypeDefiner:
         Args:
             df_ege (pd.DataFrame): The candidate EGEs (e.g. single plants, not plant groups),
                 with "id", "entity_name", "code" (missing if none), "lat" and "lon".
-            active (pd.Series): The periods each EGE reports values in (a set, e.g. of
-                months), indexed by ID.
+            active_periods (pd.Series): The periods each EGE reports values in (a set,
+                e.g. of months), indexed by ID.
             totals (pd.Series): Each EGE's total generation, indexed by ID.
 
         Returns:
@@ -90,7 +90,7 @@ class EntityTypeDefiner:
         df_ege = df_ege.assign(
             key=names.map(self.tok.get_discriminator_key, na_action="ignore"),
             tokens=names.map(self.tok.get_canonical_tokens, na_action="ignore"),
-            active=[active.get(i, set()) for i in df_ege.index],
+            active_periods=[active_periods.get(i, set()) for i in df_ege.index],
             total=totals.reindex(df_ege.index).fillna(0.0),
         )
 
@@ -156,10 +156,11 @@ class EntityTypeDefiner:
             bool: True if both report in a common period, under different names, and
                 (if linked by name) lie within `max_km`.
         """
-        if not a["active"] & b["active"]:
-            return False  # one follows the other: the same EGE renamed, not a part
+        if not a["active_periods"] & b["active_periods"]:
+            return False  # one after the other: the same EGE renamed, not both subparts
+
         if a["tokens"] == b["tokens"]:
-            return False  # the same name: the same EGE listed twice, not a part
+            return False  # the same name: the same EGE listed twice, not both subparts
 
         if not by_name:
             return True

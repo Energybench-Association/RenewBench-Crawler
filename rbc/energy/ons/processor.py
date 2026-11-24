@@ -273,7 +273,7 @@ class OnsProcessor(EnergyProcessor):
         self,
         df_ege_locators: pd.DataFrame,
         df_ege_sysop: pd.DataFrame,
-        active: pd.Series,
+        active_periods: pd.Series,
         totals: pd.Series,
     ) -> pd.DataFrame:
         """Give each EGE's ONS-specific STAC fields (the rest: s. `EnergyProcessor`).
@@ -294,10 +294,10 @@ class OnsProcessor(EnergyProcessor):
         A CEG can be shared by several EGEs (e.g. Itaipu's 50 Hz and 60 Hz sides).
 
         Args:
-            df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them, once per
-                "id", with "entity_name".
+            df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them,
+                once per "id" with "entity_name".
             df_ege_sysop (pd.DataFrame): The EGE information from raw generation data.
-            active (pd.Series): The months each EGE reports values in, by its ID.
+            active_periods (pd.Series): The months each EGE reports values in, by its ID.
             totals (pd.Series): Each EGE's total generation, by its ID.
 
         Returns:
@@ -332,7 +332,7 @@ class OnsProcessor(EnergyProcessor):
             plants.rename(columns={CEG_COL: "code"})[
                 ["id", "entity_name", "code", "lat", "lon"]
             ],
-            active,
+            active_periods,
             totals,
         )
         ids = fields.index.to_series()

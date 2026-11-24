@@ -286,10 +286,11 @@ def test_geometries_give_the_smallest_certain_geometry() -> None:
         Polygon([(0, 0), (1, 0), (1, 1)]),
         Polygon([(0, 0), (5, 0), (5, 5)]),
     )
-    reg = MagicMock()
-    reg.geometry.side_effect = lambda _c, r=None: {None: country, "Biobío": region}.get(
-        r
-    )
+    region_reg = MagicMock()
+    region_reg.geometry.side_effect = lambda _c, r=None: {
+        None: country,
+        "Biobío": region,
+    }.get(r)
     df = pd.DataFrame(
         {
             "lat": [-37.3, None, None, None],
@@ -298,7 +299,7 @@ def test_geometries_give_the_smallest_certain_geometry() -> None:
         }
     )
 
-    out = geometries(df, country="Chile", region_reg=reg)
+    out = geometries(df, country="Chile", region_reg=region_reg)
 
     assert out[0] == {"type": "Point", "coordinates": [-72.5, -37.3]}
     assert out[1] == mapping(region)
@@ -307,11 +308,11 @@ def test_geometries_give_the_smallest_certain_geometry() -> None:
 
 def test_geometries_raise_without_a_country_polygon() -> None:
     """Failure path: an EGE that can't be placed at all raises, rather than lacking one."""
-    reg = MagicMock()
-    reg.geometry.return_value = None
+    region_reg = MagicMock()
+    region_reg.geometry.return_value = None
     df = pd.DataFrame({"lat": [None], "lon": [None], "region": [None]})
     with pytest.raises(ValueError, match="No polygon"):
-        geometries(df, country="Chile", region_reg=reg)
+        geometries(df, country="Chile", region_reg=region_reg)
 
 
 @pytest.mark.parametrize(
@@ -361,7 +362,7 @@ class _Processor(EnergyProcessor):
     def _prepare_for_zarr(self, df_eg, period):  # noqa: D102
         return df_eg, {}
 
-    def _get_stac_fields(self, df_ege_locators, df_ege_sysop, active, totals):  # noqa: D102
+    def _get_stac_fields(self, df_ege_locators, df_ege_sysop, active_periods, totals):  # noqa: D102
         return pd.DataFrame(index=pd.Index([], name="id"))
 
 

@@ -169,10 +169,10 @@ def test_ege_fields_by_operating_mode(proc: OnsProcessor) -> None:
             "fuel_subtype": "Óleo Diesel",
         }
     )
-    active = pd.Series({i: {"2020-01"} for i in ids}, dtype=object)
+    active_periods = pd.Series({i: {"2020-01"} for i in ids}, dtype=object)
     totals = pd.Series(1.0, index=ids)
 
-    out = proc._get_stac_fields(df_ege_locators, df_ege_sysop, active, totals)
+    out = proc._get_stac_fields(df_ege_locators, df_ege_sysop, active_periods, totals)
 
     assert out["entity_type"].to_dict() == {
         "ons-c": "facility",  # a group at one point
