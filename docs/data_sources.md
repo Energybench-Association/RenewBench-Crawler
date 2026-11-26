@@ -1,4 +1,4 @@
-# Data Source Catalogue
+# Data Source Catalog
 
 This document provides an overview of sources for both energy generation
 and meteorological data that can be downloaded and processed via the
@@ -820,7 +820,7 @@ BARRA2 is a regional reanalysis produced by the Australian Bureau of Meteorology
 **Access**
 
 - Platform: [Copernicus Climate Data Store / ECMWF](https://cds.climate.copernicus.eu/)
-- Dataset example: [ERA5 reanalysis data catalogue](https://apps.ecmwf.int/data-catalogues/era5/?type=an&class=ea&stream=oper&expver=1)
+- Dataset example: [ERA5 reanalysis data catalog](https://apps.ecmwf.int/data-catalogues/era5/?type=an&class=ea&stream=oper&expver=1)
 - Docs: [How to download ERA5](https://confluence.ecmwf.int/display/CKB/How+to+download+ERA5)
 - Requirements: personal CDS API key ([how to get a token](https://cds.climate.copernicus.eu/how-to-api))
 

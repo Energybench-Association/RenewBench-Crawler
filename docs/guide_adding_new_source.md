@@ -11,7 +11,7 @@ At a high level, each data source consists of:
 - crawler logic under `rbc/<type>/<source>/` (typically a `<Source>Downloader` class),
 - one or more CLI scripts in `scripts/<type>/` for running,
 - tests under `tests/` for code validation,
-- a mention in the [data sources catalogue](data_sources.md).
+- a mention in the [data sources catalog](data_sources.md).
 
 ## Configuration
 

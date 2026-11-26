@@ -94,7 +94,7 @@ The RenewBench-Crawler repository is structured as follows:
 For an overview of what the repository has to offer as well as getting
 started, the following are available:
 
-- [**Data sources catalogue**](docs/data_sources.md):
+- [**Data sources catalog**](docs/data_sources.md):
   Overview of all supported energy and weather data sources, including access
   requirements and links to official docs.
 - [**Usage guide**](docs/guide_usage.md):
