@@ -106,6 +106,9 @@ class OnsProcessor(EnergyProcessor):
     TZ = "America/Sao_Paulo"  # Brazil time (ONS reports local clock w DST until 2019)
     COLUMNS = ONS_COLUMNS
     EGE_COLUMNS = [CODE_COL, CEG_COL, MODE_COL, "fuel_type", "fuel_subtype"]
+    STAC_DEFAULTS = {  # s. docs/data_sources.md)
+        "entity_type": "facility"
+    }
 
     def __init__(
         self,
@@ -253,7 +256,7 @@ class OnsProcessor(EnergyProcessor):
         - "entity_type": the mode's (s. ENTITY_TYPES_TO_STAC): "portfolio" for a group
           of plants without a point (several sites), "group" for a single plant that is
           part of a facility (s. `EntityTypeDefiner.find_groups`, by CEG or by name and
-          location), else "facility"
+          location), else "facility" (s. STAC_DEFAULTS)
         - "facility_name": the facility such a part belongs to
         - "fuel_type", "fuel_subtype", "hybrid_fuel_types": "nom_tipousina" and
           "nom_tipocombustivel" mapped to STAC's vocabulary (s. FUELS_TO_STAC)
@@ -294,7 +297,8 @@ class OnsProcessor(EnergyProcessor):
 
         # --- ADD ENERGY FIELD(S): entity_type, facility_name (where entity_type="group")
         # For logic: see data_sources.md & ons/mappings.py
-        by_mode = self.entity_def.map(df_ege[MODE_COL]).fillna("facility")
+        by_mode = self.entity_def.map(df_ege[MODE_COL])
+        by_mode = by_mode.fillna(self.STAC_DEFAULTS["entity_type"])  # EGEs w/o values
         located_portfolio_mask = (by_mode == "portfolio") & df_ege["lat"].notna()
         fields["entity_type"] = by_mode.mask(located_portfolio_mask, "facility")
 

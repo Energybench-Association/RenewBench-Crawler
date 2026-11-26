@@ -334,3 +334,58 @@ def test_stac_layout_is_the_same_for_every_operator(tmp_path: Path) -> None:
     row = df_stac.loc[0]
     assert row[["id", "entity_name", "fuel_type"]].tolist() == ["a", "SOL A", "solar"]
     assert pd.isna(row["operator"])
+
+
+def test_stac_defaults_fill_only_where_fields_give_none(tmp_path: Path) -> None:
+    """Happy path: a STAC default fills an EGE's empty field, not one the hook gave.
+
+    Args:
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+
+    class _Defaults(_Processor):
+        STAC_DEFAULTS = {"entity_type": "facility", "measurement_type": "gross_output"}
+
+        def _get_stac_fields(
+            self, df_ege_locators, df_ege_sysop, active_periods, totals
+        ):  # noqa: D102
+            return pd.DataFrame({"entity_type": ["portfolio", None]}, index=["a", "b"])
+
+    df_ege_locators = pd.DataFrame(
+        {
+            "id": ["a", "b", "c"],  # c: no fields at all
+            processing.SYSOP_NAME_COL: ["A", "B", "C"],
+            processing.SYSOP_CODE_COL: ["1", "2", "3"],
+        }
+    )
+    empty = pd.Series(dtype=object)
+    with patch.object(processing, "geometries", return_value=pd.Series([None] * 3)):
+        df_stac = _make(_Defaults, tmp_path)._prepare_for_stac(
+            df_ege_locators, pd.DataFrame(), empty, empty
+        )
+
+    assert df_stac["entity_type"].tolist() == ["portfolio", "facility", "facility"]
+    assert set(df_stac["measurement_type"]) == {"gross_output"}
+    assert df_stac["status"].isna().all()  # no default: stays empty
+
+
+@pytest.mark.parametrize(
+    "defaults",
+    [{"entity_type": "plant"}, {"fuel_type": "solar"}],
+    ids=["value_the_field_lacks", "field_without_vocabulary"],
+)
+def test_incorrect_stac_defaults_raise(
+    tmp_path: Path, defaults: dict[str, str]
+) -> None:
+    """Failure path: a default the field can't take fails when the processor is built.
+
+    Args:
+        tmp_path (Path): Pytest-provided temporary directory.
+        defaults (dict[str, str]): The processor's STAC defaults.
+    """
+
+    class _Wrong(_Processor):
+        STAC_DEFAULTS = defaults
+
+    with pytest.raises(ValueError, match="Incorrect STAC default"):
+        _make(_Wrong, tmp_path)

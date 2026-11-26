@@ -32,8 +32,10 @@ from rbc.coordinates.mappings import (
 from rbc.coordinates.orchestrator import find_coordinates
 from rbc.coordinates.pipelines import SharedResources, build_shared_resources
 from rbc.coordinates.utils.values import normalize_name
-from rbc.energy.utils.stac.entity import entity_ids
+from rbc.energy.utils.stac.entity import EntityTypeDefiner, entity_ids
 from rbc.energy.utils.stac.geometry import geometries
+from rbc.energy.utils.stac.measurement import MeasurementTypeDefiner
+from rbc.energy.utils.stac.status import StatusDefiner
 from rbc.energy.utils.temporal import get_period_bounds, get_resolution
 from rbc.publish.icechunk_store import (
     EnergyIcechunkWriter,
@@ -76,6 +78,12 @@ STAC_COLS = [
     "geometry",
 ]
 
+# Map: STAC field an operator may give a default → the values it may take
+DEFAULTABLE_FIELDS = {
+    d.FIELD: d.VALUES
+    for d in (EntityTypeDefiner, MeasurementTypeDefiner, StatusDefiner)
+}
+
 # Map: coordinate finding's output columns → the EGE table's (the same for every operator)
 LOCATION_COLS = {SYSOP_REGION_COL: "region"}
 
@@ -98,6 +106,8 @@ class EnergyProcessor(ABC):
             loading (e.g. "gen_real_mw" → "value").
         EGE_COLUMNS (list[str]): Each EGE's own columns (after renaming) kept from the raw
             files for STAC (e.g. "fuel_type"). The latest values win.
+        STAC_DEFAULTS (dict[str, str], Optional): Map of STAC field → its default value, e.g.
+            e.g. {"status": "active"}. Used when field not defined by `_get_stac_fields`.
         input_dir (Path): The directory containing subfolders of raw csv files.
         resources_dir (Path): The directory containing resources for coordinate finding.
         output_dir (Path): The output directory for processed energy generation data.
@@ -114,6 +124,7 @@ class EnergyProcessor(ABC):
     TZ: ClassVar[str]
     COLUMNS: ClassVar[dict[str, str]]
     EGE_COLUMNS: ClassVar[list[str]]
+    STAC_DEFAULTS: ClassVar[dict[str, str]] = {}
 
     def __init__(
         self,
@@ -141,12 +152,18 @@ class EnergyProcessor(ABC):
 
         Raises:
             TypeError: If the subclass doesn't set all class attributes.
+            ValueError: If a STAC default is for a field without a vocabulary, or a value
+                the field doesn't allow (s. DEFAULTABLE_FIELDS).
             ValueError: If publishing while a URL is still the config's placeholder (s.
                 `PublishConfig.check_publishable`).
         """
         required = ("DATASET", "TZ", "COLUMNS", "EGE_COLUMNS")
         if missing := [a for a in required if not hasattr(self, a)]:
             raise TypeError(f"{type(self).__name__} doesn't set {missing}.")
+
+        for field, value in self.STAC_DEFAULTS.items():
+            if value not in DEFAULTABLE_FIELDS.get(field, ()):
+                raise ValueError(f"Incorrect STAC default: {field}={value!r}.")
 
         self.input_dir = input_dir
         self.resources_dir = resources_dir
@@ -406,7 +423,8 @@ class EnergyProcessor(ABC):
         Shared by all operators: "id" and "entity_name" from coordinate finding's output,
         one row per EGE, "entity_ids" (the operator's own, s. `_get_own_ids`, and the
         locator's that located it), "lat", "lon", "region" and "geometry" (a point, else
-        the region's/country's polygon). The rest comes from `_get_stac_fields`.
+        the region's/country's polygon). The rest comes from `_get_stac_fields`, and
+        STAC_DEFAULTS where it gives none.
 
         Args:
             df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returns them, with
@@ -445,6 +463,8 @@ class EnergyProcessor(ABC):
 
         # reformat to proper layout (only STAC columns, empty where sysop provides none)
         df_stac = df_ege_l.rename(columns=LOCATION_COLS).reindex(columns=STAC_COLS)
+        # fill in processor-specific defaults
+        df_stac = df_stac.fillna(self.STAC_DEFAULTS)
 
         # define geometry
         region_reg = self.shared.region_reg if self.shared else None

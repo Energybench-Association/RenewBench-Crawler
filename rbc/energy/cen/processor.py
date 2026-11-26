@@ -54,10 +54,6 @@ REGISTRY_RENAMES = {
     "estado": "status",
 }
 
-# STAC hard-coded fields (s. data_sources.md for details)
-ENTITY_TYPE = "facility"
-MEASUREMENT_TYPE = "gross_output"
-
 # STAC Collection details for CEN, its license and our processing
 CEN_DATASET = DatasetInfo(
     sysop=SOURCE,
@@ -133,6 +129,10 @@ class CenProcessor(EnergyProcessor):
         "fuel_type",
         "fuel_subtype",
     ]
+    STAC_DEFAULTS = {  # s. docs/data_sources.md)
+        "entity_type": "facility",  # "central" EGEs, not "llave_opreal" configurations
+        "measurement_type": "gross_output",
+    }
 
     def __init__(
         self,
@@ -487,7 +487,6 @@ class CenProcessor(EnergyProcessor):
         """Give each EGE's CEN-specific STAC fields (the rest: s. `EnergyProcessor`).
 
         - "entity_name": "central" without its square bracket term
-        - "entity_type": hard-coded as "facility"
         - "operator": use "propietario" column values from df_ege_sysop
         - "fuel_type", "fuel_subtype", "hybrid_fuel_types": "tipo_tecnologia" and
           "subtipo_tecnologia" mapped to STAC's vocabulary (s. FUELS_TO_STAC)
@@ -495,7 +494,8 @@ class CenProcessor(EnergyProcessor):
         - "storage_power": the same, instead, for batteries
         - "status": the square bracket term in "central", else the registry's "estado",
           mapped to STAC's vocabulary (s. STATUSES_TO_STAC)
-        - "measurement_type": hard-coded as "gross_output" (s. MEASUREMENT_TYPE)
+        - "entity_type": default (defined in EnergyProcessor._prepare_for_stac)
+        - "measurement_type": default (defined in EnergyProcessor._prepare_for_stac)
 
         CEN reports a physical EGE ('central'). Sometimes, these are split into different
         operating configurations ('id_opreal') of units subdivided into fuel modes. E.g.
@@ -542,7 +542,7 @@ class CenProcessor(EnergyProcessor):
             is_storage.reindex(capacity.index)
         )
 
-        # --- ADD ENERGY FIELD(S): status, entity_name, entity_type, measurement_type
+        # --- ADD ENERGY FIELD(S): status, entity_name
         # For status, use the square bracket term in the name, else the registry's column
         df_ege_locators = self._add_registry_columns(
             df_ege_locators, code_col=SYSOP_CODE_COL, cols=["status"]
@@ -557,9 +557,7 @@ class CenProcessor(EnergyProcessor):
         fields = pd.DataFrame(
             {
                 "entity_name": entity_names.to_numpy(),
-                "entity_type": ENTITY_TYPE,
                 "status": self.status_def.map(raw_statuses).to_numpy(),
-                "measurement_type": MEASUREMENT_TYPE,
             },
             index=pd.Index(df_ege_locators["id"], name="id"),
         )
