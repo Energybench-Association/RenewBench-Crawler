@@ -711,15 +711,55 @@ def test_publishing_on_the_lsdf_route(make_processor: Callable, tmp_path: Path) 
     assert not Path(tmp_path, "processed", "cen", "icechunk").exists()
 
 
-def test_no_review_file_without_skipped_hours(
-    processed: tuple[Path, MagicMock],
-) -> None:
-    """Happy path: days without a clock change leave nothing for review.
+def test_repeated_rows_kept_for_review(processed: tuple[Path, MagicMock]) -> None:
+    """Happy path: days without a clock change leave only CEN's repeats for review.
 
     Args:
         processed (tuple[Path, MagicMock]): The output directory and the map builder.
     """
-    assert not Path(processed[0], "review").exists()
+    review = Path(processed[0], "review")
+    assert [f.name for f in review.iterdir()] == ["repeated_rows_1h.csv"]
+    repeats = pd.read_csv(Path(review, "repeated_rows_1h.csv"))
+    assert repeats["operator"].tolist() == ["GEN SPA", "GEN SPA"]  # one per day
+
+
+def test_ege_only_in_repeats_is_kept_for_review(
+    make_processor: Callable, tmp_path: Path
+) -> None:
+    """Happy path: an EGE found only in rows the cleaning keeps out stays on record.
+
+    TER DELTA only appears in a repeat of TER ALPHA's configuration, as cen-1978 in
+    CEN's 2025-12-31 file. Its row goes to review, so the EGE isn't forgotten.
+
+    Args:
+        make_processor (Callable): Factory for processors.
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+    raw_dir = Path(tmp_path, "raw", "cen", "1h")
+    _write_raw(raw_dir)
+    path = Path(raw_dir, "2024-01-01.csv")
+    delta = _raw_row(  # TER ALPHA's configuration 10, again under another plant
+        10,
+        9.0,
+        "TER DELTA",
+        "2024-01-01 00:00:00",
+        5.0,
+        50.0,
+        None,
+        "Térmica",
+        "Diésel",
+    )
+    pd.concat([pd.read_csv(path), pd.DataFrame([delta])]).to_csv(path, index=False)
+
+    with (
+        patch.object(processing, "build_map"),
+        patch.object(processing, "validate", _skip),
+    ):
+        make_processor(region_reg=_region_reg({})).process_data()
+
+    review = Path(tmp_path, "processed", "cen", "review")
+    repeats = pd.read_csv(Path(review, "repeated_rows_1h.csv"))
+    assert repeats.loc[repeats[NAME_COL] == "TER DELTA", "id"].tolist() == [_gid("9")]
 
 
 def test_skipped_hour_placeholders_kept_for_review(
@@ -749,7 +789,10 @@ def test_skipped_hour_placeholders_kept_for_review(
         make_processor(region_reg=_region_reg({})).process_data()
 
     review = Path(tmp_path, "processed", "cen", "review")
-    assert [f.name for f in review.iterdir()] == ["skipped_hour_placeholders_1h.csv"]
+    assert sorted(f.name for f in review.iterdir()) == [
+        "repeated_rows_1h.csv",
+        "skipped_hour_placeholders_1h.csv",
+    ]
     assert len(pd.read_csv(Path(review, "skipped_hour_placeholders_1h.csv"))) == 2
 
 
@@ -958,10 +1001,12 @@ def test_repeated_hours_keep_the_first_rows(make_processor: Callable) -> None:
     again = _day(day, _clock(day, [2, 3])).assign(operator="GEN SPA")
     df = pd.concat([first, again], ignore_index=True)
 
-    out = make_processor()._clean_file(df, day)
+    out, kept_out = make_processor()._clean_file(df, day)
 
     assert out["hour"].tolist() == [1, 2, 3]
     assert (out["operator"] == "GEN SA").all()
+    assert kept_out["repeated_rows"]["operator"].tolist() == ["GEN SPA", "GEN SPA"]
+    assert kept_out["disputed_hours"].empty
 
 
 def test_fall_back_hour_25_is_not_a_repeat(make_processor: Callable) -> None:
@@ -973,7 +1018,9 @@ def test_fall_back_hour_25_is_not_a_repeat(make_processor: Callable) -> None:
     day = "2023-04-02"
     df = _day(day, _clock(day, list(range(1, 26))))
 
-    assert len(make_processor()._clean_file(df, day)) == 25
+    out, kept_out = make_processor()._clean_file(df, day)
+    assert len(out) == 25
+    assert kept_out == {}
 
 
 def test_repeated_hour_in_doubt_leaves_the_eges_hour_out(
@@ -994,7 +1041,7 @@ def test_repeated_hour_in_doubt_leaves_the_eges_hour_out(
     other_ege = _day(day, _clock(day, [1, 2])).assign(id="cen_y", id_opreal=3)
     df = pd.concat([first, again, other_config, other_ege], ignore_index=True)
 
-    out = make_processor()._clean_file(df, day)
+    out, kept_out = make_processor()._clean_file(df, day)
 
     assert sorted(zip(out["id"], out["id_opreal"], out["hour"])) == [
         ("cen_x", 1, 1),
@@ -1002,6 +1049,14 @@ def test_repeated_hour_in_doubt_leaves_the_eges_hour_out(
         ("cen_y", 3, 1),
         ("cen_y", 3, 2),
     ]
+    # the hour's copies of both configurations, the disagreeing repeat included
+    disputed = kept_out["disputed_hours"]
+    assert sorted(zip(disputed["id_opreal"], disputed["hour"])) == [
+        (1, 2),
+        (1, 2),
+        (2, 2),
+    ]
+    assert kept_out["repeated_rows"].empty
 
 
 @pytest.mark.parametrize(

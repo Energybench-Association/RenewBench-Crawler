@@ -152,7 +152,9 @@ class OnsProcessor(EnergyProcessor):
     # ------------------------------------------------------------------
     # HOOKS (s. EnergyProcessor)
     # ------------------------------------------------------------------
-    def _clean_file(self, df_eg: pd.DataFrame, period: str) -> pd.DataFrame:
+    def _clean_file(
+        self, df_eg: pd.DataFrame, period: str
+    ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         """Check that a raw CSV holds only operating modes the processor knows.
 
         A mode decides an EGE's entity and measurement type (ENTITY_TYPES_TO_STAC,
@@ -163,14 +165,16 @@ class OnsProcessor(EnergyProcessor):
             period (str): The local month the CSV holds, e.g. '2025-07'.
 
         Returns:
-            pd.DataFrame: The rows, unchanged.
+            tuple[pd.DataFrame, dict[str, pd.DataFrame]]: The rows, unchanged, and no
+                rows kept out.
 
         Raises:
             DataStructureError: If a mode is missing or has no entity or measurement type.
         """
         for definer in (self.entity_def, self.measurement_def):
             definer.map(df_eg[MODE_COL], required=True)  # raises for unknown modes
-        return df_eg
+
+        return df_eg, {}
 
     def _prepare_for_zarr(
         self, df_eg: pd.DataFrame, month: str

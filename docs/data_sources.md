@@ -335,6 +335,11 @@ Columns:
     from Saturday's last.
 
   All hours are converted to UTC accordingly.
+- Repeats: the `*-12-31.csv` files of several years hold hours 2-24 again, with the plant
+  details of later years. A configuration's later copies of an hour are kept out of the
+  data (`<dst_dir_proc>/review/repeated_rows_<tres>.csv`); where the copies' values
+  disagree, the plant's whole hour is (`disputed_hours_<tres>.csv`). A plant only found in
+  such rows (e.g. `cen-1978`) has an empty row in the repository and no Item for now.
 
 **STAC**
 

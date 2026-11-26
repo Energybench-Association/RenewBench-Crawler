@@ -300,7 +300,9 @@ class EnergyProcessor(ABC):
                     codes=df_eg[self.code_col] if self.code_col else None,
                     names=df_eg[self.name_col],
                 )
-                df_eg = self._clean_file(df_eg, period)  # HOOK!
+                df_eg, kept_out = self._clean_file(df_eg, period)  # HOOK!
+                for name, rows in kept_out.items():
+                    review.setdefault(name, []).append(rows)
 
                 # Collect EGEs' info from df_eg (distinct values only, latest last) - for STAC
                 df_ege_sysop_file = df_eg[["id", *self.EGE_COLUMNS]]
@@ -379,7 +381,9 @@ class EnergyProcessor(ABC):
         """
         return df_ege_sysop
 
-    def _clean_file(self, df_eg: pd.DataFrame, period: str) -> pd.DataFrame:
+    def _clean_file(
+        self, df_eg: pd.DataFrame, period: str
+    ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         """Check and clean one raw file's rows before they are brought into the layout.
 
         Args:
@@ -387,9 +391,12 @@ class EnergyProcessor(ABC):
             period (str): The local period the file holds, e.g. '2025-07'.
 
         Returns:
-            pd.DataFrame: The rows to process; unchanged by default.
+            tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+                df_eg: The rows to process (unchanged by default), and
+                kept_out: the rows kept out of it for review, by review file name
+                    (e.g. {"repeated_rows": ...}).
         """
-        return df_eg
+        return df_eg, {}
 
     @abstractmethod
     def _prepare_for_zarr(
@@ -626,15 +633,20 @@ class EnergyProcessor(ABC):
             stac_ids (pd.Series): The IDs in the STAC data.
         """
         stac_ids = set(stac_ids.dropna())
-        for unjoined, lacking in (
-            (zarr_ids - stac_ids, "STAC"),
-            (stac_ids - zarr_ids, "Zarr"),
+        for unjoined, problem in (
+            (
+                zarr_ids - stac_ids,
+                "are in the Zarr data but have no STAC record (coordinate finding "
+                "didn't return them)",
+            ),
+            (
+                stac_ids - zarr_ids,
+                "have a STAC record but no row in the Zarr data (none of their raw rows "
+                "reached the data, e.g. all kept out by `_clean_file`)",
+            ),
         ):
             if unjoined:
-                logger.error(
-                    f"{len(unjoined)} EGE IDs have no {lacking} data, e.g. "
-                    f"{sorted(unjoined)[:5]}"
-                )
+                logger.error(f"{len(unjoined)} EGEs {problem}: {sorted(unjoined)[:10]}")
 
     # ------------------------------------------------------------------
     # HELPERS FOR CHILD CLASSES

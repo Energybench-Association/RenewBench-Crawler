@@ -304,7 +304,9 @@ class CenProcessor(EnergyProcessor):
         obsolete_cols = [f"{OFFICIAL_LOCATOR}.id", f"{OFFICIAL_LOCATOR}.name"]
         return df_ege_locators.drop(columns=obsolete_cols)
 
-    def _clean_file(self, df_eg: pd.DataFrame, period: str) -> pd.DataFrame:
+    def _clean_file(
+        self, df_eg: pd.DataFrame, period: str
+    ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         """Clean raw CSVs by removing repeated rows (identical rows, then repeated hours).
 
         Some raw CSVs repeat rows: the *-12-31.csv files of several years hold hours 2-24
@@ -323,14 +325,17 @@ class CenProcessor(EnergyProcessor):
             period (str): The local date the CSV holds, e.g. '2009-12-31'.
 
         Returns:
-            pd.DataFrame: The rows, each configuration's hour once, and none for an
-                EGE's hour whose copies disagree.
+            tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+                df_eg: The rows, each configuration's hour once, and none for an EGE's
+                    hour whose copies disagree, and
+                kept_out: the later copies ("repeated_rows") and all rows of the EGEs'
+                    hours whose copies disagree ("disputed_hours").
         """
         df_eg = df_eg.drop_duplicates()
         key = [CONFIG_COL, "hour"]
-        repeated = df_eg.duplicated(subset=key)
+        repeated = df_eg.duplicated(subset=key).to_numpy()
         if not repeated.any():
-            return df_eg
+            return df_eg, {}
 
         first = df_eg[~repeated].set_index(key)["value"]
         again = df_eg[repeated].set_index(key)["value"]
@@ -340,10 +345,10 @@ class CenProcessor(EnergyProcessor):
         # the EGEs' hours in doubt, and every row of them (all their configurations)
         in_doubt = df_eg.set_index(key).index.isin(again.index[differ])
         ege_hours = df_eg.loc[in_doubt, ["id", "hour"]].drop_duplicates()
-        left_out = pd.MultiIndex.from_frame(df_eg[["id", "hour"]]).isin(
+        disputed = pd.MultiIndex.from_frame(df_eg[["id", "hour"]]).isin(
             pd.MultiIndex.from_frame(ege_hours)
         )
-        if left_out.any():
+        if disputed.any():
             logger.warning(
                 f"{period}: copies of {int(differ.sum())} repeated configuration hours "
                 f"report different values, so these EGEs' hours are left out (NaN): "
@@ -352,9 +357,14 @@ class CenProcessor(EnergyProcessor):
 
         logger.warning(
             f"{period}: {int(repeated.sum())} repeated configuration hours dropped "
-            f"(other plant details), each one's first row kept unless left out."
+            f"(other plant details), each one's first row kept unless left out "
+            f"(all: s. review/)."
         )
-        return df_eg[~repeated.to_numpy() & ~left_out]
+        kept_out = {
+            "repeated_rows": df_eg[repeated & ~disputed],
+            "disputed_hours": df_eg[disputed],
+        }
+        return df_eg[~repeated & ~disputed], kept_out
 
     def _prepare_for_zarr(
         self, df_eg: pd.DataFrame, day: str

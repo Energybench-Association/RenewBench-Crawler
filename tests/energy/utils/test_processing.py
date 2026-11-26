@@ -169,8 +169,22 @@ def test_check_totals_raises_on_lost_values() -> None:
     "zarr_ids, stac_ids, errors",
     [
         ({"a", "b"}, ["a", "b"], []),
-        ({"a", "b"}, ["a"], ["1 EGE IDs have no STAC data, e.g. ['b']"]),
-        ({"a"}, ["a", "c"], ["1 EGE IDs have no Zarr data, e.g. ['c']"]),
+        (
+            {"a", "b"},
+            ["a"],
+            [
+                "1 EGEs are in the Zarr data but have no STAC record (coordinate "
+                "finding didn't return them): ['b']"
+            ],
+        ),
+        (
+            {"a"},
+            ["a", "c"],
+            [
+                "1 EGEs have a STAC record but no row in the Zarr data (none of their "
+                "raw rows reached the data, e.g. all kept out by `_clean_file`): ['c']"
+            ],
+        ),
     ],
 )
 def test_log_unjoined_ids(
