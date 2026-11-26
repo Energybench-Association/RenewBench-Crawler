@@ -75,7 +75,7 @@ build upon primary ones. Here is an overview of the secondary's main sources:
     - [CARMA (Carbon Monitoring for Action)](https://www.cgdev.org/topics/carbon-monitoring-action)
       — **Status:** Inactive | **Latest:** 2010
     - [Wiki-Solar](https://www.wiki-solar.org/)
-      — **Status:** Deprecated (migrated to commercialised [RenewAtlas](https://www.renewatlas.com/)) | **Latest:** 2026
+      — **Status:** Deprecated (migrated to commercialized [RenewAtlas](https://www.renewatlas.com/)) | **Latest:** 2026
   - **More Infos:** [GitHub](https://github.com/wri/global-power-plant-database#combining-multiple-data-sources)
 
 > [!INFO]

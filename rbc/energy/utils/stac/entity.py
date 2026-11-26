@@ -1,0 +1,317 @@
+"""STAC ENTITY FIELDS.
+
+Operator-neutral rules for the STAC energy extension's entity fields (energy:entity_ids,
+energy:entity_type, energy:facility_name), applied to an operator's EGEs before they become
+STAC Items: the entity types allowed (ENTITY_TYPES), the IDs (`entity_ids`) and defining
+the types, incl. the parts of a facility (`EntityTypeDefiner`).
+"""
+
+import json
+import re
+from collections.abc import Mapping
+from itertools import combinations
+from typing import cast
+
+import numpy as np
+import pandas as pd
+
+from rbc.coordinates.mappings import OPERATOR_METADATA
+from rbc.coordinates.utils.tokenizer import NORM_GENERIC_UNIT_TOKENS, NameTokenizer
+from rbc.coordinates.utils.values import normalize_name
+from rbc.energy.utils.stac.base import FieldDefiner
+
+# Set: energy:entity_type values STAC Items may be defined as
+ENTITY_TYPES = frozenset(
+    {"unit", "group", "facility", "portfolio", "region", "unknown"}
+)
+
+MAX_KM: float = 1.0  # how far apart parts of a facility linked by name may lie
+UNIT_TOKENS = frozenset(NORM_GENERIC_UNIT_TOKENS)  # e.g. "bloco"=never in facility_name
+
+
+class EntityTypeDefiner(FieldDefiner):
+    """Define an operator's EGEs' energy:entity_type (s. ENTITY_TYPES).
+
+    From the operator's own values (`map`), and by names and codes the EGEs that are parts
+    of one facility (`find_groups`).
+
+    Attributes:
+        tok (NameTokenizer): The operator's tokenizer, as its coordinate finding has it.
+    """
+
+    FIELD = "entity_type"
+    VALUES = ENTITY_TYPES
+
+    def __init__(self, sysop: str, mapping: Mapping[str, str]) -> None:
+        """Initialize the definer with the operator's map and name vocabulary.
+
+        Args:
+            sysop (str): The operator, e.g. "ons" (for its name vocabulary).
+            mapping (Mapping[str, str]): Map of an operator's value → STAC's type.
+
+        Raises:
+            ValueError: If the map names a value that isn't an entity type, or the
+                operator's vocabulary is per country (e.g. ENTSO-E's), which isn't
+                supported yet.
+        """
+        super().__init__(mapping)
+
+        meta = OPERATOR_METADATA[sysop]
+        if meta["country"] == "Europe":  # a vocabulary per country (s. BasePipeline)
+            raise ValueError(
+                f"'{sysop}' has a name vocabulary per country: not supported."
+            )
+
+        names = cast(dict[str, str], meta.get("name_mapping", {}))
+        self.tok = NameTokenizer(name_mapping={**meta.get("fuel_mapping", {}), **names})
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def find_groups(
+        self, df_ege: pd.DataFrame, active_periods: pd.Series, totals: pd.Series
+    ) -> pd.DataFrame:
+        """Find the EGEs that are parts ('group') of one facility, and name the facility.
+
+        Two EGEs are parts of one facility if both report in a common period, under
+        different names (an identical name is the same EGE listed again, not a part;
+        roman unit numerals count as numbers), and
+        - share a project code (e.g. ANEEL's CEG), or
+        - share their name's discriminator words and lie within MAX_KM.
+        A facility joins all EGEs linked to each other, also through others (A-B, B-C).
+        Its name runs from the first to the last discriminator word all its parts share
+        (s. `_name_facility`), else, if linked by a code, it is the name of the part
+        that generated most. A facility without a name leaves its EGEs as they are.
+
+        Args:
+            df_ege (pd.DataFrame): The candidate EGEs (e.g. single plants, not plant groups),
+                with "id", "entity_name", "code" (missing if none), "lat" and "lon".
+            active_periods (pd.Series): The periods each EGE reports values in (a set,
+                e.g. of months), indexed by ID.
+            totals (pd.Series): Each EGE's total generation, indexed by ID.
+
+        Returns:
+            pd.DataFrame: Indexed by the parts' IDs, with "entity_type" ("group") and
+                "facility_name"; EGEs that aren't a part are left out.
+        """
+        df_ege = df_ege.set_index("id")
+        names = df_ege["entity_name"].where(
+            df_ege["entity_name"].map(lambda n: isinstance(n, str))
+        )
+        df_ege = df_ege.assign(
+            key=names.map(self.tok.get_discriminator_key, na_action="ignore"),
+            tokens=names.map(self.tok.get_canonical_tokens, na_action="ignore"),
+            active_periods=[active_periods.get(i, set()) for i in df_ege.index],
+            total=totals.reindex(df_ege.index).fillna(0.0),
+        )
+
+        parent = {i: i for i in df_ege.index}  # union-find (EGE's link to its facility)
+        by_code: set[str] = set()  # EGEs linked by a code
+        for col in ("code", "key"):
+            for _, members in df_ege.dropna(subset=[col]).groupby(col):
+                for a, b in combinations(members.index, 2):
+                    if self._are_parts(
+                        df_ege.loc[a], df_ege.loc[b], by_name=col == "key"
+                    ):
+                        parent[self._find_root(parent, a)] = self._find_root(parent, b)
+                        if col == "code":
+                            by_code.update((a, b))
+
+        facilities = pd.Series(
+            [self._find_root(parent, i) for i in df_ege.index], index=df_ege.index
+        )
+        rows = {}
+        for _, members in df_ege.groupby(facilities):
+            if len(members) < 2:
+                continue
+
+            linked_by_code = bool(by_code & set(members.index))
+            if name := self._name_facility(members, linked_by_code):
+                rows.update({i: ("group", name) for i in members.index})
+
+        return pd.DataFrame.from_dict(
+            rows, orient="index", columns=["entity_type", "facility_name"]
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _find_root(parent: dict[str, str], i: str) -> str:
+        """Find the facility an EGE belongs to (as the EGE all its links lead to).
+
+        Shortens the links it follows, so later lookups take fewer steps.
+
+        Args:
+            parent (dict[str, str]): Each EGE's link to another of its facility.
+            i (str): The EGE's ID.
+
+        Returns:
+            str: The ID of the EGE that stands for its facility.
+        """
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def _are_parts(self, a: pd.Series, b: pd.Series, by_name: bool) -> bool:
+        """Whether two EGEs that share a code or name key are parts of one facility.
+
+        Args:
+            a (pd.Series): The one EGE (s. `find_groups`).
+            b (pd.Series): The other EGE.
+            by_name (bool): Whether they share a name key (proximity check is necessary)
+                or not (share a code; proximity check is NOT necessary).
+
+        Returns:
+            bool: True if both report in a common period, under different names, and
+                (if linked by name) lie within MAX_KM.
+        """
+        if not a["active_periods"] & b["active_periods"]:
+            return False  # one after the other: the same EGE renamed, not both subparts
+
+        if a["tokens"] == b["tokens"]:
+            return False  # the same name: the same EGE listed twice, not both subparts
+
+        if not by_name:
+            return True
+
+        located = a[["lat", "lon"]].notna().all() and b[["lat", "lon"]].notna().all()
+        return bool(located and self._get_distance_km(a, b) <= MAX_KM)
+
+    def _name_facility(self, members: pd.DataFrame, linked_by_code: bool) -> str | None:
+        """Name a facility after the discriminator words its parts share, else its largest.
+
+        Args:
+            members (pd.DataFrame): The facility's parts (s. `find_groups`).
+            linked_by_code (bool): Whether any of them are linked by a code.
+
+        Returns:
+            str | None: The largest part's name from the first to the last discriminator
+                word all parts share (e.g. "Porto do Pecém" for "Porto do Pecém I" and
+                "II"), widened by adjacent energy words all parts share (e.g. "Fontes
+                Solar", but not "Santana Bloco"); else the largest part's name if linked
+                by a code; else None.
+        """
+        largest = members["entity_name"][members["total"].idxmax()]
+        keys = members["key"]
+        shared = (
+            set.intersection(*(set(k.split()) for k in keys))
+            if keys.notna().all()
+            else set()
+        )
+        words = re.split(r"[\s_]+", largest.strip())  # e.g. "EC_TEC_NIKOLA_TESLA_B1"
+        hits = [
+            i
+            for i, w in enumerate(words)
+            if set((normalize_name(w) or "").split()) & shared
+        ]
+        if not hits:
+            return largest if linked_by_code else None
+
+        every = [
+            {normalize_name(w) for w in re.split(r"[\s_]+", n.strip())}
+            for n in members["entity_name"]
+        ]
+        start, end = hits[0], hits[-1]
+        while start > 0 and self._extends_name(words[start - 1], every):
+            start -= 1
+        while end < len(words) - 1 and self._extends_name(words[end + 1], every):
+            end += 1
+        return " ".join(words[start : end + 1])
+
+    def _extends_name(self, word: str, every: list[set[str]]) -> bool:
+        """Whether a word next to a facility's name joins it: an energy word all parts have.
+
+        Args:
+            word (str): The word before or after the name's words so far.
+            every (list[set[str]]): Each part's name, as a set of normalized words.
+
+        Returns:
+            bool: True if it is an energy word and in every part's name.
+        """
+        return self._is_energy_word(word) and all(
+            normalize_name(word) in words for words in every
+        )
+
+    def _is_energy_word(self, word: str) -> bool:
+        """Whether a word is a generic energy word ("Solar", "Usina"), not a unit word.
+
+        Args:
+            word (str): One word of a name.
+
+        Returns:
+            bool: True if all its tokens are generic and none is a unit word (e.g. "Bloco").
+        """
+        wt = self.tok.weighted_tokenize(word)
+        return (
+            bool(wt.tokens)
+            and all(kind == "generic" for kind in wt.types)
+            and not set(wt.tokens) & UNIT_TOKENS
+        )
+
+    @staticmethod
+    def _get_distance_km(a: pd.Series, b: pd.Series) -> float:
+        """Give the great-circle distance between two EGEs' points in km.
+
+        Args:
+            a (pd.Series): One EGE, with "lat" and "lon".
+            b (pd.Series): The other EGE.
+
+        Returns:
+            float: Their distance in km.
+        """
+        lat1, lon1, lat2, lon2 = np.radians([a["lat"], a["lon"], b["lat"], b["lon"]])
+        h = (
+            np.sin((lat2 - lat1) / 2) ** 2
+            + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2
+        )
+        return float(2 * 6371.0 * np.arcsin(np.sqrt(h)))  # earth's radius = 6371 km
+
+
+def entity_ids(df_ege_locators: pd.DataFrame, own: dict[str, pd.Series]) -> pd.Series:
+    """Collect each EGE's IDs in other systems as JSON (STAC's energy:entity_ids).
+
+    Besides the operator's own IDs, an EGE gets the ID of the source that coordinate
+    finding located it by. Not a sibling, as that ID is its donor's.
+
+    Args:
+        df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them.
+        own (dict[str, pd.Series]): Map of the operator's ID system → each EGE's ID in it.
+
+    Returns:
+        pd.Series: Each EGE's IDs as a JSON object, missing where it has none.
+    """
+    # a locator's columns other than lat/lon/match_method exist only once it matched
+    df = df_ege_locators.reindex(
+        columns=["match_method", "gem.id", "ppdb.id", "osm.id", "osm.type"]
+    )
+    method = df["match_method"].astype("string").fillna("")
+    by = method.str.split("_").str[0].mask(method.str.endswith("_sibling"), "")
+    osm_ids = (
+        df["osm.type"].astype("string")
+        + "/"
+        + pd.to_numeric(df["osm.id"], errors="coerce").astype("Int64").astype("string")
+    )
+    # osm-powerplants' IDs are OSM's ('way/123'), PPM's a row number (todo: 'projectID')
+    ppdb_ids = df["ppdb.id"].astype("string")
+    ppdb_ids = ppdb_ids.where(
+        ppdb_ids.str.fullmatch(r"(node|way|relation)/\d+", na=False)
+    )
+
+    ids = pd.DataFrame(
+        {
+            **own,
+            "gem": df["gem.id"].astype("string").where(by == "gem"),
+            "osm": ppdb_ids.where(by == "ppdb").fillna(osm_ids.where(by == "osm")),
+        },
+        index=df.index,
+    )
+    return pd.Series(
+        [
+            json.dumps(row.dropna().to_dict()) if row.notna().any() else None
+            for _, row in ids.iterrows()
+        ],
+        index=df.index,
+        dtype=object,
+    )

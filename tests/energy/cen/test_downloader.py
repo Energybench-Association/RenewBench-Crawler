@@ -11,12 +11,8 @@ from requests import exceptions
 
 from rbc.energy.cen import CenDownloader
 from rbc.energy.cen.downloader import EXPECTED_COLS
-from rbc.energy.utils import (
-    MAX_RETRIES,
-    DataStructureError,
-    DownloadTask,
-    MissingDataError,
-)
+from rbc.energy.utils.downloading import MAX_RETRIES, DownloadTask
+from rbc.utils.errors import DataStructureError, MissingDataError
 
 
 # ----------------------------------

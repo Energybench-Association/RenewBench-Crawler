@@ -17,7 +17,7 @@ placeholders where secrets or private endpoints belong.
    pip install [-e] .
    ```
 2. For sources that require API tokens or credentials (see the [data sources
-   catalogue](data_sources.md)), make sure you have the necessary information at hand.
+   catalog](data_sources.md)), make sure you have the necessary information at hand.
 
 ## Downloading
 
@@ -64,7 +64,7 @@ performs the following steps:
 1. **Coordinates**: locates each energy generating entity (EGE), from the source's own
    locations where it has any, otherwise via [coordinate finding](coordinate_finding.md).
 2. **Time**: converts the source's timestamps to UTC, keeping every time step (how each
-   source reports time is defined in the [data sources catalogue](data_sources.md)).
+   source reports time is defined in the [data sources catalog](data_sources.md)).
 3. **Data**: writes the generation into the source's versioned
    [Icechunk](https://icechunk.io) repository as `values[entity_id, time]` in MW, then
    commits and tags it with the release. Each temporal resolution of the raw data (its
@@ -88,8 +88,8 @@ systems, bash scripts ending in `.sbatch`.
 Flags include:
 - `-r`/`--release` (required): the release written and published, as
   `v<major>.<minor>.<patch>`. It becomes the repositories' tag and the Collection's
-  suffix (`<source>-<tres>__<release>`). Initial full runs use `v0.1.0`; raise it to
-  publish new data, as a reused release writes nothing new.
+  suffix (`<sysop>-<tres_iso>__<release>`, e.g. `cen-pt1h__v0.1.0`). Initial full runs use
+  `v0.1.0`; raise it to publish new data, as a reused release writes nothing new.
 - `-p`/`--periods`: years or months of raw data to process, e.g. `-p 2024 2025-03`
   (default: all raw files in `dst_dir_raw`). The time axis spans the first to the last
   selected day, so periods with a gap between them leave it empty there.
@@ -186,6 +186,6 @@ current one.
 |--------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Processed data (Icechunk repositories)                                                                             | published: `<lsdf.dst_dir_data>/<bucket>/` (LSDF route) or S3 (S3 route), prefix `energy/<source>/<resolution>/repository`; with `--no-publish`: `<dst_dir_proc>/icechunk/` |
 | Processed metadata (STAC Collection and Items)                                                                     | `<dst_dir_proc>/stac/<source>-<tres>__<release>/` (a static catalog), and when published: `lsdf.dst_dir_inbox` (LSDF route) or the STAC API (S3 route)                      |
-| Rows a processor keeps out of the data for review (s. the source in the [data sources catalogue](data_sources.md)) | `<dst_dir_proc>/review/` (only if there are any)                                                                                                                            |
+| Rows a processor keeps out of the data for review (s. the source in the [data sources catalog](data_sources.md))   | `<dst_dir_proc>/review/` (only if there are any)                                                                                                                            |
 | Coordinate finding results and map                                                                                 | `<dst_dir_proc>/coordinates/`                                                                                                                                               |
 | Logs                                                                                                               | `<dst_dir_proc>/logs/`                                                                                                                                                      |

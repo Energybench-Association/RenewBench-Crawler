@@ -13,15 +13,9 @@ import pandas as pd
 import requests
 from loguru import logger
 
-from rbc.energy.utils import (
-    WORKERS,
-    DataStructureError,
-    DownloadTask,
-    EnergyDownloader,
-    InvalidError,
-    MissingDataError,
-    write_dict_to_json,
-)
+from rbc.energy.utils.downloading import WORKERS, DownloadTask, EnergyDownloader
+from rbc.utils.errors import DataStructureError, InvalidError, MissingDataError
+from rbc.utils.io import write_dict_to_json
 
 TIMEZONE = ZoneInfo("Asia/Tokyo")
 URL_BASE = "https://www.renewable-ei.org/en/statistics/electricity/"

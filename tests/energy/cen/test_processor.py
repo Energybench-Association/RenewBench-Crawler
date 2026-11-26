@@ -24,7 +24,9 @@ from rbc.energy.cen.processor import (
     REGISTRY_RENAMES,
     CenProcessor,
 )
-from rbc.energy.processing import combine_fuels, global_ids
+from rbc.energy.utils import processing
+from rbc.energy.utils.temporal import get_period_bounds
+from rbc.utils.errors import DataStructureError, MissingDataError
 
 RELEASE = "v0.1.0"
 PUBLISH_CFG = PublishConfig(
@@ -98,7 +100,7 @@ def make_processor(
                 "CenCoordinateRegistry",
                 return_value=SimpleNamespace(df_registry=registry_rows),
             ),
-            patch.object(processor, "build_shared_resources", return_value=shared),
+            patch.object(processing, "build_shared_resources", return_value=shared),
         ):
             return CenProcessor(
                 token="token",
@@ -112,6 +114,19 @@ def make_processor(
             )
 
     return _make
+
+
+@pytest.fixture
+def cen(make_processor: Callable[..., CenProcessor]) -> CenProcessor:
+    """A processor whose registry and shared resources are stand-ins.
+
+    Args:
+        make_processor (Callable[..., CenProcessor]): The processor factory.
+
+    Returns:
+        CenProcessor: The processor, with its STAC field definers.
+    """
+    return make_processor()
 
 
 def _region_reg(levels: dict[str, str]) -> RegionRegistry:
@@ -162,7 +177,7 @@ def _gid(key: str) -> str:
     Returns:
         str: Its global ID.
     """
-    return global_ids("cen", pd.Series([key]))[0]
+    return CenProcessor._get_global_ids(pd.Series([key]), pd.Series([key]))[0]
 
 
 def _raw_row(
@@ -272,8 +287,8 @@ def processed(make_processor: Callable, tmp_path: Path) -> tuple[Path, MagicMock
     """
     _write_raw(Path(tmp_path, "raw", "cen", "1h"))
     with (
-        patch.object(processor, "build_map") as mock_map,
-        patch.object(processor, "validate", _skip),
+        patch.object(processing, "build_map") as mock_map,
+        patch.object(processing, "validate", _skip),
     ):
         make_processor(region_reg=_region_reg({})).process_data()
     return Path(tmp_path, "processed", "cen"), mock_map
@@ -292,7 +307,7 @@ def test_registry_columns_renamed(make_processor: Callable) -> None:
     assert set(REGISTRY_RENAMES.values()) <= set(proc.df_registry.columns)
 
 
-def test_join_registry_matches_all_id_formats(make_processor: Callable) -> None:
+def test_add_registry_columns_matches_all_id_formats(make_processor: Callable) -> None:
     """Happy path: an ID matches whether it's read as 28, 28.0 or '28'.
 
     The raw code column is left as is, so the output keeps the IDs CEN wrote, and runs
@@ -303,7 +318,7 @@ def test_join_registry_matches_all_id_formats(make_processor: Callable) -> None:
     """
     df = pd.DataFrame({CODE_COL: [1.0, "2", None]})
 
-    out = make_processor()._join_registry(df, CODE_COL, ["name"])
+    out = make_processor()._add_registry_columns(df, CODE_COL, ["name"])
 
     assert out["official.name"].tolist()[:2] == ["TER ALPHA", "PMGD PFV DOÑA RUBENA"]
     assert pd.isna(out.loc[2, "official.name"])
@@ -313,7 +328,7 @@ def test_join_registry_matches_all_id_formats(make_processor: Callable) -> None:
 # ----------------------------------
 # Tests: official coordinates
 # ----------------------------------
-def test_get_coordinates_become_official(make_processor: Callable) -> None:
+def test_get_own_coordinates_become_official(make_processor: Callable) -> None:
     """Happy path: an EGE found by ID gets the registry's point as official coordinates.
 
     EGEs without registry coordinates (or without an ID) are kept with empty ones, for
@@ -324,7 +339,7 @@ def test_get_coordinates_become_official(make_processor: Callable) -> None:
     """
     df = _ege_rows((1.0, "TER ALPHA"), (4.0, "PE GAMMA"), (None, "BESS BETA"))
 
-    out = make_processor()._get_coordinates(df).set_index(NAME_COL)
+    out = make_processor()._get_own_coordinates(df).set_index(NAME_COL)
 
     assert out.at["TER ALPHA", "official.lat"] == -33.4
     assert out.at["TER ALPHA", "official.match_method"] == "official_id_exact"
@@ -341,7 +356,7 @@ def test_get_coordinates_become_official(make_processor: Callable) -> None:
         ("PMGD PVF DOÑA RUBENA", 2.0),  # a typo: ratio 95
     ],
 )
-def test_get_coordinates_match_stays_if_alike_names(
+def test_get_own_coordinates_match_stays_if_alike_names(
     make_processor: Callable, cen_name: str, code: float
 ) -> None:
     """Happy path: names differing only by a marker or a typo still confirm the ID.
@@ -351,11 +366,11 @@ def test_get_coordinates_match_stays_if_alike_names(
         cen_name (str): CEN's name for the EGE.
         code (float): Its ID.
     """
-    out = make_processor()._get_coordinates(_ege_rows((code, cen_name)))
+    out = make_processor()._get_own_coordinates(_ege_rows((code, cen_name)))
     assert out.loc[0, "official.lat"] == pytest.approx(-33.4 if code == 1 else -35.4)
 
 
-def test_get_coordinates_one_alike_name_is_enough(make_processor: Callable) -> None:
+def test_get_own_coordinates_one_alike_name_is_enough(make_processor: Callable) -> None:
     """Happy path: an ID is doubted only if none of its name variants is alike enough.
 
     Args:
@@ -363,12 +378,12 @@ def test_get_coordinates_one_alike_name_is_enough(make_processor: Callable) -> N
     """
     df = _ege_rows((3.0, "HE QUILLECO"), (3.0, "HE RUCUE"))
 
-    out = make_processor()._get_coordinates(df)
+    out = make_processor()._get_own_coordinates(df)
 
     assert out["official.lat"].notna().all()
 
 
-def test_get_coordinates_match_removed_if_unlike_names(
+def test_get_own_coordinates_match_removed_if_unlike_names(
     make_processor: Callable,
 ) -> None:
     """Happy path: an ID whose names differ loses its registry point, on all its rows.
@@ -381,7 +396,7 @@ def test_get_coordinates_match_removed_if_unlike_names(
     """
     df = _ege_rows((3.0, "HE RUCUE"), (3.0, None), (1.0, "TER ALPHA"))
 
-    out = make_processor()._get_coordinates(df)
+    out = make_processor()._get_own_coordinates(df)
 
     assert out.loc[out[CODE_COL] == 3.0, "official.lat"].isna().all()
     assert out.loc[out[CODE_COL] == 3.0, "official.match_method"].isna().all()
@@ -389,7 +404,7 @@ def test_get_coordinates_match_removed_if_unlike_names(
 
 
 @pytest.mark.parametrize("level, kept", [("mismatch", False), ("within_bounds", True)])
-def test_get_coordinates_match_removed_if_outside_region(
+def test_get_own_coordinates_match_removed_if_outside_region(
     make_processor: Callable, level: str, kept: bool
 ) -> None:
     """Happy path: a registry point clearly outside the registry's own region is dropped.
@@ -405,20 +420,20 @@ def test_get_coordinates_match_removed_if_outside_region(
     proc = make_processor(region_reg=_region_reg({"Biobío": level}))
     df = _ege_rows((3.0, "HE QUILLECO"), (1.0, "TER ALPHA"))
 
-    out = proc._get_coordinates(df).set_index(NAME_COL)
+    out = proc._get_own_coordinates(df).set_index(NAME_COL)
 
     lat = out.at["HE QUILLECO", "official.lat"]
     assert lat == -37.4 if kept else pd.isna(lat)
     assert out.at["TER ALPHA", "official.lat"] == -33.4
 
 
-def test_get_coordinates_match_kept_if_no_region(make_processor: Callable) -> None:
+def test_get_own_coordinates_match_kept_if_no_region(make_processor: Callable) -> None:
     """Happy path: without a region registry, registry points aren't region-checked.
 
     Args:
         make_processor (Callable): Factory for processors.
     """
-    out = make_processor(region_reg=None)._get_coordinates(
+    out = make_processor(region_reg=None)._get_own_coordinates(
         _ege_rows((3.0, "HE QUILLECO"))
     )
     assert out.loc[0, "official.lat"] == -37.4
@@ -599,7 +614,7 @@ def test_collection_describes_the_release(processed: tuple[Path, MagicMock]) -> 
         [{"id": "south-america", "title": "South America"}],
     ]
     assert coll["summaries"]["energy:fuel_type"] == ["hybrid", "storage", "wind"]
-    assert coll["links"][0]["href"] == processor.CEN_TERMS_URL
+    assert coll["links"][0]["href"] == processor.CEN_DATASET.license_url
     assert coll["description"].startswith("Hourly gross generation in MW")
     assert "academic, non-commercial" in coll["description"]
     assert coll["extent"]["temporal"]["interval"] == [
@@ -620,8 +635,8 @@ def test_rerun_reuses_the_releases_tag(
     before = _items(out_dir)[_gid("1")]["assets"]["data"]["icechunk:snapshot"]
 
     with (
-        patch.object(processor, "build_map"),
-        patch.object(processor, "validate", _skip),
+        patch.object(processing, "build_map"),
+        patch.object(processing, "validate", _skip),
     ):
         make_processor(region_reg=_region_reg({})).process_data()
 
@@ -674,9 +689,9 @@ def test_publishing_on_the_lsdf_route(make_processor: Callable, tmp_path: Path) 
     )
     _write_raw(Path(tmp_path, "raw", "cen", "1h"))
     with (
-        patch.object(processor, "build_map"),
-        patch.object(processor, "validate", _skip),
-        patch.object(processor, "publish_stac") as mock_publish,
+        patch.object(processing, "build_map"),
+        patch.object(processing, "validate", _skip),
+        patch.object(processing, "publish_stac") as mock_publish,
     ):
         make_processor(
             region_reg=_region_reg({}), publish_cfg=cfg, publish=True
@@ -696,15 +711,55 @@ def test_publishing_on_the_lsdf_route(make_processor: Callable, tmp_path: Path) 
     assert not Path(tmp_path, "processed", "cen", "icechunk").exists()
 
 
-def test_no_review_file_without_skipped_hours(
-    processed: tuple[Path, MagicMock],
-) -> None:
-    """Happy path: days without a clock change leave nothing for review.
+def test_repeated_rows_kept_for_review(processed: tuple[Path, MagicMock]) -> None:
+    """Happy path: days without a clock change leave only CEN's repeats for review.
 
     Args:
         processed (tuple[Path, MagicMock]): The output directory and the map builder.
     """
-    assert not Path(processed[0], "review").exists()
+    review = Path(processed[0], "review")
+    assert [f.name for f in review.iterdir()] == ["repeated_rows_1h.csv"]
+    repeats = pd.read_csv(Path(review, "repeated_rows_1h.csv"))
+    assert repeats["operator"].tolist() == ["GEN SPA", "GEN SPA"]  # one per day
+
+
+def test_ege_only_in_repeats_is_kept_for_review(
+    make_processor: Callable, tmp_path: Path
+) -> None:
+    """Happy path: an EGE found only in rows the cleaning keeps out stays on record.
+
+    TER DELTA only appears in a repeat of TER ALPHA's configuration, as cen-1978 in
+    CEN's 2025-12-31 file. Its row goes to review, so the EGE isn't forgotten.
+
+    Args:
+        make_processor (Callable): Factory for processors.
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+    raw_dir = Path(tmp_path, "raw", "cen", "1h")
+    _write_raw(raw_dir)
+    path = Path(raw_dir, "2024-01-01.csv")
+    delta = _raw_row(  # TER ALPHA's configuration 10, again under another plant
+        10,
+        9.0,
+        "TER DELTA",
+        "2024-01-01 00:00:00",
+        5.0,
+        50.0,
+        None,
+        "Térmica",
+        "Diésel",
+    )
+    pd.concat([pd.read_csv(path), pd.DataFrame([delta])]).to_csv(path, index=False)
+
+    with (
+        patch.object(processing, "build_map"),
+        patch.object(processing, "validate", _skip),
+    ):
+        make_processor(region_reg=_region_reg({})).process_data()
+
+    review = Path(tmp_path, "processed", "cen", "review")
+    repeats = pd.read_csv(Path(review, "repeated_rows_1h.csv"))
+    assert repeats.loc[repeats[NAME_COL] == "TER DELTA", "id"].tolist() == [_gid("9")]
 
 
 def test_skipped_hour_placeholders_kept_for_review(
@@ -720,21 +775,52 @@ def test_skipped_hour_placeholders_kept_for_review(
 
     def with_placeholder(
         self: CenProcessor, df: pd.DataFrame, day: str
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         out, _ = prepare(self, df, day)
-        return out, df.head(1)  # one row per day, as if its hour had been skipped
+        # one row per day, as if its hour had been skipped
+        return out, {"skipped_hour_placeholders": df.head(1)}
 
     _write_raw(Path(tmp_path, "raw", "cen", "1h"))  # 2024-01-01 and 2024-01-02
     with (
         patch.object(CenProcessor, "_prepare_for_zarr", with_placeholder),
-        patch.object(processor, "build_map"),
-        patch.object(processor, "validate", _skip),
+        patch.object(processing, "build_map"),
+        patch.object(processing, "validate", _skip),
     ):
         make_processor(region_reg=_region_reg({})).process_data()
 
     review = Path(tmp_path, "processed", "cen", "review")
-    assert [f.name for f in review.iterdir()] == ["skipped_hour_placeholders_1h.csv"]
+    assert sorted(f.name for f in review.iterdir()) == [
+        "repeated_rows_1h.csv",
+        "skipped_hour_placeholders_1h.csv",
+    ]
     assert len(pd.read_csv(Path(review, "skipped_hour_placeholders_1h.csv"))) == 2
+
+
+def test_file_error_names_the_file(make_processor: Callable, tmp_path: Path) -> None:
+    """Failure path: an EGE's hour given twice stops processing and names the raw file.
+
+    Args:
+        make_processor (Callable): Factory for processors.
+        tmp_path (Path): Pytest-provided temporary directory.
+    """
+    prepare = CenProcessor._prepare_for_zarr
+
+    def twice(
+        self: CenProcessor, df: pd.DataFrame, day: str
+    ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+        out, kept_out = prepare(self, df, day)
+        return pd.concat([out, out.head(1)]), kept_out
+
+    _write_raw(Path(tmp_path, "raw", "cen", "1h"))  # 2024-01-01 and 2024-01-02
+    with (
+        patch.object(CenProcessor, "_prepare_for_zarr", twice),
+        patch.object(processing, "build_map"),
+        pytest.raises(DataStructureError, match="given twice") as error,
+    ):
+        make_processor(region_reg=_region_reg({})).process_data()
+    assert error.value.__notes__ == [
+        f"Raw file: {Path(tmp_path, 'raw', 'cen', '1h', '2024-01-01.csv')}"
+    ]
 
 
 def test_process_data_without_raw(make_processor: Callable, tmp_path: Path) -> None:
@@ -745,7 +831,7 @@ def test_process_data_without_raw(make_processor: Callable, tmp_path: Path) -> N
         tmp_path (Path): Pytest-provided temporary directory.
     """
     Path(tmp_path, "raw", "cen").mkdir(parents=True)
-    with pytest.raises(ValueError, match="No raw 'cen' data"):
+    with pytest.raises(MissingDataError, match="No raw 'cen' data"):
         make_processor().process_data()
 
 
@@ -759,7 +845,7 @@ def test_process_data_without_raw_for_the_periods(
         tmp_path (Path): Pytest-provided temporary directory.
     """
     _write_raw(Path(tmp_path, "raw", "cen", "1h"))  # 2024-01-01 and 2024-01-02
-    with pytest.raises(ValueError, match=r"No raw 'cen' data .* for \['2023'\]"):
+    with pytest.raises(MissingDataError, match=r"No raw 'cen' data .* for \['2023'\]"):
         make_processor(periods=["2023"]).process_data()
 
 
@@ -811,7 +897,7 @@ def test_local_day_in_utc(day: str, hours: int) -> None:
         day (str): A local date in Chile.
         hours (int): Its expected length in hours.
     """
-    start, end = processor.local_day_in_utc(day)
+    start, end = get_period_bounds(day, CenProcessor.TZ)
     assert (end - start).total_seconds() / 3600 == hours
 
 
@@ -843,7 +929,8 @@ def test_fall_back_sunday_adds_the_repeated_hour_as_hora_25(
         make_processor (Callable): Factory for processors.
     """
     df = _day("2023-04-02", _clock("2023-04-02", list(range(1, 26))))
-    out, placeholders = make_processor()._prepare_for_zarr(df, "2023-04-02")
+    out, review = make_processor()._prepare_for_zarr(df, "2023-04-02")
+    placeholders = review["skipped_hour_placeholders"]
 
     assert out["timestamp"].nunique() == 25
     assert out["timestamp"].min() == pd.Timestamp("2023-04-02 03:00", tz="UTC")
@@ -864,7 +951,8 @@ def test_spring_forward_placeholder_is_kept_out_and_returned(
     """
     df = _day("2023-09-03", _clock("2023-09-03", list(range(1, 25))))
     df.loc[df["hour"] == 1, "value"] = 0.0
-    out, placeholders = make_processor()._prepare_for_zarr(df, "2023-09-03")
+    out, review = make_processor()._prepare_for_zarr(df, "2023-09-03")
+    placeholders = review["skipped_hour_placeholders"]
 
     assert out["timestamp"].nunique() == 23
     assert out["timestamp"].min() == pd.Timestamp("2023-09-03 04:00", tz="UTC")
@@ -892,43 +980,59 @@ def test_hours_that_cant_be_placed_raise(
         rows (list[tuple[str, int]]): The rows' local time and 'hora'.
     """
     df = _day(day, rows).assign(value=[1.0, 2.0][: len(rows)])
-    with pytest.raises(ValueError):
+    with pytest.raises(DataStructureError):
         make_processor()._prepare_for_zarr(df, day)
 
 
 # ----------------------------------
 # Tests: repeated hours
 # ----------------------------------
-def test_repeated_hours_keep_the_first_rows() -> None:
+def test_repeated_hours_keep_the_first_rows(make_processor: Callable) -> None:
     """Happy path: a configuration's hour held again with the same value is dropped.
 
     As in CEN's 31 December files, the repeat carries the plant details of a later
     download, so dropping identical rows leaves it in. The first copy's rows stay.
+
+    Args:
+        make_processor (Callable): Factory for processors.
     """
     day = "2009-12-31"
     first = _day(day, _clock(day, [1, 2, 3])).assign(operator="GEN SA")
     again = _day(day, _clock(day, [2, 3])).assign(operator="GEN SPA")
     df = pd.concat([first, again], ignore_index=True)
 
-    out = CenProcessor._drop_repeated_hours(df, day)
+    out, kept_out = make_processor()._clean_file(df, day)
 
     assert out["hour"].tolist() == [1, 2, 3]
     assert (out["operator"] == "GEN SA").all()
+    assert kept_out["repeated_rows"]["operator"].tolist() == ["GEN SPA", "GEN SPA"]
+    assert kept_out["disputed_hours"].empty
 
 
-def test_fall_back_hour_25_is_not_a_repeat() -> None:
-    """Happy path: 'hora' 25 shares its 00:00 label with 'hora' 1, but is its own hour."""
+def test_fall_back_hour_25_is_not_a_repeat(make_processor: Callable) -> None:
+    """Happy path: 'hora' 25 shares its 00:00 label with 'hora' 1, but is its own hour.
+
+    Args:
+        make_processor (Callable): Factory for processors.
+    """
     day = "2023-04-02"
     df = _day(day, _clock(day, list(range(1, 26))))
 
-    assert len(CenProcessor._drop_repeated_hours(df, day)) == 25
+    out, kept_out = make_processor()._clean_file(df, day)
+    assert len(out) == 25
+    assert kept_out == {}
 
 
-def test_repeated_hour_in_doubt_leaves_the_eges_hour_out() -> None:
+def test_repeated_hour_in_doubt_leaves_the_eges_hour_out(
+    make_processor: Callable,
+) -> None:
     """Happy path: copies that disagree, even by rounding, leave the EGE's hour out.
 
     Neither copy is known to be right. The EGE's other configurations go too, so its
     total for the hour is missing rather than too low; other EGEs keep the hour.
+
+    Args:
+        make_processor (Callable): Factory for processors.
     """
     day = "2017-12-31"
     first = _day(day, _clock(day, [1, 2]))
@@ -937,7 +1041,7 @@ def test_repeated_hour_in_doubt_leaves_the_eges_hour_out() -> None:
     other_ege = _day(day, _clock(day, [1, 2])).assign(id="cen_y", id_opreal=3)
     df = pd.concat([first, again, other_config, other_ege], ignore_index=True)
 
-    out = CenProcessor._drop_repeated_hours(df, day)
+    out, kept_out = make_processor()._clean_file(df, day)
 
     assert sorted(zip(out["id"], out["id_opreal"], out["hour"])) == [
         ("cen_x", 1, 1),
@@ -945,6 +1049,14 @@ def test_repeated_hour_in_doubt_leaves_the_eges_hour_out() -> None:
         ("cen_y", 3, 1),
         ("cen_y", 3, 2),
     ]
+    # the hour's copies of both configurations, the disagreeing repeat included
+    disputed = kept_out["disputed_hours"]
+    assert sorted(zip(disputed["id_opreal"], disputed["hour"])) == [
+        (1, 2),
+        (1, 2),
+        (2, 2),
+    ]
+    assert kept_out["repeated_rows"].empty
 
 
 @pytest.mark.parametrize(
@@ -957,89 +1069,88 @@ def test_repeated_hour_in_doubt_leaves_the_eges_hour_out() -> None:
         ("Térmica", "Cogeneración", ("biomass", "chp")),  # ID 1907: its own fuel
     ],
 )
-def test_stac_fuels(main: str, sub: str | None, fuel: tuple) -> None:
-    """Happy path: CEN's (type, subtype) maps to STAC's fuel as listed in STAC_FUELS.
+def test_stac_fuels(cen: CenProcessor, main: str, sub: str | None, fuel: tuple) -> None:
+    """Happy path: CEN's (type, subtype) maps to STAC's fuel as listed in FUELS_TO_STAC.
 
     Args:
+        cen (CenProcessor): The processor.
         main (str): CEN's 'tipo_tecnologia'.
         sub (str | None): CEN's 'subtipo_tecnologia'.
         fuel (tuple): The expected (fuel_type, fuel_subtype).
     """
-    df = pd.DataFrame(
-        {"id": ["a"], CODE_COL: [1907.0], "fuel_type": [main], "fuel_subtype": [sub]}
-    )
-    out = CenProcessor._stac_fuels(df)
-    assert tuple(out.loc[0, ["fuel_type", "fuel_subtype"]]) == fuel
+    df = pd.DataFrame({"id": ["cen-1907"], "fuel_type": [main], "fuel_subtype": [sub]})
+    out = cen.fuel_def.map(df)
+    assert tuple(out.loc["cen-1907", ["fuel_type", "fuel_subtype"]]) == fuel
 
 
-def test_stac_fuels_ignore_case_and_accents() -> None:
+def test_stac_fuels_ignore_case_and_accents(cen: CenProcessor) -> None:
     """Happy path: CEN's spellings of one technology map alike, one row per EGE.
 
     E.g. 'Cogeneracion' and 'Cogeneración' (CEN uses both), or 'TÉRMICA' and 'Térmica'.
+
+    Args:
+        cen (CenProcessor): The processor.
     """
     df = pd.DataFrame(
         {
-            "id": ["a", "a", "b"],
-            CODE_COL: [1907.0, 1907.0, 5.0],
+            "id": ["cen-1907", "cen-1907", "cen-5"],
             "fuel_type": ["Térmica", "Termica", "TÉRMICA"],
             "fuel_subtype": ["Cogeneración", "Cogeneracion", "Carbón"],
         }
     )
-    out = CenProcessor._stac_fuels(df)
-    assert out[["id", "fuel_type"]].values.tolist() == [["a", "biomass"], ["b", "coal"]]
-    assert out["fuel_subtype"].iloc[0] == "chp"
-    assert pd.isna(
-        out["fuel_subtype"].iloc[1]
-    )  # pandas 3 shows a missing string as NaN
+    out = cen.fuel_def.map(df)
+    assert out["fuel_type"].to_dict() == {"cen-1907": "biomass", "cen-5": "coal"}
+    assert out.loc["cen-1907", "fuel_subtype"] == "chp"
+    assert pd.isna(out.loc["cen-5", "fuel_subtype"])
 
 
-def test_unmapped_vocabulary_raises() -> None:
-    """Failure path: a type or status without a mapping stops processing, all listed."""
+def test_unmapped_vocabulary_raises(cen: CenProcessor) -> None:
+    """Failure path: a type or status without a mapping stops processing, all listed.
+
+    Args:
+        cen (CenProcessor): The processor.
+    """
     df = pd.DataFrame(
         {
-            "id": ["a", "b"],
-            CODE_COL: [1.0, 2.0],
+            "id": ["cen-1", "cen-2"],
             "fuel_type": ["Mareomotriz", "Solar"],
             "fuel_subtype": None,
         }
     )
-    with pytest.raises(ValueError, match="Mareomotriz"):
-        CenProcessor._stac_fuels(df)
-    # a cogeneration plant without its own fuel defined names none: combining raises
+    with pytest.raises(DataStructureError, match="Mareomotriz"):
+        cen.fuel_def.map(df)
+    # a cogeneration plant without its own fuel defined names none
     cogen = pd.DataFrame(
-        {
-            "id": ["c"],
-            CODE_COL: [999.0],
-            "fuel_type": "Térmica",
-            "fuel_subtype": "Cogeneración",
-        }
+        {"id": ["cen-999"], "fuel_type": "Térmica", "fuel_subtype": "Cogeneración"}
     )
-    with pytest.raises(ValueError, match="no fuel type"):
-        combine_fuels(CenProcessor._stac_fuels(cogen))
-    no_terms = pd.Series([None, None, None])
-    with pytest.raises(ValueError, match="En Limbo"):
-        CenProcessor._stac_status(no_terms, pd.Series(["Operativa", "En Limbo", None]))
-    with pytest.raises(ValueError, match="OCULTO"):
-        CenProcessor._stac_status(pd.Series(["OCULTO"]), pd.Series(["Operativa"]))
+    with pytest.raises(DataStructureError, match="cen-999"):
+        cen.fuel_def.map(cogen)
+    with pytest.raises(DataStructureError, match="En Limbo"):
+        cen.status_def.map(pd.Series(["Operativa", "En Limbo", None]))
+    with pytest.raises(DataStructureError, match="OCULTO"):
+        cen.status_def.map(pd.Series(["OCULTO", "NO_MOSTRAR"]))
 
 
 @pytest.mark.parametrize(
-    "term, estado, status",
+    "raw, status",
     [
-        ("NO_MOSTRAR", "Operativa", "decommissioned"),
-        ("No_Mostrar", "Fuera de Servicio", "decommissioned"),
-        ("EN_REVISION", "En Pruebas", "under_construction"),
-        (None, "En Pruebas", "active"),
-        (None, None, None),
+        ("NO_MOSTRAR", "decommissioned"),  # square bracket terms in CEN's name
+        ("No_Mostrar", "decommissioned"),  # spellings compared normalized
+        ("EN_REVISION", "under_construction"),
+        ("En Pruebas", "active"),  # the registry's estados
+        ("Fuera de Servicio", "inactive"),
+        (None, None),
     ],
 )
-def test_stac_status(term: str | None, estado: str | None, status: str | None) -> None:
-    """Happy path: the name's square bracket term decides, else the registry's estado.
+def test_stac_status(cen: CenProcessor, raw: str | None, status: str | None) -> None:
+    """Happy path: a name's square bracket term or the registry's estado maps to STAC's.
+
+    Which of the two decides: s. `test_item_values`.
 
     Args:
-        term (str | None): The square bracket term in CEN's name.
-        estado (str | None): The registry's status.
+        cen (CenProcessor): The processor.
+        raw (str | None): A square bracket term or registry status.
         status (str | None): The expected STAC status.
     """
-    out = CenProcessor._stac_status(pd.Series([term]), pd.Series([estado]))
+    out = cen.status_def.map(pd.Series([raw]))
     assert out.tolist() == [status] if status else out.isna().all()

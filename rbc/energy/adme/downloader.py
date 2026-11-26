@@ -12,15 +12,9 @@ import pandas as pd
 import requests
 from loguru import logger
 
-from rbc.energy.utils import (
-    WORKERS,
-    DataStructureError,
-    DownloadTask,
-    EnergyDownloader,
-    MissingDataError,
-    load_df_from_file,
-    load_excel_from_file,
-)
+from rbc.energy.utils.downloading import WORKERS, DownloadTask, EnergyDownloader
+from rbc.utils.errors import DataStructureError, MissingDataError
+from rbc.utils.io import load_df_from_file, load_excel_from_file
 
 URL_ROOT_NEW = "https://www.adme.com.uy/panelControl/gpf.php"
 URL_BASE_NEW = "https://www.adme.com.uy/panelControl/gpf_excel.php?"

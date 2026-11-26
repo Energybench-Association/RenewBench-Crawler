@@ -9,7 +9,7 @@ from argparse import ArgumentParser, Namespace
 from loguru import logger
 
 from rbc.config.loader import load_config, parse_key_value_pairs
-from rbc.utils import setup_logging
+from rbc.utils.logs import setup_logging
 from rbc.weather.barra import Barra2Downloader
 
 SOURCE = "barra2"

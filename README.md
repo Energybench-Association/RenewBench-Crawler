@@ -54,8 +54,12 @@ The RenewBench-Crawler repository is structured as follows:
 │   │   ├── ieso/                 # IESO (Canada, Ontario)
 │   │   ├── ons/                  # ONS (Brazil)
 │   │   ├── rei/                  # REI (Japan)
-│   │   └── taipower/             # Taipower (Taiwan)
-│   ├── publish/                # Helpers for publishing
+│   │   ├── taipower/             # Taipower (Taiwan)
+│   │   └── utils/                # --- Helpers for energy
+│   ├── publish/                # Shared publishing logic
+│   │   ├── icechunk_store.py     # Icechunk data writing
+│   │   └── stac.py               # STAC metadata writing
+│   ├── utils/                  # --- Helpers for all
 │   └── weather/                # Weather data crawlers
 │       ├── barra/                # BARRA2 (Australia)
 │       ├── era5/                 # ERA5 (Global)
@@ -68,6 +72,7 @@ The RenewBench-Crawler repository is structured as follows:
 │   └── weather/                # Weather source configs (ERA5, ICON-DREAM, ...)
 │
 ├── scripts/                 # CLI entry points
+│   ├── coordinates/            # Scripts for coordinate finding
 │   ├── energy/                 # Scripts for energy sources
 │   └── weather/                # Scripts for weather sources
 │
@@ -89,7 +94,7 @@ The RenewBench-Crawler repository is structured as follows:
 For an overview of what the repository has to offer as well as getting
 started, the following are available:
 
-- [**Data sources catalogue**](docs/data_sources.md):
+- [**Data sources catalog**](docs/data_sources.md):
   Overview of all supported energy and weather data sources, including access
   requirements and links to official docs.
 - [**Usage guide**](docs/guide_usage.md):

@@ -10,7 +10,8 @@ from requests import exceptions
 
 from rbc.energy.cen import registry
 from rbc.energy.cen.registry import CenCoordinateRegistry, add_latlon, utm_to_latlon
-from rbc.energy.utils import MAX_RETRIES, DataStructureError
+from rbc.energy.utils.downloading import MAX_RETRIES
+from rbc.utils.errors import DataStructureError
 
 # a point in Antofagasta (zone 19K) and one in O'Higgins (zone 19H), as CEN formats them
 ANTOFAGASTA = ("300.000", "7.460.000", "19 K")
@@ -153,14 +154,15 @@ def test_download_is_cached_as_the_api_delivers_it(tmp_path: Path) -> None:
     with patch.object(
         registry.requests, "get", return_value=_response([_api_row(1, *ANTOFAGASTA)])
     ):
-        reg = CenCoordinateRegistry(token="token", cache_dir=tmp_path)
+        cen_registry = CenCoordinateRegistry(token="token", cache_dir=tmp_path)
 
     cached = pd.read_csv(next(tmp_path.glob("centrales_*.csv")))
     assert "lat" not in cached.columns
     assert {"coordenada_este", "coordenada_norte", "zona_huso"} <= set(cached.columns)
-    assert (reg.df_registry.loc[0, "lat"], reg.df_registry.loc[0, "lon"]) == (
-        pytest.approx(ANTOFAGASTA_LATLON, abs=1e-4)
-    )
+    assert (
+        cen_registry.df_registry.loc[0, "lat"],
+        cen_registry.df_registry.loc[0, "lon"],
+    ) == (pytest.approx(ANTOFAGASTA_LATLON, abs=1e-4))
 
 
 def test_cache_reads_utm_fields_as_text(tmp_path: Path) -> None:
@@ -194,9 +196,9 @@ def test_download_collects_every_page(tmp_path: Path) -> None:
         _response([_api_row(2, *OHIGGINS), _api_row(3, *ANTOFAGASTA)], total_pages=2),
     ]
     with patch.object(registry.requests, "get", side_effect=pages):
-        reg = CenCoordinateRegistry(token="token", cache_dir=tmp_path)
+        cen_registry = CenCoordinateRegistry(token="token", cache_dir=tmp_path)
 
-    assert sorted(reg.df_registry["id_central"]) == [1, 2, 3]
+    assert sorted(cen_registry.df_registry["id_central"]) == [1, 2, 3]
 
 
 def test_download_retries_a_failed_request(tmp_path: Path) -> None:
@@ -207,10 +209,10 @@ def test_download_retries_a_failed_request(tmp_path: Path) -> None:
     """
     attempts = [exceptions.ConnectionError(), _response([_api_row(1, *ANTOFAGASTA)])]
     with patch.object(registry.requests, "get", side_effect=attempts) as mock_get:
-        reg = CenCoordinateRegistry(token="token", cache_dir=tmp_path)
+        cen_registry = CenCoordinateRegistry(token="token", cache_dir=tmp_path)
 
     assert mock_get.call_count == 2
-    assert len(reg.df_registry) == 1
+    assert len(cen_registry.df_registry) == 1
 
 
 def test_download_gives_up_after_all_retries(tmp_path: Path) -> None:

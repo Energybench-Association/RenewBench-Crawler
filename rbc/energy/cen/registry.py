@@ -11,7 +11,9 @@ from loguru import logger
 from pyproj import Transformer
 
 from rbc.energy.cen.downloader import URL_ROOT
-from rbc.energy.utils import MAX_RETRIES, DataStructureError, load_df_from_file
+from rbc.energy.utils.downloading import MAX_RETRIES
+from rbc.utils.errors import DataStructureError
+from rbc.utils.io import load_df_from_file
 
 # API registry of CEN's EGEs (returns all EGEs incl. retired regardless of requested date)
 URL_REGISTRY = f"{URL_ROOT}centrales/v4/findByDate"
@@ -197,6 +199,6 @@ def utm_to_latlon(easting, northing, zone) -> tuple[float | None, float | None]:
 
 
 if __name__ == "__main__":
-    reg = CenCoordinateRegistry(
+    registry = CenCoordinateRegistry(
         token="<cen_token>", cache_dir=Path("my/path/cen/coordinates")
     )

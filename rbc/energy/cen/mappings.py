@@ -1,5 +1,7 @@
 """CEN MAPPINGS."""
 
+from rbc.energy.utils.stac.fuel import Fuel, RawFuel
+
 # ---------------------------------------------------------------------------
 # Coordinate Finding Definitions (additions/overrides for OPERATOR_METADATA)
 # ---------------------------------------------------------------------------
@@ -88,47 +90,41 @@ for key, value in EGE_NAME_BASE_TRANSLATIONS.items():
 # STAC Definitions (the energy extension's vocabulary)
 # ---------------------------------------------------------------------------
 # ======= FUEL TYPES =======
-# Map: CEN's (tipo_tecnologia, subtipo_tecnologia) → STAC (energy:fuel_type, energy:fuel_subtype).
-STAC_FUELS: dict[tuple[str, str | None], tuple[str, str | None]] = {
-    ("Solar", None): ("solar", "pv"),
-    ("Eólica", None): ("wind", "onshore"),
-    ("Geotérmica", None): ("geothermal", None),
-    ("Hidráulica", "Embalse"): ("hydro", "reservoir"),
-    ("Hidráulica", "Pasada"): ("hydro", "run_of_river"),
-    ("BESS", "Inyección"): ("storage", None),  # discharging
-    ("BESS", "Retiro"): ("storage", None),  # charging
-    ("Térmica", "Carbón"): ("coal", None),
-    ("Térmica", "Gas Natural"): ("gas", None),
-    ("Térmica", "GLP"): ("gas", "lpg"),
-    ("Térmica", "BioGas"): ("gas", "biogas"),
-    ("Térmica", "Diésel"): ("oil", "diesel"),
-    ("Térmica", "Fuel Oil"): ("oil", "fuel_oil"),
-    ("Térmica", "PetCoke"): ("oil", "petcoke"),  # petroleum coke: an oil product (IEA)
-    ("Térmica", "Biomasa"): ("biomass", None),
-    ("Térmica", "Termosolar"): ("solar", "csp"),
+# Map: CEN's (tipo_tecnologia, subtipo_tecnologia) → STAC fuel (s. FuelTypeDefiner)
+FUELS_TO_STAC: dict[RawFuel, Fuel] = {
+    ("Solar", None): Fuel("solar", "pv"),  # = PV; Termosolar (s. below) = CSP
+    ("Eólica", None): Fuel("wind"),  # unknown if on- or offshore
+    ("Geotérmica", None): Fuel("geothermal"),
+    ("Hidráulica", "Embalse"): Fuel("hydro", "reservoir"),
+    ("Hidráulica", "Pasada"): Fuel("hydro", "run_of_river"),
+    ("BESS", "Inyección"): Fuel("storage"),  # discharging
+    ("BESS", "Retiro"): Fuel("storage"),  # charging
+    ("Térmica", "Carbón"): Fuel("coal"),
+    ("Térmica", "Gas Natural"): Fuel("gas"),
+    ("Térmica", "GLP"): Fuel("gas", "lpg"),
+    ("Térmica", "BioGas"): Fuel("gas", "biogas"),
+    ("Térmica", "Diésel"): Fuel("oil", "diesel"),
+    ("Térmica", "Fuel Oil"): Fuel("oil", "fuel_oil"),
+    ("Térmica", "PetCoke"): Fuel("oil", "petcoke"),  # petroleum coke
+    ("Térmica", "Biomasa"): Fuel("biomass"),
+    ("Térmica", "Termosolar"): Fuel("solar", "csp"),
 }
-
-# CEN's combination for combined heat and power.
-COGENERATION = ("Térmica", "Cogeneración")
-# Map: CEN plant ID → STAC (energy:fuel_type, energy:fuel_subtype), for the plants CEN
-# reports only as COGENERATION
-STAC_COGENERATION_FUELS: dict[int, tuple[str, str | None]] = {
-    397: ("wasteheat", "chp"),  # TER PLANTA DE ACIDO SULFURICO MEJILLONES: process heat
-    1844: ("biomass", "chp"),  # TER ARAUCO MAPA: pulp mill
-    1907: ("biomass", "chp"),  # TER NUEVA ALDEA: pulp mill (biomass, black liquor)
+# Manual map: CEN's combination w/o fuel → each EGE's own STAC fuel, by its global ID
+FUELS_PER_EGE_TO_STAC: dict[RawFuel, dict[str, Fuel]] = {
+    ("Térmica", "Cogeneración"): {  # combined heat and power
+        "cen-397": Fuel("wasteheat", "chp"),  # PLANTA DE ACIDO SULFURICO MEJILLONES
+        "cen-1844": Fuel("biomass", "chp"),  # ARAUCO MAPA (pulp mill)
+        "cen-1907": Fuel("biomass", "chp"),  # NUEVA ALDEA (pulp mill, black liquor)
+    },
 }
 
 # ======= STATUSES =======
-# Map: square bracket term in CEN's name (the EGE's true status, before the registry's)
-STAC_NAME_STATUSES: dict[str, str] = {
+# Map: CEN's status → STAC status
+STATUSES_TO_STAC = {
+    # square bracket term in CEN's 'central' (name) = the true status, before 'estado'
     "NO_MOSTRAR": "decommissioned",
-    "No_Mostrar": "decommissioned",
     "EN_REVISION": "under_construction",
-    "En_Revision": "under_construction",
-}
-
-# Map: CEN registry's 'estado'.
-STAC_STATUSES: dict[str, str] = {
+    # the CEN registry's 'estado' (status)
     "Operativa": "active",
     "Operativa – Autodespacho DS88": "active",  # self-dispatched small plant (DS 88)
     "En Pruebas": "active",  # generating, in commissioning tests

@@ -116,18 +116,7 @@ class DefaultPipeline(BasePipeline):
             Returns:
                 str | None: The base key if it can be found, otherwise None.
             """
-            clean_name = strip_str(name)
-            if clean_name is None:
-                return None
-
-            wt = self.tok.weighted_tokenize(clean_name)
-            full_tokens = [
-                tok
-                for tok, ttype in zip(wt.tokens, wt.types)
-                if ttype == "discriminator"
-            ]
-            base = " ".join(full_tokens).strip()
-            return base or None
+            return self.tok.get_discriminator_key(strip_str(name))
 
         return df[SYSOP_NAME_COL].map(
             lambda v: f"name_base:{k}" if (k := _base_key(v)) else None

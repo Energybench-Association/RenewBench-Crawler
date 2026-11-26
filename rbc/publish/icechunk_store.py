@@ -3,6 +3,7 @@
 Write an operator's generation time series into its versioned Icechunk repository (Zarr
 v3), in MW, on a regular UTC axis at the data's own temporal resolution (e.g. hourly,
 15-minutely), one repository per resolution and one tagged snapshot per release.
+Where a repository lives (local, LSDF or S3) follows the publish config.
 """
 
 import os
@@ -16,10 +17,8 @@ import pandas as pd
 import xarray as xr
 from loguru import logger
 
-from rbc.energy.utils import TRES_PATTERN
-
-# Map: the resolution's unit → its ISO 8601 duration, e.g. "15min" → "PT15M"
-ISO_DURATIONS = {"min": "PT{}M", "h": "PT{}H", "d": "P{}D"}
+from rbc.config.schema import PublishConfig
+from rbc.utils.errors import InvalidError
 
 
 @dataclass(frozen=True)
@@ -55,84 +54,73 @@ class StorageInfo:
         return f"{str(self.url_public).rstrip('/')}/{self.bucket}/{self.prefix}"
 
 
-def resolution(tres: str) -> tuple[pd.Timedelta, str]:
-    """Read a raw data directory's temporal resolution.
-
-    Args:
-        tres (str): The directory's name, as DownloadTask names it, e.g. "1h", "15min".
-
-    Returns:
-        tuple[pd.Timedelta, str]: The time step, and its ISO 8601 duration (e.g.
-            "PT1H", "PT15M"), as repository prefixes and STAC name it.
-
-    Raises:
-        ValueError: If the name isn't a temporal resolution.
-    """
-    if not (match := TRES_PATTERN.fullmatch(tres)):
-        raise ValueError(
-            f"'{tres}' isn't a temporal resolution such as '1h' or '15min'."
-        )
-    count, unit = match.groups()
-    step = pd.Timedelta(int(count), unit="D" if unit == "d" else unit)  # 'd' deprecated
-    return step, ISO_DURATIONS[unit].format(int(count))
-
-
-def repo_prefix(source: str, tres: str) -> str:
-    """Give an operator's repository prefix for one temporal resolution.
-
-    Args:
-        source (str): Name of the system operator, e.g. "entsoe".
-        tres (str): Name of its raw data directory, e.g. "15min".
-
-    Returns:
-        str: e.g. "energy/entsoe/PT15M/repository".
-    """
-    return f"energy/{source}/{resolution(tres)[1]}/repository"
-
-
-def open_repository(
-    prefix: str,
-    local_dir: Path | None = None,
-    endpoint: str | None = None,
-    bucket: str | None = None,
-) -> ic.Repository:
-    """Open (or create) a repository on S3, or in a local directory.
+def get_storage_location(
+    prefix: str, publish_cfg: PublishConfig, publish: bool, local_dir: Path
+) -> StorageInfo:
+    """Give a repository's location: the published one if publishing, else a local one.
 
     Args:
         prefix (str): Repository prefix, e.g. "energy/cen/PT1H/repository".
-        local_dir (Path | None, optional): Directory for a local repository. Defaults to
-            None, which stores it on S3.
-        endpoint (str | None, optional): S3 endpoint to write to. Defaults to None.
-        bucket (str | None, optional): S3 bucket. Defaults to None.
+        publish_cfg (PublishConfig): Where releases are published.
+        publish (bool): Whether the release is published.
+        local_dir (Path): Directory for an unpublished repository.
+
+    Returns:
+        StorageInfo: The repository's location.
+    """
+    if publish:
+        return StorageInfo(
+            prefix=prefix, bucket=publish_cfg.bucket, url_public=publish_cfg.url_public
+        )
+    return StorageInfo(prefix=prefix, local_dir=local_dir)
+
+
+def open_or_create_repository(
+    storage: StorageInfo, publish_cfg: PublishConfig | None = None
+) -> ic.Repository:
+    """Open the repository at a location, or create it there.
+
+    A local repository lives in its `local_dir`. A published one goes on the config's
+    route: `<lsdf.dst_dir_data>/<bucket>/<prefix>` for LSDF, else S3.
+
+    Args:
+        storage (StorageInfo): The repository's location (s. `get_storage_location`).
+        publish_cfg (PublishConfig | None, optional): Where releases are published, only
+            needed for a published repository. Defaults to None.
 
     Returns:
         ic.Repository: The opened repository.
 
     Raises:
-        ValueError: If neither a local directory nor an S3 endpoint and bucket is given,
-            or if the S3 credentials are not set.
+        InvalidError: If a published repository has no config, no S3 endpoint and
+            bucket, or the S3 credentials are not set.
     """
-    if local_dir is not None:
-        path = Path(local_dir, prefix)
-        path.mkdir(parents=True, exist_ok=True)
-        return ic.Repository.open_or_create(ic.local_filesystem_storage(str(path)))
+    if storage.local_dir is not None:
+        path = Path(storage.local_dir, storage.prefix)
+    elif publish_cfg is None:
+        raise InvalidError(f"Publishing '{storage.prefix}' needs the publish config.")
+    elif publish_cfg.route == "lsdf":
+        path = Path(publish_cfg.lsdf.dst_dir_data, publish_cfg.bucket, storage.prefix)
+    else:
+        endpoint, bucket = publish_cfg.s3.url_endpoint, publish_cfg.bucket
+        if not (endpoint and bucket):
+            raise InvalidError("An S3 repository needs an endpoint and a bucket.")
+        key, secret = os.environ.get("S3_ACCESS_KEY"), os.environ.get("S3_SECRET_KEY")
+        if not (key and secret):
+            raise InvalidError("Set S3_ACCESS_KEY and S3_SECRET_KEY to write to S3.")
+        s3 = ic.s3_storage(
+            bucket=bucket,
+            prefix=storage.prefix,
+            endpoint_url=endpoint,
+            allow_http=endpoint.startswith("http://"),
+            force_path_style=True,
+            access_key_id=key,
+            secret_access_key=secret,
+        )
+        return ic.Repository.open_or_create(s3)
 
-    if not (endpoint and bucket):
-        raise ValueError("An S3 repository needs an endpoint and a bucket.")
-    key, secret = os.environ.get("S3_ACCESS_KEY"), os.environ.get("S3_SECRET_KEY")
-    if not (key and secret):
-        raise ValueError("Set S3_ACCESS_KEY and S3_SECRET_KEY to write to S3.")
-
-    storage = ic.s3_storage(
-        bucket=bucket,
-        prefix=prefix,
-        endpoint_url=endpoint,
-        allow_http=endpoint.startswith("http://"),
-        force_path_style=True,
-        access_key_id=key,
-        secret_access_key=secret,
-    )
-    return ic.Repository.open_or_create(storage)
+    path.mkdir(parents=True, exist_ok=True)
+    return ic.Repository.open_or_create(ic.local_filesystem_storage(str(path)))
 
 
 class EnergyIcechunkWriter:
@@ -166,7 +154,7 @@ class EnergyIcechunkWriter:
         step: pd.Timedelta,
         chunks: tuple[int, int],
     ):
-        """Create the release's empty array, or find its existing tag.
+        """Initialize Icechunk writer, creating the release's empty array or finding its tag.
 
         Args:
             repo (ic.Repository): The repository to write to.
@@ -178,8 +166,8 @@ class EnergyIcechunkWriter:
             chunks (tuple[int, int]): Chunk shape (EGEs, time steps).
 
         Raises:
-            ValueError: If the EGE IDs repeat, or an existing tag holds other EGEs or
-                another time axis.
+            ValueError: If the EGE IDs repeat.
+            InvalidError: If an existing tag holds other EGEs or another time axis.
         """
         if len(set(entities)) != len(entities):
             raise ValueError("EGE IDs along 'entity_id' must be unique.")
@@ -189,7 +177,7 @@ class EnergyIcechunkWriter:
         self.entities = list(entities)
         self.step = step
         self.times = pd.date_range(
-            _utc_naive(start), _utc_naive(end), freq=step, inclusive="left"
+            _to_utc_naive(start), _to_utc_naive(end), freq=step, inclusive="left"
         )
         self._chunk_steps = chunks[1]
         self._entity_index = pd.Index(self.entities)
@@ -265,7 +253,7 @@ class EnergyIcechunkWriter:
             raise ValueError(
                 f"EGE IDs not in the release: {sorted(set(ids[unknown]))[:5]}"
             )
-        steps = self.times.get_indexer(_utc_naive(timestamps))
+        steps = self.times.get_indexer(_to_utc_naive(timestamps))
         if (outside := steps < 0).any():
             raise ValueError(
                 f"Timestamps not on the release's time axis: "
@@ -388,22 +376,27 @@ class EnergyIcechunkWriter:
         (e.g. until 2025 vs until 2026) is caught.
 
         Raises:
-            ValueError: If the tag's EGEs or time axis differ from this run's.
+            InvalidError: If the tag's EGEs or time axis differ from this run's.
         """
         session = self.repo.readonly_session(tag=self.tag)
         stored = xr.open_zarr(session.store, consolidated=False)
         if [str(e) for e in stored["entity_id"].values] != self.entities:
-            raise ValueError(
+            raise InvalidError(
                 f"Release '{self.tag}' exists with other EGEs: raise the release."
             )
         if not pd.DatetimeIndex(stored["time"].values).equals(self.times):
-            raise ValueError(
+            raise InvalidError(
                 f"Release '{self.tag}' exists with another time axis: raise the release."
             )
 
 
-def _utc_naive(timestamps: pd.Series | pd.Timestamp) -> pd.DatetimeIndex | pd.Timestamp:
-    """Give UTC timestamps without their time zone, as the Zarr time axis stores them.
+def _to_utc_naive(
+    timestamps: pd.Series | pd.Timestamp,
+) -> pd.DatetimeIndex | pd.Timestamp:
+    """Convert tz-aware timestamps to naive UTC, as the Zarr time axis stores them.
+
+    Any zone works; naive input counts as UTC already. `temporal.to_utc` goes the other
+    way: naive local times to tz-aware UTC.
 
     Args:
         timestamps (pd.Series | pd.Timestamp): tz-aware (any zone) or naive UTC times.

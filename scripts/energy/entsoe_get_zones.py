@@ -28,7 +28,7 @@ from entsoe.query.decorators import ServiceUnavailableError
 from entsoe.utils import mappings
 from loguru import logger
 
-from rbc.utils import setup_logging
+from rbc.utils.logs import setup_logging
 
 
 class EntsoeBZCollector:

@@ -15,14 +15,8 @@ import requests
 from box_sdk_gen import BoxClient, BoxDeveloperTokenAuth, FileBaseTypeField
 from loguru import logger
 
-from rbc.energy.utils import (
-    WORKERS,
-    DataStructureError,
-    DownloadTask,
-    EnergyDownloader,
-    InvalidError,
-    MissingDataError,
-)
+from rbc.energy.utils.downloading import WORKERS, DownloadTask, EnergyDownloader
+from rbc.utils.errors import DataStructureError, InvalidError, MissingDataError
 
 URL_ROOT = "https://api.box.com/2.0/folders/196731538687/items"
 URL_BASE = "https://aeso.app.box.com/s/qofgn9axnnw6uq3ip1goiq2ngb11txe5"

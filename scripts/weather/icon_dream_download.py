@@ -12,7 +12,7 @@ from argparse import ArgumentParser
 from loguru import logger
 
 from rbc.config.loader import load_config, parse_key_value_pairs
-from rbc.utils import setup_logging
+from rbc.utils.logs import setup_logging
 from rbc.weather.icon_dream import IconDreamDownloader
 
 

@@ -19,12 +19,8 @@ from rbc.energy.aemo.downloader import (
     VALID_NETWORKS,
     _get_start_date,
 )
-from rbc.energy.utils import (
-    DataStructureError,
-    DownloadTask,
-    InvalidError,
-    MissingDataError,
-)
+from rbc.energy.utils.downloading import DownloadTask
+from rbc.utils.errors import DataStructureError, InvalidError, MissingDataError
 
 
 # ----------------------------------

@@ -15,13 +15,8 @@ import requests
 from eptr2 import EPTR2
 from loguru import logger
 
-from rbc.energy.utils import (
-    DataStructureError,
-    DownloadTask,
-    EnergyDownloader,
-    InvalidError,
-    MissingDataError,
-)
+from rbc.energy.utils.downloading import DownloadTask, EnergyDownloader
+from rbc.utils.errors import DataStructureError, InvalidError, MissingDataError
 
 WORKERS = 2  # needs to be reduced to prevent repeated throttling errors
 

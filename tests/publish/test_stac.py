@@ -2,6 +2,9 @@
 """Tests for a release's STAC Collection and Items."""
 
 import json
+import subprocess
+import tomllib
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -13,15 +16,19 @@ from rbc.publish import stac
 from rbc.publish.icechunk_store import StorageInfo
 
 INFO = stac.DatasetInfo(
-    dataset="op",
-    title="Operator {tres} generation",
-    description="{Tres} test data.",
+    sysop="op",
+    title="Operator {tres_verbose} generation",
+    description="{Tres_verbose} test data.",
     license="proprietary",
     license_url="https://example.org/terms",
-    providers=[{"name": "Operator", "roles": ["producer", "licensor"]}],
+    providers=[
+        {"name": "Operator", "roles": ["producer", "licensor"]},
+        {"name": "Processor", "roles": ["processor", "host"]},
+    ],
     citation="Operator: generation data.",
-    values="{Tres} gross generation (MW)",
-    system_operator="Grid Operator",
+    lineage="{Tres_verbose} values converted to UTC.",
+    values="{Tres_verbose} gross generation (MW)",
+    sysop_long="Grid Operator",
     countries={"CL": "Chile", "AR": "Argentina"},
     continents=["South America"],
     keywords=["Somewhere"],
@@ -77,19 +84,9 @@ def _built(df: pd.DataFrame | None = None) -> tuple[dict, list[dict]]:
     Returns:
         tuple[dict, list[dict]]: The Collection and the Items.
     """
-    items = stac.build_items(
-        _rows() if df is None else df, SPANS, INFO, "v0.1.0", STORAGE, "SNAP", "PT1H"
-    )
-    coll = stac.build_collection(
-        INFO,
-        "v0.1.0",
-        items,
-        STORAGE,
-        "SNAP",
-        entities=ENTITIES,
-        times=TIMES,
-        step="PT1H",
-    )
+    builder = stac.EnergyStacBuilder(INFO, "v0.1.0", STORAGE, "SNAP", "PT1H")
+    items = builder.build_items(_rows() if df is None else df, SPANS)
+    coll = builder.build_collection(items, entities=ENTITIES, times=TIMES)
     return coll, items
 
 
@@ -176,27 +173,130 @@ def test_collection_describes_the_repository() -> None:
     assert item_links == ["./items/op_a.json", "./items/op_b.json"]
 
 
+def test_collection_states_the_lineage() -> None:
+    """Happy path: the processor carries the lineage, which closes the description."""
+    coll, _ = _built()
+
+    operator, processor = coll["providers"]
+    assert "processing:lineage" not in operator
+    assert processor["processing:lineage"] == "Hourly values converted to UTC."
+    assert coll["description"] == "Hourly test data.\n\nHourly values converted to UTC."
+    assert processor["processing:software"] == stac.get_software()
+    assert stac.PROCESSING_EXT in coll["stac_extensions"]
+
+
+def test_software_is_the_projects_from_pyproject() -> None:
+    """Happy path: the software is named and versioned as the repo's pyproject.toml has it."""
+    stac.get_software.cache_clear()
+    (name, version_commit) = stac.get_software().popitem()
+    project = tomllib.loads(stac.PYPROJECT.read_text())["project"]
+    assert name == project["name"]
+    assert version_commit.split("+g")[0] == project["version"]
+    stac.get_software.cache_clear()
+
+
 @pytest.mark.parametrize(
-    "step, word",
-    [("PT1H", "hourly"), ("PT15M", "15-minute"), ("P1D", "daily"), ("PT3H", "3-hour")],
+    "git, expected",
+    [
+        (MagicMock(stdout="4176167\n"), "0.0.1+g4176167"),
+        (subprocess.CalledProcessError(128, "git"), "0.0.1"),  # not a git checkout
+        (FileNotFoundError("git"), "0.0.1"),  # no git installed
+    ],
 )
-def test_texts_name_the_resolution(step: str, word: str) -> None:
-    """Happy path: the dataset's texts and keywords name the time step in words.
+def test_software_version_adds_the_commit(
+    tmp_path: Path, git: object, expected: str
+) -> None:
+    """Happy path: the project's version gets the git commit, where there is one.
 
     Args:
-        step (str): The time step as an ISO 8601 duration.
-        word (str): How the texts name it.
+        tmp_path (Path): Pytest's temporary directory, for a pyproject.toml.
+        git (object): What running git gives: its output, or the error it raises.
+        expected (str): The version expected.
     """
-    info = INFO.for_resolution(step)
-    assert info.title == f"Operator {word} generation"
-    assert info.description == f"{word.capitalize()} test data."
-    assert info.values == f"{word.capitalize()} gross generation (MW)"
-    assert info.keywords == ["Somewhere", word]
-    assert stac.collection_id("op", step, "v0.1.0") == f"op-{step.lower()}__v0.1.0"
+    pyproject = Path(tmp_path, "pyproject.toml")
+    pyproject.write_text('[project]\nname = "Some-Crawler"\nversion = "0.0.1"\n')
+    stac.get_software.cache_clear()
+    run = {"side_effect": git} if isinstance(git, Exception) else {"return_value": git}
+    with (
+        patch.object(stac, "PYPROJECT", pyproject),
+        patch.object(stac.subprocess, "run", **run),
+    ):
+        assert stac.get_software() == {"Some-Crawler": expected}
+    stac.get_software.cache_clear()
+
+
+def test_software_without_pyproject_is_unknown(tmp_path: Path) -> None:
+    """Failure path: without pyproject.toml, the import package is named, version unknown.
+
+    Args:
+        tmp_path (Path): Pytest's temporary directory, without a pyproject.toml.
+    """
+    stac.get_software.cache_clear()
+    with (
+        patch.object(stac, "PYPROJECT", Path(tmp_path, "pyproject.toml")),
+        patch.object(stac.subprocess, "run", side_effect=FileNotFoundError("git")),
+    ):
+        assert stac.get_software() == {"rbc": "unknown"}
+    stac.get_software.cache_clear()
+
+
+def test_collection_without_processor_raises() -> None:
+    """Failure path: without a processor provider, the lineage has nowhere to go."""
+    info = replace(INFO, providers=INFO.providers[:1])
+    with pytest.raises(ValueError, match="processor"):
+        stac.EnergyStacBuilder(
+            info, "v0.1.0", STORAGE, "SNAP", "PT1H"
+        ).build_collection(_built()[1], ENTITIES, TIMES)
+
+
+@pytest.mark.parametrize(
+    "notice, licenses",
+    [
+        (None, ["https://example.org/terms"]),
+        (
+            "https://example.org/data#notice",
+            ["https://example.org/terms", "https://example.org/data#notice"],
+        ),
+    ],
+)
+def test_collection_links_the_license_notice(
+    notice: str | None, licenses: list[str]
+) -> None:
+    """Happy path: a source's license notice, if any, is a second license link.
+
+    Args:
+        notice (str | None): Where the source states its license.
+        licenses (list[str]): The Collection's license links expected.
+    """
+    info = replace(INFO, license_notice_url=notice)
+    builder = stac.EnergyStacBuilder(info, "v0.1.0", STORAGE, "SNAP", "PT1H")
+    coll = builder.build_collection(_built()[1], ENTITIES, TIMES)
+
+    assert [ln["href"] for ln in coll["links"] if ln["rel"] == "license"] == licenses
+
+
+@pytest.mark.parametrize(
+    "tres_iso, tres_verbose",
+    [("PT1H", "hourly"), ("PT15M", "15-minute"), ("P1D", "daily"), ("PT3H", "3-hour")],
+)
+def test_texts_name_the_resolution(tres_iso: str, tres_verbose: str) -> None:
+    """Happy path: the dataset's texts and keywords name the resolution in words.
+
+    Args:
+        tres_iso (str): The resolution as an ISO 8601 duration.
+        tres_verbose (str): How the texts name it.
+    """
+    info = INFO.for_resolution(tres_iso)
+    assert info.title == f"Operator {tres_verbose} generation"
+    assert info.description == f"{tres_verbose.capitalize()} test data."
+    assert info.values == f"{tres_verbose.capitalize()} gross generation (MW)"
+    assert info.keywords == ["Somewhere", tres_verbose]
+    cid = stac._collection_id("op", tres_iso, "v0.1.0")
+    assert cid == f"op-{tres_iso.lower()}__v0.1.0"
 
 
 def test_texts_reject_other_durations() -> None:
-    """Failure path: a month (ISO 8601 "P1M") isn't a time step the texts can name."""
+    """Failure path: a month (ISO 8601 "P1M") isn't a resolution the texts can name."""
     with pytest.raises(ValueError, match="P1M"):
         INFO.for_resolution("P1M")
 
@@ -225,7 +325,8 @@ def test_validate_names_the_invalid_record() -> None:
 def test_ege_without_values_gets_no_item() -> None:
     """Happy path: an EGE with no value at all has no span, so no Item."""
     df = _rows(id=["op_a", "op_c"])
-    items = stac.build_items(df, SPANS, INFO, "v0.1.0", STORAGE, "SNAP", "PT1H")
+    builder = stac.EnergyStacBuilder(INFO, "v0.1.0", STORAGE, "SNAP", "PT1H")
+    items = builder.build_items(df, SPANS)
     assert [it["id"] for it in items] == ["op_a"]
 
 

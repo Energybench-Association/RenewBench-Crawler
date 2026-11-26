@@ -13,7 +13,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from rbc.config.schema import SCHEMA_REGISTRY
-from rbc.energy.utils import DATE_PATTERN
+from rbc.energy.utils.downloading import DATE_PATTERN
 
 ROOT_DIR: Path = Path(__file__).resolve().parents[2]
 CONFIGS_DIR: Path = Path(ROOT_DIR, "configs")

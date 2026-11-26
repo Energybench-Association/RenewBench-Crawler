@@ -16,7 +16,7 @@ from rbc.coordinates.match_schema import PPDB_SCHEMA, MatchCandidate
 from rbc.coordinates.utils.country import normalize_locator_countries
 from rbc.coordinates.utils.resources import fetch_resource
 from rbc.coordinates.utils.values import strip_str
-from rbc.energy.utils import load_df_from_file
+from rbc.utils.io import load_df_from_file
 
 PPM_URL = (
     "https://raw.githubusercontent.com/PyPSA/powerplantmatching/refs/heads/master/"

@@ -18,7 +18,8 @@ from rbc.energy.adme.downloader import (
     URL_BASE_NEW,
     URL_BASE_OLD,
 )
-from rbc.energy.utils import DataStructureError, DownloadTask, MissingDataError
+from rbc.energy.utils.downloading import DownloadTask
+from rbc.utils.errors import DataStructureError, MissingDataError
 
 
 # ----------------------------------

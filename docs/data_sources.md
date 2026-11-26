@@ -1,4 +1,4 @@
-# Data Source Catalogue
+# Data Source Catalog
 
 This document provides an overview of sources for both energy generation
 and meteorological data that can be downloaded and processed via the
@@ -16,7 +16,7 @@ RenewBench-Crawler package.
 | **Canada<br> (Alberta)** | AESO     | downloader &check;                      | hourly/5 min; per plant  | `box` API token   | [Website](https://www.aeso.ca/market/market-and-system-reporting/data-requests/historical-generation-data/), [Data hosting](https://aeso.app.box.com/s/qofgn9axnnw6uq3ip1goiq2ngb11txe5/folder/196731538687), <br> [API how-to](https://developer.box.com/guides/authentication/tokens/developer-tokens) (s. details!) |
 | **Canada<br> (Ontario)** | IESO     | downloader &check;                      | hourly; per plant        | public            | [Website](https://www.ieso.ca/power-data/data-directory)                                                                                                                                                                                                                                                               |
 | **Chile**                | CEN      | downloader &check;<br>processor &check; | hourly; per plant        | API token         | [Website](https://www.coordinador.cl/reportes-y-estadisticas/#Estadisticas), [API site](https://portal.api.coordinador.cl/documentacion?service=sipubv2), <br> [API usage docs](https://cartas.coordinador.cl/download_anexos/66c7447c35635715c87c4271/0)                                                              |
-| **Brazil**               | ONS      | downloader &check;                      | hourly; per plant        | public            | [Website](https://dados.ons.org.br/dataset/geracao-usina-2), Data hosting on AWS S3                                                                                                                                                                                                                                    |
+| **Brazil**               | ONS      | downloader &check;<br>processor &check; | hourly; per plant        | public            | [Website](https://dados.ons.org.br/dataset/geracao-usina-2), Data hosting on AWS S3                                                                                                                                                                                                                                    |
 | **Uruguay**              | ADME     | downloader &check;                      | hourly; per plant        | public            | [Website](https://www.adme.com.uy/controlpanel.php), Data hosting [old](https://www.adme.com.uy/gpf_historico.php) / [new](https://www.adme.com.uy/panelControl/gpf.php)                                                                                                                                               |
 | **Australia**            | AEMO     | downloader &check;                      | hourly/5 min; per plant  | API token         | [Website](https://www.aemo.com.au/),<br> [Python package](https://github.com/opennem/openelectricity-python), [API docs](https://docs.openelectricity.org.au/)                                                                                                                                                         |
 | **New<br>Zealand**       | EAT      | downloader &check;                      | 30 min; per plant        | public            | [Website / Data hosting](https://www.ea.govt.nz/data-and-insights/datasets/wholesale/generation/generation-output/)                                                                                                                                                                                                    |
@@ -304,6 +304,26 @@ RenewBench-Crawler package.
   `valor_ernc` - ERNC compliance value or generation contribution qualified under
   renewable targets
 
+**Processing** (`python -m scripts.energy.cen_process`, s. [usage guide](guide_usage.md))
+
+General:
+- Access: an API token is required to access the CEN plant registry for location finding.
+- Coordinates: taken from CEN's plant registry first. A plant whose registry name differs
+  from CEN's `central`, or whose registry point lies outside its own registry region, is
+  left to [coordinate finding](coordinate_finding.md).
+- Translations: Spanish to English for fuel types, status definition and names (for name
+  matching).
+- Mappings ([`rbc/energy/cen/mappings.py`](../rbc/energy/cen/mappings.py)):
+  - status: square bracket terms in `central` and `estado` to `STATUSES_TO_STAC`.
+    A square bracket term in `central` (e.g. `[NO_MOSTRAR]`) is the EGE's true status and
+    overrides `estado`.
+  - fuel: `tipo_tecnologia`/`subtipo_tecnologia` to `FUELS_TO_STAC`; cogeneration
+    (`Térmica/Cogeneración`) names no fuel, so each such plant's own is listed there.
+
+Columns:
+- IDs: `cen-<id_central>`, or `cen-<central>` (lowercase, dashes) for a plant without one.
+- Values: a plant reported in several configurations gets their sum (s. STAC
+  `entity_type`). A battery's charging (`Retiro`) counts as negative.
 - Time: each file is one local day (`America/Santiago`, incl. Chile's DST), and `hora` k
   (1-24) is its local clock hour k-1 (`fecha_hora` = date + (`hora`-1) mod 24 hours).
   Around DST changes, CEN reports:
@@ -314,35 +334,35 @@ RenewBench-Crawler package.
     placeholder for the skipped hour. Its real hours are `hora` 2-24, following straight on
     from Saturday's last.
 
+  All hours are converted to UTC accordingly.
+- Repeats: the `*-12-31.csv` files of several years hold hours 2-24 again, with the plant
+  details of later years. A configuration's later copies of an hour are kept out of the
+  data (`<dst_dir_proc>/review/repeated_rows_<tres>.csv`); where the copies' values
+  disagree, the plant's whole hour is (`disputed_hours_<tres>.csv`). A plant only found in
+  such rows (e.g. `cen-1978`) has an empty row in the repository and no Item for now.
+
 **STAC**
 
+General:
+- `license`: `'proprietary'`, linking CEN's terms of use (s. Access); the Collections'
+  description states "academic, non-commercial use".
+- `processing:lineage`: the changes made to CEN's data (s. Processing); on the
+  EnergyBench provider and repeated at the end of the description.
+- `processing:software`: the project's name and version from `pyproject.toml`, with the git commit (e.g.
+  `0.0.1+g4176167`), on the EnergyBench provider.
+
+Energy extension:
 - `measurement_type`: `'gross_output'`
   - According to the [API documentation v2.0](https://www.coordinador.cl/wp-content/uploads/2023/11/Uso_Api_SIP__Sistema_Informacion_Publica_-v2.0.pdf)
     (p. 57, `generacion-real`): "La Generación Real del Sistema Eléctrico Nacional,
     corresponde a la Potencia bruta real del sistema, medida en MW" (= the real *gross*
-    power). Its endpoints deliver raw data, "sin agregaciones ni transformaciones".
+    power). Its endpoints deliver raw data: "sin agregaciones ni transformaciones".
 - `entity_type`: `'facility'`
   - A `central` (`id_central`) is a physical plant. It may be reported in several
     operating configurations (`id_opreal`, e.g. one per unit combination and fuel mode),
     which run at the same time, so the processor sums them per plant and hour.
-- `license`: `'proprietary'`, linking CEN's terms of use (s. Access); the Collections'
-  description states "academic, non-commercial use".
-
-**Processing** (`python -m scripts.energy.cen_process`, s. [usage guide](guide_usage.md))
-
-- Access: an API token is required to access the CEN plant registry for location finding.
-- Coordinates: taken from CEN's plant registry first. A plant whose registry name differs
-  from CEN's `central`, or whose registry point lies outside its own registry region, is
-  left to [coordinate finding](coordinate_finding.md).
-- IDs: `cen-<id_central>`, or `cen-<central>` (lowercase, dashes) for a plant without one.
-- Values: a plant reported in several configurations gets their sum (s. STAC
-  `entity_type`). A battery's charging (`Retiro`) counts as negative.
-- Time: converted to UTC as described above.
-- Vocabulary: `tipo_tecnologia`/`subtipo_tecnologia` and the registry's `estado` map to
-  STAC's fuel types and statuses in [`rbc/energy/cen/mappings.py`](../rbc/energy/cen/mappings.py)
-  (`STAC_FUELS`, `STAC_COGENERATION_FUELS`, `STAC_STATUSES`). A square bracket term in
-  `central` (e.g. `[NO_MOSTRAR]`) is the EGE's true status and overrides `estado`
-  (`STAC_NAME_STATUSES`).
+- `fuel_type`/`fuel_subtype`: using defined mapping.
+- `status`: using defined mapping.
 
 </details>
 
@@ -387,6 +407,96 @@ RenewBench-Crawler package.
   `ceg` - unique generation project identifier assigned by ANEEL (Brazilian regulator)
 
   `val_geracao` - generation in MWmed (average MW over the time interval; equivalent to MWh for hourly data)
+
+**Processing** (`python -m scripts.energy.ons_process`, s. [usage guide](guide_usage.md))
+
+General:
+- Coordinates: ONS has no plant registry, so all EGEs go through
+  [coordinate finding](coordinate_finding.md).
+- Translations: Portuguese to English of fuel types and name words (for name matching).
+- Mappings ([`rbc/energy/ons/mappings.py`](../rbc/energy/ons/mappings.py)):
+  - operation mode: `cod_modalidadeoperacao` to `ENTITY_TYPES_TO_STAC` and
+    `MEASUREMENT_TYPES_TO_STAC`.
+  - fuel: `nom_tipousina`/`nom_tipocombustivel` to `FUELS_TO_STAC`.
+    `TÉRMICA/Outras Multi-Combustível` (only per-area groups of small thermal plants, fuels
+    not stated) = fuel type `'unknown'`. Wind gets no subtype (no onshore/offshore
+    distinction).
+
+  A combination or mode without a mapping stops processing to ensure new ones (e.g. ONS's
+  multi-fuel types and MMGD groups from 2025) are classified before they are published.
+
+Columns:
+- IDs: `ons-<id_ons>` (lowercase, dashes).
+- Values: `val_geracao` as reported (the hour's average in MW). Missing values stay missing.
+- Time: the local clock (`America/Sao_Paulo`, incl. Brazil's DST until 2019; checked on
+  2000 and 2018). Around DST changes, ONS reports:
+  - clocks set forward (Sunday 00:00 → 01:00): the skipped 00:00 has no rows.
+  - clocks set back (Sunday 00:00 → Saturday 23:00): the repeated 23:00 has only **one**
+    row per plant for two real hours, and its values don't tell which hour it is.
+
+  All hours are converted to UTC accordingly. The repeated hour's one row is left out
+  (both real hours missing) and kept in `<dst_dir_proc>/review/repeated_hour_rows_<tres>.csv`.
+
+**STAC**
+
+General:
+- `license`: `'CC-BY'`, as ONS's legal notice on the dataset page names it, without a
+  version (so not an SPDX ID). The Collections link the license
+  ONS links (the [Open Definition 2.1](http://opendefinition.org/od/2.1/pt-br/)) and the
+  [notice itself](https://dados.ons.org.br/dataset/geracao-usina-2#:~:text=Aviso,br).
+- `processing:lineage`: the changes made to ONS's data as required per CC-BY (on
+  the EnergyBench provider and repeated at the end of the description).
+- `processing:software`: the project's name and version from `pyproject.toml`, with the git commit (e.g.
+  `0.0.1+g4176167`), on the EnergyBench provider.
+
+Energy extension:
+- `entity_ids`: `id_ons` (`ons`) and, where ONS gives a valid one, ANEEL's `ceg` (`ceg`;
+  several EGEs can share one, e.g. Itaipu's 50 Hz and 60 Hz sides).
+- `measurement_type`: ONS provides data for different operating modes (Tipo) of power
+  plants in `cod_modalidadeoperacao`. Measurement types depend on these.
+  - `'gross_output'` for single EGEs (!= Tipo III) and `Conjunto de Usinas` EGE groups.
+    - The dataset contains ONS's "geração verificada" (verified generation), hourly per EGE.
+      ONS's grid procedures define that term as gross active energy in MWh/h per plant as per
+      [Submódulo 6.5](https://proxyportais.ons.org.br/ons.portalempregado.proxy/garapi/api/processo/retornarpdf?url=/sites/soumaisons/portalgar/ecmpdf/Subm%C3%B3dulo%206.5-PR_2025.06.pdf)
+      (rev. 2025.06, 1.1.2 (a): "montante de geração de energia ativa bruta, em MWh/h,
+      verificada, por usina"). The glossary of ONS's [monthly wind bulletins](https://www.ons.org.br/AcervoDigitalDocumentosEPublicacoes/Boletim%20Mensal%20de%20Gera%C3%A7%C3%A3o%20E%C3%B3lica%202021-01.pdf)
+      agrees (measured on the low-voltage side of the step-up transformers, i.e. at the
+      generator).
+    - Besides single EGEs, ONS reports `Conjunto de Usinas` groups (Tipo II-C EGEs grouped in
+      ONS's operating adjustments)
+  - `'forecast_output'` for all `Tipo III` EGEs and `Pequenas Usinas (Tipo III)` EGE groups
+    - Another form of groups are `Pequenas Usinas (Tipo III)` (groups of small EGEs
+      without a relationship to ONS).
+      According to the [dataset description](https://dados.ons.org.br/dataset/geracao-usina-2)
+      and the [data dictionary](https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/geracao_usina_2_ho/DicionarioDados_GeracaoPorUsina.pdf)
+      (p. 1), these small EGE groups' values are defined as being generation **forecasts**
+      ("os dados são referentes a previsões de geração"). Single Tipo III EGEs are taken as
+      forecasts too, since ONS’s reason (no relationship to ONS) applies to them as well.
+  - `'unknown'` for MMGD EGE groups
+    - In newer years, specific groups have emerged: `Pequenas Usinas (MMGD)`
+      (micro and mini distributed generation, i.e. small distributed PV, grouped per area).
+      It is unclear how these get their values.
+- `entity_type`:
+  - `'portfolio'` for single EGEs never; for EGE groups per default.
+  - `'facility'` for single EGEs per default; for EGE groups if a single location was found
+    for it.
+  - `'group'` (with `energy:facility_name`) for single EGEs that belong to one facility
+    (s. [`EntityTypeDefiner.find_groups`](../rbc/energy/utils/stac/entity.py)); for EGE groups
+    never.
+    - Requirements:
+      - report in a common month under different names.
+      - share a `ceg` code as the same project (e.g. Itaipu 50 Hz / 60 Hz) OR share name's
+        discriminator words AND are located ≤ 1 km apart (e.g. Angra I / II).
+    - Excluded:
+      - EGEs that were re-coded or renamed (e.g. Manauara → Pirarucu: same `ceg`, no
+        common month)
+      - EGEs listed twice under one name (e.g. two Itumbiara EGEs in adjacent states;
+        Termonorte I / 1).
+    - `facility_name` definition: use shared words in EGEs' names, from the first to last
+      discriminator word (e.g. "Porto do Pecém" for Porto do Pecém I / II). If `ceg` match
+      without any shared words in names, use EGE name with largest output (e.g. "Belo Monte"
+      for Belo Monte / Pimental).
+- `fuel_type`/`fuel_subtype`: using defined mapping.
 
 </details>
 
@@ -617,7 +727,7 @@ RenewBench-Crawler package.
   `name` – generating unit
 
   `capacity` – installed nameplate capacity (nominal capacity of a plant or sum of capacities
-  of all plants in a unit)
+  of all EGEs in a unit)
 
   `output` – net power generation (amount generated by a unit = total gross generation −
   power consumption within the plant)
@@ -710,7 +820,7 @@ BARRA2 is a regional reanalysis produced by the Australian Bureau of Meteorology
 **Access**
 
 - Platform: [Copernicus Climate Data Store / ECMWF](https://cds.climate.copernicus.eu/)
-- Dataset example: [ERA5 reanalysis data catalogue](https://apps.ecmwf.int/data-catalogues/era5/?type=an&class=ea&stream=oper&expver=1)
+- Dataset example: [ERA5 reanalysis data catalog](https://apps.ecmwf.int/data-catalogues/era5/?type=an&class=ea&stream=oper&expver=1)
 - Docs: [How to download ERA5](https://confluence.ecmwf.int/display/CKB/How+to+download+ERA5)
 - Requirements: personal CDS API key ([how to get a token](https://cds.climate.copernicus.eu/how-to-api))
 
