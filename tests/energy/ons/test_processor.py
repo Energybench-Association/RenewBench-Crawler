@@ -114,16 +114,16 @@ def test_hours_that_cant_be_placed_raise(
 # Tests: STAC fields
 # ----------------------------------
 def test_stac_fuels_hybrid_and_unknown(proc: OnsProcessor) -> None:
-    """Happy and failure path: two technologies make a hybrid, unmapped ones raise.
+    """Happy and failure path: two fuel types make a hybrid, unmapped ones raise.
 
     Args:
         proc (OnsProcessor): The processor.
     """
     df = pd.DataFrame(
         {
-            "id": ["a", "b"],
-            "fuel_type": ["EOLIELÉTRICA", "TÉRMICA"],
-            "fuel_subtype": ["Fotovoltaica", "Óleo Diesel"],
+            "id": ["a", "a", "b"],
+            "fuel_type": ["EOLIELÉTRICA", "FOTOVOLTAICA", "TÉRMICA"],
+            "fuel_subtype": ["Eólica", "Fotovoltaica", "Óleo Diesel"],
         }
     )
     out = proc.fuel_def.map(df)
@@ -132,9 +132,27 @@ def test_stac_fuels_hybrid_and_unknown(proc: OnsProcessor) -> None:
         ["oil", "diesel", "-"],
     ]
 
-    df.loc[1, "fuel_subtype"] = "Unknown fuel"
+    df.loc[2, "fuel_subtype"] = "Unknown fuel"
     with pytest.raises(DataStructureError, match="Unknown fuel"):
         proc.fuel_def.map(df)
+
+
+def test_stac_fuels_of_ons_special_cases(proc: OnsProcessor) -> None:
+    """Happy path: Folha Larga's solar label is wind, unstated thermal fuels unknown.
+
+    Args:
+        proc (OnsProcessor): The processor.
+    """
+    df = pd.DataFrame(
+        {
+            "id": ["a", "b"],
+            "fuel_type": ["EOLIELÉTRICA", "TÉRMICA"],
+            "fuel_subtype": ["Fotovoltaica", "Outras Multi-Combustível"],
+        }
+    )
+    out = proc.fuel_def.map(df)
+    assert out["fuel_type"].to_dict() == {"a": "wind", "b": "unknown"}
+    assert out["fuel_subtype"].isna().all()
 
 
 def test_ege_fields_by_operating_mode(proc: OnsProcessor) -> None:

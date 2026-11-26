@@ -1080,7 +1080,7 @@ def test_unmapped_vocabulary_raises(cen: CenProcessor) -> None:
     "raw, status",
     [
         ("NO_MOSTRAR", "decommissioned"),  # square bracket terms in CEN's name
-        ("No_Mostrar", "decommissioned"),
+        ("No_Mostrar", "decommissioned"),  # spellings compared normalized
         ("EN_REVISION", "under_construction"),
         ("En Pruebas", "active"),  # the registry's estados
         ("Fuera de Servicio", "inactive"),

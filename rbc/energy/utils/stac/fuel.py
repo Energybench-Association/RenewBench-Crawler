@@ -21,13 +21,13 @@ FUELS: dict[str, set[str]] = {
     "hydro": {"reservoir", "run_of_river"},
     "nuclear": set(),
     "oil": {"diesel", "fuel_oil", "petcoke"},
-    "other": {"thermal"},
     "peat": set(),
     "solar": {"csp", "pv"},
     "storage": set(),
     "waste": {"industrial"},
     "wasteheat": {"chp"},
     "wind": {"offshore", "onshore"},
+    "unknown": set(),  # e.g. a group of EGEs without clear member fueltypes
 }
 
 
@@ -51,7 +51,6 @@ class Fuel:
 
 
 RawFuel = tuple[str, str | None]  # Sysops's original reported fuel (type, subtype)
-Fuels = Fuel | tuple[Fuel, ...]  # One STAC fuel or several (a hybrid)
 
 
 class FuelTypeDefiner:
@@ -63,36 +62,29 @@ class FuelTypeDefiner:
     punctuation) before being compared, as operators may spell the same fuel in several ways.
 
     Attributes:
-        fuels (dict[Hashable, tuple[Fuel, ...]]): Map of normalized reported fuels
-            (type, subtype) → its STAC fuels.
-        fuels_per_ege (dict[Hashable, dict[str, tuple[Fuel, ...]]]): Map of normalized
-            reported non-classifiable fuels (type, subtype) → each EGE's STAC fuels by its ID.
+        fuels (dict[Hashable, Fuel]): Map of normalized reported fuels (type, subtype) →
+            its STAC fuel.
+        fuels_per_ege (dict[Hashable, dict[str, Fuel]]): Map of normalized reported
+            non-classifiable fuels (type, subtype) → each EGE's STAC fuel by its ID.
     """
 
     def __init__(
         self,
-        fuels: dict[RawFuel, Fuels],
-        fuels_per_ege: dict[RawFuel, dict[str, Fuels]] | None = None,
+        fuels: dict[RawFuel, Fuel],
+        fuels_per_ege: dict[RawFuel, dict[str, Fuel]] | None = None,
     ) -> None:
         """Initialize the definer with the operator's fuels.
 
         Args:
-            fuels (dict[RawFuel, Fuels]): Map of reported, classifiable fuels (type, subtype)
-                → their STAC equivalents. If there are several "type"s, the EGE is a hybrid.
-            fuels_per_ege (dict[RawFuel, dict[str, Fuels]] | None, optional): Nested map of
+            fuels (dict[RawFuel, Fuel]): Map of reported, classifiable fuels (type, subtype)
+                → their STAC equivalents.
+            fuels_per_ege (dict[RawFuel, dict[str, Fuel]] | None, optional): Nested map of
                 reported non-classifiable fuels (type, subtype) → the EGE's global IDs and
                 their specific STAC fuels. This is for fuels that aren't proper types in
                 themselves (e.g. cogeneration) and EGEs that report them. Defaults to None.
         """
-        self.fuels = normalize_keys(
-            {raw: self._as_tuple(f) for raw, f in fuels.items()}
-        )
-        self.fuels_per_ege = normalize_keys(
-            {
-                raw: {id: self._as_tuple(f) for id, f in f_by_ege.items()}
-                for raw, f_by_ege in (fuels_per_ege or {}).items()
-            }
-        )
+        self.fuels = normalize_keys(fuels)
+        self.fuels_per_ege = normalize_keys(fuels_per_ege or {})
 
     def map(self, df: pd.DataFrame) -> pd.DataFrame:
         """Get each EGE's STAC fuel fields from its reported fuels.
@@ -123,16 +115,16 @@ class FuelTypeDefiner:
             )
             key = normalize_key(raw)
             if key in self.fuels_per_ege:
-                fuels = self.fuels_per_ege[key].get(ege_id)
-                if fuels is None:
+                fuel = self.fuels_per_ege[key].get(ege_id)
+                if fuel is None:
                     unknown.add((*raw, ege_id))  # as the operator spells it
                     continue
             elif key in self.fuels:
-                fuels = self.fuels[key]
+                fuel = self.fuels[key]
             else:
                 unknown.add(raw)
                 continue
-            rows.extend((ege_id, fuel.type, fuel.subtype) for fuel in fuels)
+            rows.append((ege_id, fuel.type, fuel.subtype))
 
         if unknown:
             listed = sorted(unknown, key=str)
@@ -170,15 +162,3 @@ class FuelTypeDefiner:
             orient="index",
             columns=["fuel_type", "fuel_subtype", "hybrid_fuel_types"],
         )
-
-    @staticmethod
-    def _as_tuple(fuels: Fuels) -> tuple[Fuel, ...]:
-        """Turn fuel(s) into a tuple of one or several Fuel items (several = hybrid).
-
-        Args:
-            fuels (Fuels): The STAC fuels - a single one or several (already as a tuple).
-
-        Returns:
-            tuple[Fuel, ...]: The STAC fuels as a tuple.
-        """
-        return (fuels,) if isinstance(fuels, Fuel) else fuels

@@ -1,6 +1,6 @@
 """ONS MAPPINGS."""
 
-from rbc.energy.utils.stac.fuel import Fuel, Fuels, RawFuel
+from rbc.energy.utils.stac.fuel import Fuel, RawFuel
 
 # ---------------------------------------------------------------------------
 # Coordinate Finding Definitions (additions/overrides for OPERATOR_METADATA)
@@ -87,10 +87,10 @@ for key, value in EGE_NAME_BASE_TRANSLATIONS.items():
 # ---------------------------------------------------------------------------
 # ======= FUEL TYPES =======
 # Map: ONS's (nom_tipousina, nom_tipocombustivel) → STAC fuel (s. FuelTypeDefiner)
-FUELS_TO_STAC: dict[RawFuel, Fuels] = {
-    ("HIDROELÉTRICA", "Hidráulica"): Fuel("hydro"),  # ONS can't tell dam from river
-    ("EOLIELÉTRICA", "Eólica"): Fuel("wind", "onshore"),
-    ("FOTOVOLTAICA", "Fotovoltaica"): Fuel("solar", "pv"),
+FUELS_TO_STAC: dict[RawFuel, Fuel] = {
+    ("HIDROELÉTRICA", "Hidráulica"): Fuel("hydro"),  # unknown if dam or river
+    ("EOLIELÉTRICA", "Eólica"): Fuel("wind"),  # unknown if on- or offshore
+    ("FOTOVOLTAICA", "Fotovoltaica"): Fuel("solar", "pv"),  # photovoltaic = PV
     ("NUCLEAR", "Nuclear"): Fuel("nuclear"),
     ("TÉRMICA", "Biomassa"): Fuel("biomass"),
     ("TÉRMICA", "Carvão"): Fuel("coal"),
@@ -98,13 +98,12 @@ FUELS_TO_STAC: dict[RawFuel, Fuels] = {
     ("TÉRMICA", "Óleo Combustível"): Fuel("oil", "fuel_oil"),
     ("TÉRMICA", "Óleo Diesel"): Fuel("oil", "diesel"),
     ("TÉRMICA", "Multi-Combustível Diesel/Óleo"): Fuel("oil"),  # diesel or fuel oil
-    ("TÉRMICA", "Outras Multi-Combustível"): Fuel("other", "thermal"),  # not stated
-    # pulp mills (black liquor) and steel mills (process gases); todo: per plant?
+    # --- industrial waste: pulp mills (=biomass) and steel mills (=process gases)
     ("TÉRMICA", "Resíduos Industriais"): Fuel("waste", "industrial"),
-    ("EOLIELÉTRICA", "Fotovoltaica"): (
-        Fuel("wind", "onshore"),
-        Fuel("solar", "pv"),
-    ),  # Conj. Folha Larga = wind plant combined with solar (later corrected to only wind)
+    # --- no specific type: some small groups of thermal plants (Peq Usinas Tipo III)
+    ("TÉRMICA", "Outras Multi-Combustível"): Fuel("unknown"),
+    # --- error in ONS: "Conj. Folha Larga" = "wind" EGE, but defined as (wind, pv) in 2020
+    ("EOLIELÉTRICA", "Fotovoltaica"): Fuel("wind"),
 }
 
 # ======= ENTITY TYPES =======

@@ -54,7 +54,8 @@ DEFINER = FuelTypeDefiner(
     fuels={
         ("Térmica", "Carbón"): Fuel("coal"),
         ("Térmica", "Diésel"): Fuel("oil", "diesel"),
-        ("Eólica", "Fotovoltaica"): (Fuel("wind", "onshore"), Fuel("solar", "pv")),
+        ("Eólica", None): Fuel("wind"),
+        ("Solar", None): Fuel("solar", "pv"),
     },
     fuels_per_ege={("Térmica", "Cogeneración"): {"op-1": Fuel("biomass", "chp")}},
 )
@@ -80,7 +81,8 @@ def test_fuel_definer_maps_spellings_hybrids_and_per_ege_fuels() -> None:
             ("op-5", "Térmica", "Carbón"),  # the same fuel again: once
             ("op-6", "Térmica", "Carbón"),  # configurations with two fuels: a hybrid
             ("op-6", "Térmica", "Diésel"),
-            ("op-7", "Eólica", "Fotovoltaica"),  # one pair naming two fuels: a hybrid
+            ("op-7", "Eólica", None),  # a wind and a solar configuration: a hybrid
+            ("op-7", "Solar", None),
             ("op-1", "Térmica", "Cogeneración"),
         )
     )

@@ -412,10 +412,10 @@ General:
 - Mappings ([`rbc/energy/ons/mappings.py`](../rbc/energy/ons/mappings.py)):
   - operation mode: `cod_modalidadeoperacao` to `ENTITY_TYPES_TO_STAC` and
     `MEASUREMENT_TYPES_TO_STAC`.
-  - fuel: `nom_tipousina`/`nom_tipocombustivel` to `FUELS_TO_STAC` (a pair with two fuels
-    makes a hybrid).
-    `TÉRMICA/Outras Multi-Combustível` (thermal, fuels not stated) = fuel type
-    `'other'` with subtype `'thermal'`.
+  - fuel: `nom_tipousina`/`nom_tipocombustivel` to `FUELS_TO_STAC`.
+    `TÉRMICA/Outras Multi-Combustível` (only per-area groups of small thermal plants, fuels
+    not stated) = fuel type `'unknown'`. Wind gets no subtype (no onshore/offshore
+    distinction).
 
   A combination or mode without a mapping stops processing to ensure new ones (e.g. ONS's
   multi-fuel types and MMGD groups from 2025) are classified before they are published.

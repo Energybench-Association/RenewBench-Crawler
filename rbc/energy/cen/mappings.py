@@ -1,6 +1,6 @@
 """CEN MAPPINGS."""
 
-from rbc.energy.utils.stac.fuel import Fuel, Fuels, RawFuel
+from rbc.energy.utils.stac.fuel import Fuel, RawFuel
 
 # ---------------------------------------------------------------------------
 # Coordinate Finding Definitions (additions/overrides for OPERATOR_METADATA)
@@ -91,9 +91,9 @@ for key, value in EGE_NAME_BASE_TRANSLATIONS.items():
 # ---------------------------------------------------------------------------
 # ======= FUEL TYPES =======
 # Map: CEN's (tipo_tecnologia, subtipo_tecnologia) → STAC fuel (s. FuelTypeDefiner)
-FUELS_TO_STAC: dict[RawFuel, Fuels] = {
-    ("Solar", None): Fuel("solar", "pv"),
-    ("Eólica", None): Fuel("wind", "onshore"),
+FUELS_TO_STAC: dict[RawFuel, Fuel] = {
+    ("Solar", None): Fuel("solar", "pv"),  # = PV; Termosolar (s. below) = CSP
+    ("Eólica", None): Fuel("wind"),  # unknown if on- or offshore
     ("Geotérmica", None): Fuel("geothermal"),
     ("Hidráulica", "Embalse"): Fuel("hydro", "reservoir"),
     ("Hidráulica", "Pasada"): Fuel("hydro", "run_of_river"),
@@ -109,8 +109,8 @@ FUELS_TO_STAC: dict[RawFuel, Fuels] = {
     ("Térmica", "Biomasa"): Fuel("biomass"),
     ("Térmica", "Termosolar"): Fuel("solar", "csp"),
 }
-# Manual map: CEN's combination w/o fuel → each plant's own STAC fuel, by its global ID
-FUELS_PER_EGE_TO_STAC: dict[RawFuel, dict[str, Fuels]] = {
+# Manual map: CEN's combination w/o fuel → each EGE's own STAC fuel, by its global ID
+FUELS_PER_EGE_TO_STAC: dict[RawFuel, dict[str, Fuel]] = {
     ("Térmica", "Cogeneración"): {  # combined heat and power
         "cen-397": Fuel("wasteheat", "chp"),  # PLANTA DE ACIDO SULFURICO MEJILLONES
         "cen-1844": Fuel("biomass", "chp"),  # ARAUCO MAPA (pulp mill)
@@ -123,9 +123,7 @@ FUELS_PER_EGE_TO_STAC: dict[RawFuel, dict[str, Fuels]] = {
 STATUSES_TO_STAC = {
     # square bracket term in CEN's 'central' (name) = the true status, before 'estado'
     "NO_MOSTRAR": "decommissioned",
-    "No_Mostrar": "decommissioned",
     "EN_REVISION": "under_construction",
-    "En_Revision": "under_construction",
     # the CEN registry's 'estado' (status)
     "Operativa": "active",
     "Operativa – Autodespacho DS88": "active",  # self-dispatched small plant (DS 88)
