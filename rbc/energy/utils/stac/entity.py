@@ -2,11 +2,13 @@
 
 Operator-neutral rules for the STAC energy extension's entity fields (energy:entity_ids,
 energy:entity_type, energy:facility_name), applied to an operator's EGEs before they become
-STAC Items.
+STAC Items: the entity types allowed (ENTITY_TYPES), the IDs (`entity_ids`) and defining
+the types, incl. the parts of a facility (`EntityTypeDefiner`).
 """
 
 import json
 import re
+from collections.abc import Mapping
 from itertools import combinations
 from typing import cast
 
@@ -16,82 +18,43 @@ import pandas as pd
 from rbc.coordinates.mappings import OPERATOR_METADATA
 from rbc.coordinates.utils.tokenizer import NORM_GENERIC_UNIT_TOKENS, NameTokenizer
 from rbc.coordinates.utils.values import normalize_name
+from rbc.energy.utils.stac.base import FieldDefiner
 
-EARTH_RADIUS_KM = 6371.0
+# Set: energy:entity_type values STAC Items may be defined as
+ENTITY_TYPES = frozenset(
+    {"unit", "group", "facility", "portfolio", "region", "unknown"}
+)
+
+MAX_KM: float = 1.0  # how far apart parts of a facility linked by name may lie
 UNIT_TOKENS = frozenset(NORM_GENERIC_UNIT_TOKENS)  # e.g. "bloco"=never in facility_name
 
 
-def entity_ids(df_ege_locators: pd.DataFrame, own: dict[str, pd.Series]) -> pd.Series:
-    """Collect each EGE's IDs in other systems as JSON (STAC's energy:entity_ids).
+class EntityTypeDefiner(FieldDefiner):
+    """Define an operator's EGEs' energy:entity_type (s. ENTITY_TYPES).
 
-    Besides the operator's own IDs, an EGE gets the ID of the source that coordinate
-    finding located it by. Not a sibling, as that ID is its donor's.
-
-    Args:
-        df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them.
-        own (dict[str, pd.Series]): Map of the operator's ID system → each EGE's ID in it.
-
-    Returns:
-        pd.Series: Each EGE's IDs as a JSON object, missing where it has none.
-    """
-    # a locator's columns other than lat/lon/match_method exist only once it matched
-    df = df_ege_locators.reindex(
-        columns=["match_method", "gem.id", "ppdb.id", "osm.id", "osm.type"]
-    )
-    method = df["match_method"].astype("string").fillna("")
-    by = method.str.split("_").str[0].mask(method.str.endswith("_sibling"), "")
-    osm_ids = (
-        df["osm.type"].astype("string")
-        + "/"
-        + pd.to_numeric(df["osm.id"], errors="coerce").astype("Int64").astype("string")
-    )
-    # osm-powerplants' IDs are OSM's ('way/123'), PPM's a row number (todo: 'projectID')
-    ppdb_ids = df["ppdb.id"].astype("string")
-    ppdb_ids = ppdb_ids.where(
-        ppdb_ids.str.fullmatch(r"(node|way|relation)/\d+", na=False)
-    )
-
-    ids = pd.DataFrame(
-        {
-            **own,
-            "gem": df["gem.id"].astype("string").where(by == "gem"),
-            "osm": ppdb_ids.where(by == "ppdb").fillna(osm_ids.where(by == "osm")),
-        },
-        index=df.index,
-    )
-    return pd.Series(
-        [
-            json.dumps(row.dropna().to_dict()) if row.notna().any() else None
-            for _, row in ids.iterrows()
-        ],
-        index=df.index,
-        dtype=object,
-    )
-
-
-class EntityTypeDefiner:
-    """For STAC, defines a sysop's EGEs' energy:entity_type using names and codes.
+    From the operator's own values (`map`), and by names and codes the EGEs that are parts
+    of one facility (`find_groups`).
 
     Attributes:
-        sysop (str): The energy system operator, e.g. "ons".
-        max_km (float): How far apart parts of a facility linked by name may lie.
         tok (NameTokenizer): The operator's tokenizer, as its coordinate finding has it.
     """
 
-    def __init__(self, sysop: str, max_km: float = 1.0) -> None:
-        """Initialize the definer with the operator's name vocabulary.
+    FIELD = "entity_type"
+    VALUES = ENTITY_TYPES
+
+    def __init__(self, sysop: str, mapping: Mapping[str, str]) -> None:
+        """Initialize the definer with the operator's map and name vocabulary.
 
         Args:
-            sysop (str): The operator, e.g. "ons".
-            max_km (float, optional): How far apart parts linked by name may lie.
-                Defaults to 1.0 km.
+            sysop (str): The operator, e.g. "ons" (for its name vocabulary).
+            mapping (Mapping[str, str]): Map of an operator's value → STAC's type.
 
         Raises:
-            ValueError: If the operator's vocabulary is per country (e.g. ENTSO-E's),
-                which isn't supported yet.
+            ValueError: If the map names a value that isn't an entity type, or the
+                operator's vocabulary is per country (e.g. ENTSO-E's), which isn't
+                supported yet.
         """
-        self.sysop = sysop
-        self.max_km = max_km
+        super().__init__(mapping)
 
         meta = OPERATOR_METADATA[sysop]
         if meta["country"] == "Europe":  # a vocabulary per country (s. BasePipeline)
@@ -114,7 +77,7 @@ class EntityTypeDefiner:
         different names (an identical name is the same EGE listed again, not a part;
         roman unit numerals count as numbers), and
         - share a project code (e.g. ANEEL's CEG), or
-        - share their name's discriminator words and lie within `max_km`.
+        - share their name's discriminator words and lie within MAX_KM.
         A facility joins all EGEs linked to each other, also through others (A-B, B-C).
         Its name runs from the first to the last discriminator word all its parts share
         (s. `_name_facility`), else, if linked by a code, it is the name of the part
@@ -142,9 +105,7 @@ class EntityTypeDefiner:
             total=totals.reindex(df_ege.index).fillna(0.0),
         )
 
-        parent = {
-            i: i for i in df_ege.index
-        }  # union-find: each EGE's link to its facility
+        parent = {i: i for i in df_ege.index}  # union-find (EGE's link to its facility)
         by_code: set[str] = set()  # EGEs linked by a code
         for col in ("code", "key"):
             for _, members in df_ege.dropna(subset=[col]).groupby(col):
@@ -163,9 +124,11 @@ class EntityTypeDefiner:
         for _, members in df_ege.groupby(facilities):
             if len(members) < 2:
                 continue
+
             linked_by_code = bool(by_code & set(members.index))
             if name := self._name_facility(members, linked_by_code):
                 rows.update({i: ("group", name) for i in members.index})
+
         return pd.DataFrame.from_dict(
             rows, orient="index", columns=["entity_type", "facility_name"]
         )
@@ -175,7 +138,7 @@ class EntityTypeDefiner:
     # ------------------------------------------------------------------
     @staticmethod
     def _find_root(parent: dict[str, str], i: str) -> str:
-        """Find the facility an EGE belongs to, as the EGE all its links lead to.
+        """Find the facility an EGE belongs to (as the EGE all its links lead to).
 
         Shortens the links it follows, so later lookups take fewer steps.
 
@@ -202,7 +165,7 @@ class EntityTypeDefiner:
 
         Returns:
             bool: True if both report in a common period, under different names, and
-                (if linked by name) lie within `max_km`.
+                (if linked by name) lie within MAX_KM.
         """
         if not a["active_periods"] & b["active_periods"]:
             return False  # one after the other: the same EGE renamed, not both subparts
@@ -214,7 +177,7 @@ class EntityTypeDefiner:
             return True
 
         located = a[["lat", "lon"]].notna().all() and b[["lat", "lon"]].notna().all()
-        return bool(located and self._get_distance_km(a, b) <= self.max_km)
+        return bool(located and self._get_distance_km(a, b) <= MAX_KM)
 
     def _name_facility(self, members: pd.DataFrame, linked_by_code: bool) -> str | None:
         """Name a facility after the discriminator words its parts share, else its largest.
@@ -278,7 +241,7 @@ class EntityTypeDefiner:
             word (str): One word of a name.
 
         Returns:
-            bool: True if all its tokens are generic and none is a unit word ("Bloco").
+            bool: True if all its tokens are generic and none is a unit word (e.g. "Bloco").
         """
         wt = self.tok.weighted_tokenize(word)
         return (
@@ -303,4 +266,52 @@ class EntityTypeDefiner:
             np.sin((lat2 - lat1) / 2) ** 2
             + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2
         )
-        return float(2 * EARTH_RADIUS_KM * np.arcsin(np.sqrt(h)))
+        return float(2 * 6371.0 * np.arcsin(np.sqrt(h)))  # earth's radius = 6371 km
+
+
+def entity_ids(df_ege_locators: pd.DataFrame, own: dict[str, pd.Series]) -> pd.Series:
+    """Collect each EGE's IDs in other systems as JSON (STAC's energy:entity_ids).
+
+    Besides the operator's own IDs, an EGE gets the ID of the source that coordinate
+    finding located it by. Not a sibling, as that ID is its donor's.
+
+    Args:
+        df_ege_locators (pd.DataFrame): The EGEs as coordinate finding returned them.
+        own (dict[str, pd.Series]): Map of the operator's ID system → each EGE's ID in it.
+
+    Returns:
+        pd.Series: Each EGE's IDs as a JSON object, missing where it has none.
+    """
+    # a locator's columns other than lat/lon/match_method exist only once it matched
+    df = df_ege_locators.reindex(
+        columns=["match_method", "gem.id", "ppdb.id", "osm.id", "osm.type"]
+    )
+    method = df["match_method"].astype("string").fillna("")
+    by = method.str.split("_").str[0].mask(method.str.endswith("_sibling"), "")
+    osm_ids = (
+        df["osm.type"].astype("string")
+        + "/"
+        + pd.to_numeric(df["osm.id"], errors="coerce").astype("Int64").astype("string")
+    )
+    # osm-powerplants' IDs are OSM's ('way/123'), PPM's a row number (todo: 'projectID')
+    ppdb_ids = df["ppdb.id"].astype("string")
+    ppdb_ids = ppdb_ids.where(
+        ppdb_ids.str.fullmatch(r"(node|way|relation)/\d+", na=False)
+    )
+
+    ids = pd.DataFrame(
+        {
+            **own,
+            "gem": df["gem.id"].astype("string").where(by == "gem"),
+            "osm": ppdb_ids.where(by == "ppdb").fillna(osm_ids.where(by == "osm")),
+        },
+        index=df.index,
+    )
+    return pd.Series(
+        [
+            json.dumps(row.dropna().to_dict()) if row.notna().any() else None
+            for _, row in ids.iterrows()
+        ],
+        index=df.index,
+        dtype=object,
+    )

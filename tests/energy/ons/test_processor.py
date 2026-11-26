@@ -113,8 +113,12 @@ def test_hours_that_cant_be_placed_raise(
 # ----------------------------------
 # Tests: STAC fields
 # ----------------------------------
-def test_stac_fuels_hybrid_and_unknown() -> None:
-    """Happy and failure path: two technologies make a hybrid, unmapped ones raise."""
+def test_stac_fuels_hybrid_and_unknown(proc: OnsProcessor) -> None:
+    """Happy and failure path: two technologies make a hybrid, unmapped ones raise.
+
+    Args:
+        proc (OnsProcessor): The processor.
+    """
     df = pd.DataFrame(
         {
             "id": ["a", "b"],
@@ -122,16 +126,15 @@ def test_stac_fuels_hybrid_and_unknown() -> None:
             "fuel_subtype": ["Fotovoltaica", "Óleo Diesel"],
         }
     )
-    out = OnsProcessor._stac_fuels(df)
-    assert out.values.tolist() == [
-        ["a", "wind", "onshore"],
-        ["a", "solar", "pv"],
-        ["b", "oil", "diesel"],
+    out = proc.fuel_def.map(df)
+    assert out.fillna("-").values.tolist() == [
+        ["hybrid", "-", ["solar", "wind"]],
+        ["oil", "diesel", "-"],
     ]
 
     df.loc[1, "fuel_subtype"] = "Unknown fuel"
     with pytest.raises(DataStructureError, match="Unknown fuel"):
-        OnsProcessor._stac_fuels(df)
+        proc.fuel_def.map(df)
 
 
 def test_ege_fields_by_operating_mode(proc: OnsProcessor) -> None:
@@ -183,10 +186,10 @@ def test_ege_fields_by_operating_mode(proc: OnsProcessor) -> None:
     assert out.loc["ons-f1", "facility_name"] == "Flores"
     assert out["measurement_type"].to_dict() == {
         "ons-c": "gross_output",
-        "ons-p": "forecast",
+        "ons-p": "forecast_output",
         "ons-m": "unknown",
-        "ons-f1": "forecast",  # Tipo III
-        "ons-f2": "forecast",
+        "ons-f1": "forecast_output",  # Tipo III
+        "ons-f2": "forecast_output",
         "ons-i": "gross_output",
     }
     assert out["ceg"].isna().tolist() == [True, True, True, False, False, False]

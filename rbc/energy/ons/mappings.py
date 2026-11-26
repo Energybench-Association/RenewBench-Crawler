@@ -1,5 +1,7 @@
 """ONS MAPPINGS."""
 
+from rbc.energy.utils.stac.fuel import Fuel, Fuels, RawFuel
+
 # ---------------------------------------------------------------------------
 # Coordinate Finding Definitions (additions/overrides for OPERATOR_METADATA)
 # ---------------------------------------------------------------------------
@@ -84,39 +86,53 @@ for key, value in EGE_NAME_BASE_TRANSLATIONS.items():
 # STAC Definitions (the energy extension's vocabulary)
 # ---------------------------------------------------------------------------
 # ======= FUEL TYPES =======
-# Map: ONS's (nom_tipousina, nom_tipocombustivel) → STAC (energy:fuel_type, energy:fuel_subtype)
-STAC_FUELS: dict[tuple[str, str], tuple[str, str | None]] = {
-    ("HIDROELÉTRICA", "Hidráulica"): ("hydro", None),  # ONS doesn't tell dam from river
-    ("EOLIELÉTRICA", "Eólica"): ("wind", "onshore"),
-    ("FOTOVOLTAICA", "Fotovoltaica"): ("solar", "pv"),
-    ("NUCLEAR", "Nuclear"): ("nuclear", None),
-    ("TÉRMICA", "Biomassa"): ("biomass", None),
-    ("TÉRMICA", "Carvão"): ("coal", None),
-    ("TÉRMICA", "Gás"): ("gas", None),
-    ("TÉRMICA", "Óleo Combustível"): ("oil", "fuel_oil"),
-    ("TÉRMICA", "Óleo Diesel"): ("oil", "diesel"),
-    ("TÉRMICA", "Multi-Combustível Diesel/Óleo"): ("oil", None),  # diesel or fuel oil
-    ("TÉRMICA", "Outras Multi-Combustível"): ("other", "thermal"),  # fuels not stated
+# Map: ONS's (nom_tipousina, nom_tipocombustivel) → STAC fuel (s. FuelTypeDefiner)
+FUELS_TO_STAC: dict[RawFuel, Fuels] = {
+    ("HIDROELÉTRICA", "Hidráulica"): Fuel("hydro"),  # ONS can't tell dam from river
+    ("EOLIELÉTRICA", "Eólica"): Fuel("wind", "onshore"),
+    ("FOTOVOLTAICA", "Fotovoltaica"): Fuel("solar", "pv"),
+    ("NUCLEAR", "Nuclear"): Fuel("nuclear"),
+    ("TÉRMICA", "Biomassa"): Fuel("biomass"),
+    ("TÉRMICA", "Carvão"): Fuel("coal"),
+    ("TÉRMICA", "Gás"): Fuel("gas"),
+    ("TÉRMICA", "Óleo Combustível"): Fuel("oil", "fuel_oil"),
+    ("TÉRMICA", "Óleo Diesel"): Fuel("oil", "diesel"),
+    ("TÉRMICA", "Multi-Combustível Diesel/Óleo"): Fuel("oil"),  # diesel or fuel oil
+    ("TÉRMICA", "Outras Multi-Combustível"): Fuel("other", "thermal"),  # not stated
     # pulp mills (black liquor) and steel mills (process gases); todo: per plant?
-    ("TÉRMICA", "Resíduos Industriais"): ("waste", "industrial"),
-}
-# Map: ONS's combination of two technologies → their STAC fuels (a hybrid EGE)
-STAC_HYBRID_FUELS: dict[tuple[str, str], list[tuple[str, str | None]]] = {
-    # a wind plant type with a PV fuel (Conj. Folha Larga)
-    ("EOLIELÉTRICA", "Fotovoltaica"): [("wind", "onshore"), ("solar", "pv")],
+    ("TÉRMICA", "Resíduos Industriais"): Fuel("waste", "industrial"),
+    ("EOLIELÉTRICA", "Fotovoltaica"): (
+        Fuel("wind", "onshore"),
+        Fuel("solar", "pv"),
+    ),  # Conj. Folha Larga = wind plant combined with solar (later corrected to only wind)
 }
 
 # ======= ENTITY TYPES =======
-# ONS's 'cod_modalidadeoperacao' for single plants
-PLANT_MODES = {"TIPO I", "TIPO II-A", "TIPO II-B", "TIPO II-C", "TIPO III"}
-# ONS's 'cod_modalidadeoperacao' for groups of plants reported together
-GROUP_MODES = {
-    "Conjunto de Usinas",  # Tipo II-C plants grouped in ONS's operating adjustments
-    "Pequenas Usinas (Tipo III)",  # small plants without a relationship to ONS
-    "Pequenas Usinas (MMGD)",  # micro and mini distributed generation, per area
+# Map: ONS's 'cod_modalidadeoperacao' → default STAC entity type (before location & grouping)
+ENTITY_TYPES_TO_STAC = {
+    # single plants
+    "TIPO I": "facility",
+    "TIPO II-A": "facility",
+    "TIPO II-B": "facility",
+    "TIPO II-C": "facility",
+    "TIPO III": "facility",
+    # groups of plants reported together
+    "Conjunto de Usinas": "portfolio",  # Tipo II-C plants in ONS's operating adjustments
+    "Pequenas Usinas (Tipo III)": "portfolio",  # small plants without relation to ONS
+    "Pequenas Usinas (MMGD)": "portfolio",  # micro/mini distributed generation, per area
 }
-# ONS's modes of plants without a relationship to ONS: forecasts, not measurements (s.
-# data_sources.md)
-FORECAST_MODES = {"TIPO III", "Pequenas Usinas (Tipo III)"}
-# ONS's modes whose values no ONS source explains (distributed PV is behind the meter)
-UNKNOWN_MEASUREMENT_MODES = {"Pequenas Usinas (MMGD)"}
+
+# ======= MEASUREMENT TYPES =======
+# Map: ONS's 'cod_modalidadeoperacao' → STAC measurement type (s. data_sources.md)
+MEASUREMENT_TYPES_TO_STAC = {
+    "TIPO I": "gross_output",
+    "TIPO II-A": "gross_output",
+    "TIPO II-B": "gross_output",
+    "TIPO II-C": "gross_output",
+    "Conjunto de Usinas": "gross_output",
+    # plants without a relationship to ONS: forecasts, not measurements
+    "TIPO III": "forecast_output",
+    "Pequenas Usinas (Tipo III)": "forecast_output",
+    # values no ONS source explains (distributed PV is behind the meter)
+    "Pequenas Usinas (MMGD)": "unknown",
+}

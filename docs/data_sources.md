@@ -314,11 +314,11 @@ General:
 - Translations: Spanish to English for fuel types, status definition and names (for name
   matching).
 - Mappings ([`rbc/energy/cen/mappings.py`](../rbc/energy/cen/mappings.py)):
-  - status: `estado` to `STAC_STATUSES`; square bracket terms in `central` to
-    `STAC_NAME_STATUSES`.
+  - status: square bracket terms in `central` and `estado` to `STATUSES_TO_STAC`.
     A square bracket term in `central` (e.g. `[NO_MOSTRAR]`) is the EGE's true status and
     overrides `estado`.
-  - fuel: `tipo_tecnologia`/`subtipo_tecnologia` to `STAC_FUELS`, `STAC_COGENERATION_FUELS`.
+  - fuel: `tipo_tecnologia`/`subtipo_tecnologia` to `FUELS_TO_STAC`; cogeneration
+    (`Térmica/Cogeneración`) names no fuel, so each such plant's own is listed there.
 
 Columns:
 - IDs: `cen-<id_central>`, or `cen-<central>` (lowercase, dashes) for a plant without one.
@@ -410,9 +410,10 @@ General:
   [coordinate finding](coordinate_finding.md).
 - Translations: Portuguese to English of fuel types and name words (for name matching).
 - Mappings ([`rbc/energy/ons/mappings.py`](../rbc/energy/ons/mappings.py)):
-  - operation mode: `cod_modalidadeoperacao` to `PLANT_MODES`, `GROUP_MODES`,
-  `FORECAST_MODES`, `UNKNOWN_MEASUREMENT_MODES`.
-  - fuel: `nom_tipousina`/`nom_tipocombustivel` to `STAC_FUELS`, `STAC_HYBRID_FUELS`.
+  - operation mode: `cod_modalidadeoperacao` to `ENTITY_TYPES_TO_STAC` and
+    `MEASUREMENT_TYPES_TO_STAC`.
+  - fuel: `nom_tipousina`/`nom_tipocombustivel` to `FUELS_TO_STAC` (a pair with two fuels
+    makes a hybrid).
     `TÉRMICA/Outras Multi-Combustível` (thermal, fuels not stated) = fuel type
     `'other'` with subtype `'thermal'`.
 
@@ -458,7 +459,7 @@ Energy extension:
       generator).
     - Besides single EGEs, ONS reports `Conjunto de Usinas` groups (Tipo II-C EGEs grouped in
       ONS's operating adjustments)
-  - `'forecast'` for all `Tipo III` EGEs and `Pequenas Usinas (Tipo III)` EGE groups
+  - `'forecast_output'` for all `Tipo III` EGEs and `Pequenas Usinas (Tipo III)` EGE groups
     - Another form of groups are `Pequenas Usinas (Tipo III)` (groups of small EGEs
       without a relationship to ONS).
       According to the [dataset description](https://dados.ons.org.br/dataset/geracao-usina-2)

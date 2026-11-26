@@ -7,18 +7,15 @@ from loguru import logger
 
 from rbc.config.schema import PublishConfig
 from rbc.coordinates.mappings import OPERATOR_METADATA
-from rbc.coordinates.utils.values import normalize_name
 from rbc.energy.ons.mappings import (
-    FORECAST_MODES,
-    GROUP_MODES,
-    PLANT_MODES,
-    STAC_FUELS,
-    STAC_HYBRID_FUELS,
-    UNKNOWN_MEASUREMENT_MODES,
+    ENTITY_TYPES_TO_STAC,
+    FUELS_TO_STAC,
+    MEASUREMENT_TYPES_TO_STAC,
 )
 from rbc.energy.utils.processing import ZARR_COLS, EnergyProcessor
 from rbc.energy.utils.stac.entity import EntityTypeDefiner
-from rbc.energy.utils.stac.fuel import combine_fuels
+from rbc.energy.utils.stac.fuel import FuelTypeDefiner
+from rbc.energy.utils.stac.measurement import MeasurementTypeDefiner
 from rbc.energy.utils.temporal import to_utc
 from rbc.publish.stac import DatasetInfo
 from rbc.utils.errors import DataStructureError
@@ -28,9 +25,7 @@ SOURCE = "ons"
 # ONS columns
 META = OPERATOR_METADATA[SOURCE]
 CODE_COL = META["code_col"]
-MODE_COL = (
-    "cod_modalidadeoperacao"  # Operation mode, e.g. 'TIPO I'/'Conjunto de Usinas'/
-)
+MODE_COL = "cod_modalidadeoperacao"  # Operation mode, e.g. TIPO I, Conjunto de Usinas
 CEG_COL = "ceg"  # ANEEL's plant code, e.g. 'UHE.PH.AM.000190-2.01' ('-'/'ND' if none)
 CEG_PATTERN = r"[A-Z]{3}\.[A-Z]{2}\.[A-Z]{2}\.\d{6}-\d\.\d{2}"
 
@@ -41,11 +36,6 @@ ONS_COLUMNS = {
     "nom_tipousina": "fuel_type",
     "nom_tipocombustivel": "fuel_subtype",
 }
-
-# STAC measurement types (s. data_sources.md for details)
-DEFAULT_MEASUREMENT_TYPE = "gross_output"
-FORECAST_MEASUREMENT_TYPE = "forecast"  # all type III EGEs and EGE groups
-UNKNOWN_MEASUREMENT_TYPE = "unknown"  # all groups with unknown output
 
 # STAC Collection details for ONS, its license and our processing
 ONS_DATA_URL = "https://dados.ons.org.br/dataset/geracao-usina-2"
@@ -107,7 +97,9 @@ class OnsProcessor(EnergyProcessor):
     ONS has no registry of its own: coordinate finding locates all its EGEs.
 
     Attributes:
-        entity_types (EntityTypeDefiner): Finds the EGEs that are parts of a facility.
+        fuel_def (FuelTypeDefiner): Definer for fuel-related energy STAC values.
+        entity_def (EntityTypeDefiner): Definer for entity-related energy STAC values.
+        measurement_def (MeasurementTypeDefiner): Definer for measurement_type STAC values.
     """
 
     DATASET = ONS_DATASET
@@ -148,7 +140,11 @@ class OnsProcessor(EnergyProcessor):
             publish=publish,
             periods=periods,
         )
-        self.entity_types = EntityTypeDefiner(sysop=SOURCE)
+
+        # STAC fields for ONS (s. ons/mappings.py)
+        self.fuel_def = FuelTypeDefiner(FUELS_TO_STAC)
+        self.entity_def = EntityTypeDefiner(SOURCE, ENTITY_TYPES_TO_STAC)
+        self.measurement_def = MeasurementTypeDefiner(MEASUREMENT_TYPES_TO_STAC)
 
     # ------------------------------------------------------------------
     # HOOKS (s. EnergyProcessor)
@@ -156,33 +152,22 @@ class OnsProcessor(EnergyProcessor):
     def _clean_file(self, df_eg: pd.DataFrame, period: str) -> pd.DataFrame:
         """Check that a raw CSV holds only operating modes the processor knows.
 
+        A mode decides an EGE's entity and measurement type (ENTITY_TYPES_TO_STAC,
+        MEASUREMENT_TYPES_TO_STAC), so a new one must be classified there before it is used.
+
         Args:
             df_eg (pd.DataFrame): A raw CSV's rows, in layout names, with their "id".
             period (str): The local month the CSV holds, e.g. '2025-07'.
 
         Returns:
-            pd.DataFrame: The rows, unchanged (s. `_check_modes`).
-        """
-        self._check_modes(df_eg[MODE_COL])
-        return df_eg
-
-    @staticmethod
-    def _check_modes(modes: pd.Series) -> None:
-        """Raise if a raw CSV has an operating mode the processor doesn't know.
-
-        A mode decides an EGE's entity and measurement type (s. GROUP_MODES,
-        FORECAST_MODES), so a new one must be classified before it is published.
-
-        Args:
-            modes (pd.Series): A raw CSV's 'cod_modalidadeoperacao' values.
+            pd.DataFrame: The rows, unchanged.
 
         Raises:
-            DataStructureError: If a mode is missing or neither a plant's nor a group's.
+            DataStructureError: If a mode is missing or has no entity or measurement type.
         """
-        known = PLANT_MODES | GROUP_MODES
-        unknown = sorted(set(modes.fillna("<missing>")) - known)
-        if unknown:
-            raise DataStructureError(f"ONS operating modes not classified: {unknown}")
+        for definer in (self.entity_def, self.measurement_def):
+            definer.map(df_eg[MODE_COL], required=True)  # raises for unknown modes
+        return df_eg
 
     def _prepare_for_zarr(
         self, df_eg: pd.DataFrame, month: str
@@ -265,16 +250,15 @@ class OnsProcessor(EnergyProcessor):
     ) -> pd.DataFrame:
         """Give each EGE's ONS-specific STAC fields (the rest: s. `EnergyProcessor`).
 
-        - "entity_type": "portfolio" for a group of plants (s. GROUP_MODES) without a
-          point (several sites), "group" for a single plant that is part of a facility
-          (s. `EntityTypeDefiner.find_groups`, by CEG or by name and location), else
-          "facility"
+        - "entity_type": the mode's (s. ENTITY_TYPES_TO_STAC): "portfolio" for a group
+          of plants without a point (several sites), "group" for a single plant that is
+          part of a facility (s. `EntityTypeDefiner.find_groups`, by CEG or by name and
+          location), else "facility"
         - "facility_name": the facility such a part belongs to
         - "fuel_type", "fuel_subtype", "hybrid_fuel_types": "nom_tipousina" and
-          "nom_tipocombustivel" mapped to STAC's vocabulary (s. STAC_FUELS)
-        - "measurement_type": "forecast" for Tipo III plants and their groups (s.
-          FORECAST_MODES), "unknown" for MMGD groups (s. UNKNOWN_MEASUREMENT_MODES),
-          else "gross_output" (s. DEFAULT_MEASUREMENT_TYPE)
+          "nom_tipocombustivel" mapped to STAC's vocabulary (s. FUELS_TO_STAC)
+        - "measurement_type": the mode's (s. MEASUREMENT_TYPES_TO_STAC), e.g.
+          "forecast_output" for Tipo III plants and their groups
         - "ceg": ANEEL's code where ONS gives a valid one (for `_get_own_ids`)
         ONS provides no operator, capacity or status, so these stay empty.
 
@@ -290,37 +274,37 @@ class OnsProcessor(EnergyProcessor):
         Returns:
             pd.DataFrame: The fields above, indexed by EGE ID.
         """
-        latest = df_ege_sysop.drop_duplicates(subset="id", keep="last")
-        fields_sysop = latest.set_index("id")[[CEG_COL, MODE_COL]]
-        fields_sysop = fields_sysop.join(combine_fuels(self._stac_fuels(latest)))
+        # Trim dataframe down to the one row per EGE, keeping the newest
+        df_ege_sysop = df_ege_sysop.drop_duplicates(subset="id", keep="last")
+        fields_sysop = df_ege_sysop.set_index("id")[[CEG_COL, MODE_COL]]
 
+        # --- ADD ENERGY FIELD(S): fuel_type, fuel_subtype, hybrid_fuel_types
+        fields_sysop = fields_sysop.join(self.fuel_def.map(df=df_ege_sysop))
+
+        # --- ADD ENERGY FIELD(S): measurement_type
+        fields_sysop["measurement_type"] = self.measurement_def.map(
+            values=fields_sysop[MODE_COL]
+        )
+
+        # Combine relevant content from both df_ege_* dfs into one "fields" df
         ceg = fields_sysop[CEG_COL].astype("string")
-        mode = fields_sysop[MODE_COL]
-        fields_sysop = fields_sysop.assign(
-            ceg=ceg.where(ceg.str.fullmatch(CEG_PATTERN, na=False)),
-            measurement_type=pd.Series(DEFAULT_MEASUREMENT_TYPE, index=mode.index)
-            .mask(mode.isin(FORECAST_MODES), FORECAST_MEASUREMENT_TYPE)
-            .mask(mode.isin(UNKNOWN_MEASUREMENT_MODES), UNKNOWN_MEASUREMENT_TYPE),
-        )
+        fields_sysop[CEG_COL] = ceg.where(ceg.str.fullmatch(CEG_PATTERN, na=False))
+        df_ege = df_ege_locators.set_index("id").join(fields_sysop[[CEG_COL, MODE_COL]])
+        fields = fields_sysop.reindex(df_ege.index)  # also EGEs without values
 
-        df_ege_locators = df_ege_locators.set_index("id").join(
-            fields_sysop[[CEG_COL, MODE_COL]]
-        )
-        fields = fields_sysop.reindex(df_ege_locators.index)  # also EGEs without values
-        # a group located to one point is one site, else it spans several
-        spread = (
-            df_ege_locators[MODE_COL].isin(GROUP_MODES) & df_ege_locators["lat"].isna()
-        )
-        fields["entity_type"] = spread.map({True: "portfolio", False: "facility"})
-        plants = df_ege_locators[
-            ~df_ege_locators[MODE_COL].isin(GROUP_MODES)
-        ].reset_index()
-        groups = self.entity_types.find_groups(
-            plants.rename(columns={CEG_COL: "code"})[
-                ["id", "entity_name", "code", "lat", "lon"]
-            ],
-            active_periods,
-            totals,
+        # --- ADD ENERGY FIELD(S): entity_type, facility_name (where entity_type="group")
+        # For logic: see data_sources.md & ons/mappings.py
+        by_mode = self.entity_def.map(df_ege[MODE_COL]).fillna("facility")
+        located_portfolio_mask = (by_mode == "portfolio") & df_ege["lat"].notna()
+        fields["entity_type"] = by_mode.mask(located_portfolio_mask, "facility")
+
+        # find "facilities" that are actually "group" (part of same fac) & the facility_name
+        facilities = df_ege[by_mode == "facility"].reset_index()
+        facilities = facilities.rename(columns={CEG_COL: "code"})
+        groups = self.entity_def.find_groups(
+            df_ege=facilities[["id", "entity_name", "code", "lat", "lon"]],
+            active_periods=active_periods,
+            totals=totals,
         )
         ids = fields.index.to_series()
         fields["entity_type"] = ids.map(groups["entity_type"]).fillna(
@@ -332,6 +316,7 @@ class OnsProcessor(EnergyProcessor):
                 f"{len(groups)} EGEs are parts of {groups['facility_name'].nunique()} "
                 f"facilities: {sorted(groups['facility_name'].unique())}"
             )
+
         return fields
 
     def _get_own_ids(self, df_ege_locators: pd.DataFrame) -> dict[str, pd.Series]:
@@ -347,57 +332,3 @@ class OnsProcessor(EnergyProcessor):
             **super()._get_own_ids(df_ege_locators),
             "ceg": df_ege_locators[CEG_COL],
         }
-
-    # ------------------------------------------------------------------
-    # SECONDARY HELPERS
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _stac_fuels(df_ege_sysop: pd.DataFrame) -> pd.DataFrame:
-        """Map each EGE's plant type and fuel to STAC's fuels (s. STAC_FUELS).
-
-        Both sides are compared normalized: without case, accents or punctuation (s.
-        `normalize_name`). A combination of two technologies gives both of their fuels,
-        so the EGE becomes a hybrid (s. STAC_HYBRID_FUELS).
-
-        Args:
-            df_ege_sysop (pd.DataFrame): The EGE rows with "id", "fuel_type" and
-                "fuel_subtype" as ONS reports them.
-
-        Returns:
-            pd.DataFrame: One row per EGE and fuel, with "id", "fuel_type" and
-                "fuel_subtype" in STAC's vocabulary.
-
-        Raises:
-            DataStructureError: If a combination has no mapping, listing all such
-                combinations.
-        """
-        fuels = {
-            (normalize_name(main), normalize_name(sub)): [fuel]
-            for (main, sub), fuel in STAC_FUELS.items()
-        } | {
-            (normalize_name(main), normalize_name(sub)): hybrid
-            for (main, sub), hybrid in STAC_HYBRID_FUELS.items()
-        }
-
-        rows: list[tuple] = []
-        unknown: set[tuple] = set()
-        cols = ["id", "fuel_type", "fuel_subtype"]
-        for ege_id, main, sub in (
-            df_ege_sysop[cols].drop_duplicates().itertuples(index=False)
-        ):
-            main = main if isinstance(main, str) else None
-            sub = sub if isinstance(sub, str) else None
-            pair = (normalize_name(main), normalize_name(sub))
-            if pair in fuels:
-                rows.extend((ege_id, *fuel) for fuel in fuels[pair])
-            else:
-                unknown.add((main, sub))  # as ONS spells it
-
-        if unknown:
-            raise DataStructureError(
-                f"ONS plant and fuel types without a STAC fuel: "
-                f"{sorted(unknown, key=str)}"
-            )
-        return pd.DataFrame(
-            rows, columns=["id", "fuel_type", "fuel_subtype"]
-        ).drop_duplicates(ignore_index=True)

@@ -96,8 +96,8 @@ class EnergyProcessor(ABC):
         TZ (str): The IANA time zone the raw files' periods are local to.
         COLUMNS (dict[str, str]): Map of raw columns → the shared layout's, renamed on
             loading (e.g. "gen_real_mw" → "value").
-        EGE_COLUMNS (list[str]): Each EGE's own columns (layout names) kept from the raw
-            files for STAC, e.g. "fuel_type"; the latest values win.
+        EGE_COLUMNS (list[str]): Each EGE's own columns (after renaming) kept from the raw
+            files for STAC (e.g. "fuel_type"). The latest values win.
         input_dir (Path): The directory containing subfolders of raw csv files.
         resources_dir (Path): The directory containing resources for coordinate finding.
         output_dir (Path): The output directory for processed energy generation data.

@@ -12,20 +12,19 @@ EARLY = {"2020-01", "2020-02"}
 LATE = {"2025-07"}
 
 
-def _groups(rows: list[tuple], sysop: str = "ons", **kwargs) -> pd.DataFrame:
+def _groups(rows: list[tuple], sysop: str = "ons") -> pd.DataFrame:
     """Run `EntityTypeDefiner.find_groups` on EGE rows, with the operator's vocabulary.
 
     Args:
         rows (list[tuple]): Per EGE: (id, name, code, lat, lon, months, total).
         sysop (str, optional): The operator. Defaults to "ons".
-        **kwargs: Passed on to `EntityTypeDefiner`, e.g. `max_km`.
 
     Returns:
         pd.DataFrame: The parts found, with "entity_type" and "facility_name".
     """
     cols = ["id", "entity_name", "code", "lat", "lon", "months", "total"]
     df = pd.DataFrame(rows, columns=cols).set_index("id")
-    return EntityTypeDefiner(sysop, **kwargs).find_groups(
+    return EntityTypeDefiner(sysop, {}).find_groups(
         df.drop(columns=["months", "total"]).reset_index(), df["months"], df["total"]
     )
 

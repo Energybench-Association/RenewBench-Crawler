@@ -25,7 +25,6 @@ from rbc.energy.cen.processor import (
     CenProcessor,
 )
 from rbc.energy.utils import processing
-from rbc.energy.utils.stac.fuel import combine_fuels
 from rbc.energy.utils.temporal import get_period_bounds
 from rbc.utils.errors import DataStructureError, MissingDataError
 
@@ -115,6 +114,19 @@ def make_processor(
             )
 
     return _make
+
+
+@pytest.fixture
+def cen(make_processor: Callable[..., CenProcessor]) -> CenProcessor:
+    """A processor whose registry and shared resources are stand-ins.
+
+    Args:
+        make_processor (Callable[..., CenProcessor]): The processor factory.
+
+    Returns:
+        CenProcessor: The processor, with its STAC field definers.
+    """
+    return make_processor()
 
 
 def _region_reg(levels: dict[str, str]) -> RegionRegistry:
@@ -295,7 +307,7 @@ def test_registry_columns_renamed(make_processor: Callable) -> None:
     assert set(REGISTRY_RENAMES.values()) <= set(proc.df_registry.columns)
 
 
-def test_join_registry_matches_all_id_formats(make_processor: Callable) -> None:
+def test_add_registry_columns_matches_all_id_formats(make_processor: Callable) -> None:
     """Happy path: an ID matches whether it's read as 28, 28.0 or '28'.
 
     The raw code column is left as is, so the output keeps the IDs CEN wrote, and runs
@@ -306,7 +318,7 @@ def test_join_registry_matches_all_id_formats(make_processor: Callable) -> None:
     """
     df = pd.DataFrame({CODE_COL: [1.0, "2", None]})
 
-    out = make_processor()._join_registry(df, CODE_COL, ["name"])
+    out = make_processor()._add_registry_columns(df, CODE_COL, ["name"])
 
     assert out["official.name"].tolist()[:2] == ["TER ALPHA", "PMGD PFV DOÑA RUBENA"]
     assert pd.isna(out.loc[2, "official.name"])
@@ -1002,89 +1014,88 @@ def test_repeated_hour_in_doubt_leaves_the_eges_hour_out(
         ("Térmica", "Cogeneración", ("biomass", "chp")),  # ID 1907: its own fuel
     ],
 )
-def test_stac_fuels(main: str, sub: str | None, fuel: tuple) -> None:
-    """Happy path: CEN's (type, subtype) maps to STAC's fuel as listed in STAC_FUELS.
+def test_stac_fuels(cen: CenProcessor, main: str, sub: str | None, fuel: tuple) -> None:
+    """Happy path: CEN's (type, subtype) maps to STAC's fuel as listed in FUELS_TO_STAC.
 
     Args:
+        cen (CenProcessor): The processor.
         main (str): CEN's 'tipo_tecnologia'.
         sub (str | None): CEN's 'subtipo_tecnologia'.
         fuel (tuple): The expected (fuel_type, fuel_subtype).
     """
-    df = pd.DataFrame(
-        {"id": ["a"], CODE_COL: [1907.0], "fuel_type": [main], "fuel_subtype": [sub]}
-    )
-    out = CenProcessor._stac_fuels(df)
-    assert tuple(out.loc[0, ["fuel_type", "fuel_subtype"]]) == fuel
+    df = pd.DataFrame({"id": ["cen-1907"], "fuel_type": [main], "fuel_subtype": [sub]})
+    out = cen.fuel_def.map(df)
+    assert tuple(out.loc["cen-1907", ["fuel_type", "fuel_subtype"]]) == fuel
 
 
-def test_stac_fuels_ignore_case_and_accents() -> None:
+def test_stac_fuels_ignore_case_and_accents(cen: CenProcessor) -> None:
     """Happy path: CEN's spellings of one technology map alike, one row per EGE.
 
     E.g. 'Cogeneracion' and 'Cogeneración' (CEN uses both), or 'TÉRMICA' and 'Térmica'.
+
+    Args:
+        cen (CenProcessor): The processor.
     """
     df = pd.DataFrame(
         {
-            "id": ["a", "a", "b"],
-            CODE_COL: [1907.0, 1907.0, 5.0],
+            "id": ["cen-1907", "cen-1907", "cen-5"],
             "fuel_type": ["Térmica", "Termica", "TÉRMICA"],
             "fuel_subtype": ["Cogeneración", "Cogeneracion", "Carbón"],
         }
     )
-    out = CenProcessor._stac_fuels(df)
-    assert out[["id", "fuel_type"]].values.tolist() == [["a", "biomass"], ["b", "coal"]]
-    assert out["fuel_subtype"].iloc[0] == "chp"
-    assert pd.isna(
-        out["fuel_subtype"].iloc[1]
-    )  # pandas 3 shows a missing string as NaN
+    out = cen.fuel_def.map(df)
+    assert out["fuel_type"].to_dict() == {"cen-1907": "biomass", "cen-5": "coal"}
+    assert out.loc["cen-1907", "fuel_subtype"] == "chp"
+    assert pd.isna(out.loc["cen-5", "fuel_subtype"])
 
 
-def test_unmapped_vocabulary_raises() -> None:
-    """Failure path: a type or status without a mapping stops processing, all listed."""
+def test_unmapped_vocabulary_raises(cen: CenProcessor) -> None:
+    """Failure path: a type or status without a mapping stops processing, all listed.
+
+    Args:
+        cen (CenProcessor): The processor.
+    """
     df = pd.DataFrame(
         {
-            "id": ["a", "b"],
-            CODE_COL: [1.0, 2.0],
+            "id": ["cen-1", "cen-2"],
             "fuel_type": ["Mareomotriz", "Solar"],
             "fuel_subtype": None,
         }
     )
     with pytest.raises(DataStructureError, match="Mareomotriz"):
-        CenProcessor._stac_fuels(df)
-    # a cogeneration plant without its own fuel defined names none: combining raises
+        cen.fuel_def.map(df)
+    # a cogeneration plant without its own fuel defined names none
     cogen = pd.DataFrame(
-        {
-            "id": ["c"],
-            CODE_COL: [999.0],
-            "fuel_type": "Térmica",
-            "fuel_subtype": "Cogeneración",
-        }
+        {"id": ["cen-999"], "fuel_type": "Térmica", "fuel_subtype": "Cogeneración"}
     )
-    with pytest.raises(ValueError, match="no fuel type"):
-        combine_fuels(CenProcessor._stac_fuels(cogen))
-    no_terms = pd.Series([None, None, None])
+    with pytest.raises(DataStructureError, match="cen-999"):
+        cen.fuel_def.map(cogen)
     with pytest.raises(DataStructureError, match="En Limbo"):
-        CenProcessor._stac_status(no_terms, pd.Series(["Operativa", "En Limbo", None]))
+        cen.status_def.map(pd.Series(["Operativa", "En Limbo", None]))
     with pytest.raises(DataStructureError, match="OCULTO"):
-        CenProcessor._stac_status(pd.Series(["OCULTO"]), pd.Series(["Operativa"]))
+        cen.status_def.map(pd.Series(["OCULTO", "NO_MOSTRAR"]))
 
 
 @pytest.mark.parametrize(
-    "term, estado, status",
+    "raw, status",
     [
-        ("NO_MOSTRAR", "Operativa", "decommissioned"),
-        ("No_Mostrar", "Fuera de Servicio", "decommissioned"),
-        ("EN_REVISION", "En Pruebas", "under_construction"),
-        (None, "En Pruebas", "active"),
-        (None, None, None),
+        ("NO_MOSTRAR", "decommissioned"),  # square bracket terms in CEN's name
+        ("No_Mostrar", "decommissioned"),
+        ("EN_REVISION", "under_construction"),
+        ("En Pruebas", "active"),  # the registry's estados
+        ("Fuera de Servicio", "inactive"),
+        (None, None),
     ],
 )
-def test_stac_status(term: str | None, estado: str | None, status: str | None) -> None:
-    """Happy path: the name's square bracket term decides, else the registry's estado.
+def test_stac_status(cen: CenProcessor, raw: str | None, status: str | None) -> None:
+    """Happy path: a name's square bracket term or the registry's estado maps to STAC's.
+
+    Which of the two decides: s. `test_item_values`.
 
     Args:
-        term (str | None): The square bracket term in CEN's name.
-        estado (str | None): The registry's status.
+        cen (CenProcessor): The processor.
+        raw (str | None): A square bracket term or registry status.
         status (str | None): The expected STAC status.
     """
-    out = CenProcessor._stac_status(pd.Series([term]), pd.Series([estado]))
+    out = cen.status_def.map(pd.Series([raw]))
     assert out.tolist() == [status] if status else out.isna().all()

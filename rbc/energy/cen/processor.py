@@ -14,17 +14,15 @@ from rbc.coordinates.mappings import (
     SYSOP_NAME_COL,
 )
 from rbc.coordinates.utils.tokenizer import strip_square_brackets
-from rbc.coordinates.utils.values import normalize_name
 from rbc.energy.cen.mappings import (
-    COGENERATION,
-    STAC_COGENERATION_FUELS,
-    STAC_FUELS,
-    STAC_NAME_STATUSES,
-    STAC_STATUSES,
+    FUELS_PER_EGE_TO_STAC,
+    FUELS_TO_STAC,
+    STATUSES_TO_STAC,
 )
 from rbc.energy.cen.registry import CenCoordinateRegistry
 from rbc.energy.utils.processing import ZARR_COLS, EnergyProcessor
-from rbc.energy.utils.stac.fuel import combine_fuels
+from rbc.energy.utils.stac.fuel import FuelTypeDefiner
+from rbc.energy.utils.stac.status import StatusDefiner
 from rbc.energy.utils.temporal import get_period_bounds, to_utc
 from rbc.publish.stac import DatasetInfo
 from rbc.utils.errors import DataStructureError
@@ -56,7 +54,8 @@ REGISTRY_RENAMES = {
     "estado": "status",
 }
 
-# STAC measurement type (s. data_sources.md for details)
+# STAC hard-coded fields (s. data_sources.md for details)
+ENTITY_TYPE = "facility"
 MEASUREMENT_TYPE = "gross_output"
 
 # STAC Collection details for CEN, its license and our processing
@@ -99,7 +98,7 @@ CEN_DATASET = DatasetInfo(
         "- Times: converted from Chile's local time (incl. DST) to UTC, CEN's placeholder "
         "rows for the hour the clocks skipped dropped.\n\n"
         "Processing into STAC metadata:\n"
-        "- Mappings: technologies, statuses and IDs are mapped to the STAC energy "
+        "- Mappings: technologies, status_def and IDs are mapped to the STAC energy "
         "extension's fields.\n"
         "- Locations: from CEN's plant registry, else from matching plant names to open "
         "plant databases (GEM, osm-powerplants, OpenStreetMap)."
@@ -119,6 +118,8 @@ class CenProcessor(EnergyProcessor):
 
     Attributes:
         df_registry (pd.DataFrame): The dataframe of EGE info from CEN API registry.
+        fuel_def (FuelTypeDefiner): Definer for fuel-related energy STAC values.
+        status_def (StatusDefiner): Definer for status energy STAC values.
     """
 
     DATASET = CEN_DATASET
@@ -174,6 +175,10 @@ class CenProcessor(EnergyProcessor):
         )
         self.df_registry = registry.df_registry.rename(columns=REGISTRY_RENAMES)
 
+        # STAC fields for CEN (s. cen/mappings.py)
+        self.fuel_def = FuelTypeDefiner(FUELS_TO_STAC, FUELS_PER_EGE_TO_STAC)
+        self.status_def = StatusDefiner(STATUSES_TO_STAC)
+
     # ------------------------------------------------------------------
     # HOOKS (s. EnergyProcessor)
     # ------------------------------------------------------------------
@@ -199,7 +204,7 @@ class CenProcessor(EnergyProcessor):
             df_ege_locators (pd.DataFrame): The EGE rows, with the 'official.*' columns added.
         """
         # 1. look up all EGE IDs in the official CEN registry (incl name for check in 2.)
-        df_ege_locators = self._join_registry(
+        df_ege_locators = self._add_registry_columns(
             df_ege_sysop, code_col=CODE_COL, cols=["name", "lat", "lon", "region"]
         )
         df_ege_locators[f"{OFFICIAL_LOCATOR}.match_method"] = (
@@ -296,9 +301,8 @@ class CenProcessor(EnergyProcessor):
             f"{codes[off_region].nunique()} as outside their own region)."
         )
 
-        return df_ege_locators.drop(
-            columns=[f"{OFFICIAL_LOCATOR}.id", f"{OFFICIAL_LOCATOR}.name"]
-        )  # served their purpose
+        obsolete_cols = [f"{OFFICIAL_LOCATOR}.id", f"{OFFICIAL_LOCATOR}.name"]
+        return df_ege_locators.drop(columns=obsolete_cols)
 
     def _clean_file(self, df_eg: pd.DataFrame, period: str) -> pd.DataFrame:
         """Clean raw CSVs by removing repeated rows (identical rows, then repeated hours).
@@ -486,11 +490,11 @@ class CenProcessor(EnergyProcessor):
         - "entity_type": hard-coded as "facility"
         - "operator": use "propietario" column values from df_ege_sysop
         - "fuel_type", "fuel_subtype", "hybrid_fuel_types": "tipo_tecnologia" and
-          "subtipo_tecnologia" mapped to STAC's vocabulary (s. STAC_FUEL_MAPPING)
+          "subtipo_tecnologia" mapped to STAC's vocabulary (s. FUELS_TO_STAC)
         - "generation_capacity": use "potencia_maxima" column values from df_ege_sysop
         - "storage_power": the same, instead, for batteries
         - "status": the square bracket term in "central", else the registry's "estado",
-          mapped to STAC's vocabulary (s. STAC_NAME_STATUSES, STAC_STATUSES)
+          mapped to STAC's vocabulary (s. STATUSES_TO_STAC)
         - "measurement_type": hard-coded as "gross_output" (s. MEASUREMENT_TYPE)
 
         CEN reports a physical EGE ('central'). Sometimes, these are split into different
@@ -515,11 +519,15 @@ class CenProcessor(EnergyProcessor):
         Returns:
             pd.DataFrame: The fields above, indexed by EGE ID.
         """
+        # Trim dataframe down to the one row per EGE configuration, keeping the newest
         latest = df_ege_sysop.drop_duplicates(subset=["id", CONFIG_COL], keep="last")
         fields_sysop = latest.groupby("id").agg(operator=("operator", "last"))
-        fields_sysop = fields_sysop.join(combine_fuels(self._stac_fuels(latest)))
-        # A battery charges and discharges through one unit: only generating configs counts,
-        # and with several of them no row holds the EGE's own capacity
+
+        # --- ADD ENERGY FIELD(S): fuel_type, fuel_subtype, hybrid_fuel_types
+        fields_sysop = fields_sysop.join(self.fuel_def.map(df=latest))
+
+        # --- ADD ENERGY FIELD(S): generation_capacity, storage_power
+        # Handle batteries: charge & discharge through one unit, only discharging ones count!
         generating = latest[latest["fuel_subtype"] != "Retiro"].groupby("id")
         capacity = (
             generating["generation_capacity"]
@@ -534,22 +542,23 @@ class CenProcessor(EnergyProcessor):
             is_storage.reindex(capacity.index)
         )
 
-        df_ege_locators = self._join_registry(
+        # --- ADD ENERGY FIELD(S): status, entity_name, entity_type, measurement_type
+        # For status, use the square bracket term in the name, else the registry's column
+        df_ege_locators = self._add_registry_columns(
             df_ege_locators, code_col=SYSOP_CODE_COL, cols=["status"]
         )
         names = df_ege_locators[SYSOP_NAME_COL]
+        entity_names = names.map(
+            lambda n: (strip_square_brackets(n) or n) if isinstance(n, str) else n
+        )
+        raw_statuses = names.str.extract(r"\[([^\]]+)\]", expand=False).fillna(
+            df_ege_locators[f"{OFFICIAL_LOCATOR}.status"]
+        )
         fields = pd.DataFrame(
             {
-                "entity_name": names.map(
-                    lambda n: (
-                        (strip_square_brackets(n) or n) if isinstance(n, str) else n
-                    )
-                ).to_numpy(),
-                "entity_type": "facility",  # a CEN 'central' (s. docs/data_sources.md)
-                "status": self._stac_status(
-                    names.str.extract(r"\[([^\]]+)\]", expand=False),
-                    df_ege_locators[f"{OFFICIAL_LOCATOR}.status"],
-                ).to_numpy(),
+                "entity_name": entity_names.to_numpy(),
+                "entity_type": ENTITY_TYPE,
+                "status": self.status_def.map(raw_statuses).to_numpy(),
                 "measurement_type": MEASUREMENT_TYPE,
             },
             index=pd.Index(df_ege_locators["id"], name="id"),
@@ -560,90 +569,7 @@ class CenProcessor(EnergyProcessor):
     # ------------------------------------------------------------------
     # SECONDARY HELPERS
     # ------------------------------------------------------------------
-    @staticmethod
-    def _stac_fuels(df_ege_sysop: pd.DataFrame) -> pd.DataFrame:
-        """Map each EGE's reported technology (type, subtype) to STAC's fuel (s. STAC_FUELS).
-
-        CEN spells the same technology in several ways (e.g. 'Cogeneración' and
-        'Cogeneracion'), so both sides are compared normalized: without case, accents or
-        punctuation (s. `normalize_name`).
-
-        Args:
-            df_ege_sysop (pd.DataFrame): The EGE rows with "id", "id_central", "fuel_type"
-                and "fuel_subtype" as CEN reports them.
-
-        Returns:
-            pd.DataFrame: One row per EGE and reported combination, with "id",
-                "fuel_type" and "fuel_subtype" in STAC's vocabulary.
-
-        Raises:
-            DataStructureError: If a combination has no mapping, listing all such
-                combinations.
-        """
-        fuels = {
-            (normalize_name(main), normalize_name(sub)): fuel
-            for (main, sub), fuel in STAC_FUELS.items()
-        }
-        cogeneration = (
-            normalize_name(COGENERATION[0]),
-            normalize_name(COGENERATION[1]),
-        )
-
-        rows, unknown = [], set()
-        cols = ["id", CODE_COL, "fuel_type", "fuel_subtype"]
-        for ege_id, code, main, sub in (
-            df_ege_sysop[cols].drop_duplicates().itertuples(index=False)
-        ):
-            main = main if isinstance(main, str) else None
-            sub = sub if isinstance(sub, str) else None
-            pair = (normalize_name(main), normalize_name(sub))
-            if pair == cogeneration:
-                fuel = (
-                    STAC_COGENERATION_FUELS.get(int(code)) if pd.notna(code) else None
-                )
-                rows.append((ege_id, *(fuel or (None, None))))
-            elif pair in fuels:
-                rows.append((ege_id, *fuels[pair]))
-            else:
-                unknown.add((main, sub))  # as CEN spells it
-
-        if unknown:
-            raise DataStructureError(
-                f"CEN technology types without a STAC fuel: {sorted(unknown, key=str)}"
-            )
-        # an EGE reported in two spellings maps to the same fuel twice: keep it once
-        return pd.DataFrame(
-            rows, columns=["id", "fuel_type", "fuel_subtype"]
-        ).drop_duplicates(ignore_index=True)
-
-    @staticmethod
-    def _stac_status(name_terms: pd.Series, estado: pd.Series) -> pd.Series:
-        """Map each EGE's status to STAC's - its name's square bracket term, else 'estado'.
-
-        Args:
-            name_terms (pd.Series): The square bracket term in CEN's name per EGE (e.g.
-                "NO_MOSTRAR"; missing if none), s. STAC_NAME_STATUSES.
-            estado (pd.Series): The registry's status per EGE (missing if not listed), s.
-                STAC_STATUSES.
-
-        Returns:
-            pd.Series: The STAC status, missing where neither gives one.
-
-        Raises:
-            DataStructureError: If a term or status has no mapping, listing all such
-                values.
-        """
-        from_name = name_terms.map(STAC_NAME_STATUSES)
-        from_registry = estado.map(STAC_STATUSES)
-        unknown = sorted(
-            set(name_terms[name_terms.notna() & from_name.isna()])
-            | set(estado[estado.notna() & from_registry.isna()])
-        )
-        if unknown:
-            raise DataStructureError(f"CEN statuses without STAC status: {unknown}")
-        return from_name.where(from_name.notna(), from_registry)  # where vs depr fillna
-
-    def _join_registry(
+    def _add_registry_columns(
         self, df: pd.DataFrame, code_col: str, cols: list[str]
     ) -> pd.DataFrame:
         """Join the official CEN registry columns to the rows by EGE ID, as 'official.<col>'.
